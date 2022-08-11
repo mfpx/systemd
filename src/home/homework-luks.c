@@ -4,7 +4,6 @@
 #include <poll.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
-#include <sys/mount.h>
 #include <sys/xattr.h>
 
 #if HAVE_VALGRIND_MEMCHECK_H
@@ -14,11 +13,13 @@
 #include "sd-daemon.h"
 #include "sd-device.h"
 #include "sd-event.h"
+#include "sd-id128.h"
 
 #include "blkid-util.h"
 #include "blockdev-util.h"
 #include "btrfs-util.h"
 #include "chattr-util.h"
+#include "devnum-util.h"
 #include "dm-util.h"
 #include "env-util.h"
 #include "errno-util.h"
@@ -28,11 +29,11 @@
 #include "filesystems.h"
 #include "fs-util.h"
 #include "fsck-util.h"
+#include "glyph-util.h"
 #include "gpt.h"
 #include "home-util.h"
 #include "homework-luks.h"
 #include "homework-mount.h"
-#include "id128-util.h"
 #include "io-util.h"
 #include "keyring-util.h"
 #include "memory-util.h"
@@ -46,7 +47,6 @@
 #include "process-util.h"
 #include "random-util.h"
 #include "resize-fs.h"
-#include "stat-util.h"
 #include "strv.h"
 #include "sync-util.h"
 #include "tmpfile-util.h"
@@ -179,7 +179,7 @@ static int probe_file_system_by_path(const char *path, char **ret_fstype, sd_id1
 
         fd = open(path, O_RDONLY|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
         if (fd < 0)
-                return -errno;
+                return negative_errno();
 
         return probe_file_system_by_fd(fd, ret_fstype, ret_uuid);
 }
@@ -304,7 +304,6 @@ static int luks_try_passwords(
                 size_t *volume_key_size,
                 key_serial_t *ret_key_serial) {
 
-        char **pp;
         int r;
 
         assert(h);
@@ -496,7 +495,7 @@ static int acquire_open_luks_device(
                 return r;
 
         r = sym_crypt_init_by_name(&cd, setup->dm_name);
-        if (IN_SET(r, -ENODEV, -EINVAL, -ENOENT) && graceful)
+        if ((ERRNO_IS_DEVICE_ABSENT(r) || r == -EINVAL) && graceful)
                 return 0;
         if (r < 0)
                 return log_error_errno(r, "Failed to initialize cryptsetup context for %s: %m", setup->dm_name);
@@ -704,7 +703,7 @@ static int luks_validate(
                 if (!pp)
                         return errno > 0 ? -errno : -EIO;
 
-                if (id128_equal_string(blkid_partition_get_type_string(pp), GPT_USER_HOME) <= 0)
+                if (sd_id128_string_equal(blkid_partition_get_type_string(pp), GPT_USER_HOME) <= 0)
                         continue;
 
                 if (!streq_ptr(blkid_partition_get_name(pp), label))
@@ -950,7 +949,7 @@ static int format_luks_token_text(
                 if (!iv)
                         return log_oom();
 
-                r = genuine_random_bytes(iv, iv_size, RANDOM_BLOCK);
+                r = crypto_random_bytes(iv, iv_size);
                 if (r < 0)
                         return log_error_errno(r, "Failed to generate IV: %m");
         }
@@ -1164,12 +1163,12 @@ static int lock_image_fd(int image_fd, const char *ip) {
 
         if (flock(image_fd, LOCK_EX|LOCK_NB) < 0) {
 
-                if (errno == EWOULDBLOCK)
+                if (errno == EAGAIN)
                         log_error_errno(errno, "Image file '%s' already locked, can't use.", ip);
                 else
                         log_error_errno(errno, "Failed to lock image file '%s': %m", ip);
 
-                return errno != EWOULDBLOCK ? -errno : -EADDRINUSE; /* Make error recognizable */
+                return errno != EAGAIN ? -errno : -EADDRINUSE; /* Make error recognizable */
         }
 
         log_info("Successfully locked image file '%s'.", ip);
@@ -1230,7 +1229,7 @@ int home_setup_luks(
                 PasswordCache *cache,
                 UserRecord **ret_luks_home) {
 
-        sd_id128_t found_partition_uuid = SD_ID128_NULL, found_luks_uuid = SD_ID128_NULL, found_fs_uuid = SD_ID128_NULL;
+        sd_id128_t found_partition_uuid, found_fs_uuid, found_luks_uuid = SD_ID128_NULL;
         _cleanup_(user_record_unrefp) UserRecord *luks_home = NULL;
         _cleanup_(erase_and_freep) void *volume_key = NULL;
         size_t volume_key_size = 0;
@@ -1302,7 +1301,7 @@ int home_setup_luks(
                                 return log_error_errno(r, "Failed to stat block device %s: %m", n);
                         assert(S_ISBLK(st.st_mode));
 
-                        if (asprintf(&sysfs, "/sys/dev/block/%u:%u/partition", major(st.st_rdev), minor(st.st_rdev)) < 0)
+                        if (asprintf(&sysfs, "/sys/dev/block/" DEVNUM_FORMAT_STR "/partition", DEVNUM_FORMAT_VAL(st.st_rdev)) < 0)
                                 return log_oom();
 
                         if (access(sysfs, F_OK) < 0) {
@@ -1313,7 +1312,7 @@ int home_setup_luks(
                         } else {
                                 _cleanup_free_ char *buffer = NULL;
 
-                                if (asprintf(&sysfs, "/sys/dev/block/%u:%u/start", major(st.st_rdev), minor(st.st_rdev)) < 0)
+                                if (asprintf(&sysfs, "/sys/dev/block/" DEVNUM_FORMAT_STR "/start", DEVNUM_FORMAT_VAL(st.st_rdev)) < 0)
                                         return log_oom();
 
                                 r = read_one_line_file(sysfs, &buffer);
@@ -1604,7 +1603,7 @@ int home_activate_luks(
 }
 
 int home_deactivate_luks(UserRecord *h, HomeSetup *setup) {
-        bool we_detached;
+        bool we_detached = false;
         int r;
 
         assert(h);
@@ -1620,10 +1619,8 @@ int home_deactivate_luks(UserRecord *h, HomeSetup *setup) {
                 r = acquire_open_luks_device(h, setup, /* graceful= */ true);
                 if (r < 0)
                         return log_error_errno(r, "Failed to initialize cryptsetup context for %s: %m", setup->dm_name);
-                if (r == 0) {
+                if (r == 0)
                         log_debug("LUKS device %s has already been detached.", setup->dm_name);
-                        we_detached = false;
-                }
         }
 
         if (setup->crypt_device) {
@@ -1632,10 +1629,9 @@ int home_deactivate_luks(UserRecord *h, HomeSetup *setup) {
                 cryptsetup_enable_logging(setup->crypt_device);
 
                 r = sym_crypt_deactivate_by_name(setup->crypt_device, setup->dm_name, 0);
-                if (IN_SET(r, -ENODEV, -EINVAL, -ENOENT)) {
+                if (ERRNO_IS_DEVICE_ABSENT(r) || r == -EINVAL)
                         log_debug_errno(r, "LUKS device %s is already detached.", setup->dm_node);
-                        we_detached = false;
-                } else if (r < 0)
+                else if (r < 0)
                         return log_info_errno(r, "LUKS device %s couldn't be deactivated: %m", setup->dm_node);
                 else {
                         log_info("LUKS device detaching completed.");
@@ -1718,7 +1714,6 @@ static int luks_format(
         _cleanup_free_ char *text = NULL;
         size_t volume_key_size;
         int slot = 0, r;
-        char **pp;
 
         assert(node);
         assert(dm_name);
@@ -1740,7 +1735,7 @@ static int luks_format(
         if (!volume_key)
                 return log_oom();
 
-        r = genuine_random_bytes(volume_key, volume_key_size, RANDOM_BLOCK);
+        r = crypto_random_bytes(volume_key, volume_key_size);
         if (r < 0)
                 return log_error_errno(r, "Failed to generate volume key: %m");
 
@@ -2207,7 +2202,7 @@ int home_create_luks(
                 if (!S_ISBLK(st.st_mode))
                         return log_error_errno(SYNTHETIC_ERRNO(ENOTBLK), "Device is not a block device, refusing.");
 
-                if (asprintf(&sysfs, "/sys/dev/block/%u:%u/partition", major(st.st_rdev), minor(st.st_rdev)) < 0)
+                if (asprintf(&sysfs, "/sys/dev/block/" DEVNUM_FORMAT_STR "/partition", DEVNUM_FORMAT_VAL(st.st_rdev)) < 0)
                         return log_oom();
                 if (access(sysfs, F_OK) < 0) {
                         if (errno != ENOENT)
@@ -3309,12 +3304,15 @@ int home_resize_luks(
         if (resize_type == CAN_RESIZE_OFFLINE && FLAGS_SET(flags, HOME_SETUP_ALREADY_ACTIVATED))
                 return log_error_errno(SYNTHETIC_ERRNO(ETXTBSY), "File systems of this type can only be resized offline, but is currently online.");
 
-        log_info("Ready to resize image size %s → %s, partition size %s → %s, file system size %s → %s.",
+        log_info("Ready to resize image size %s %s %s, partition size %s %s %s, file system size %s %s %s.",
                  FORMAT_BYTES(old_image_size),
+                 special_glyph(SPECIAL_GLYPH_ARROW_RIGHT),
                  FORMAT_BYTES(new_image_size),
                  FORMAT_BYTES(setup->partition_size),
+                 special_glyph(SPECIAL_GLYPH_ARROW_RIGHT),
                  FORMAT_BYTES(new_partition_size),
                  FORMAT_BYTES(old_fs_size),
+                 special_glyph(SPECIAL_GLYPH_ARROW_RIGHT),
                  FORMAT_BYTES(new_fs_size));
 
         r = prepare_resize_partition(
@@ -3659,7 +3657,6 @@ static int luks_try_resume(
                 const char *dm_name,
                 char **password) {
 
-        char **pp;
         int r;
 
         assert(cd);

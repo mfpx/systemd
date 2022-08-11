@@ -18,7 +18,7 @@ static const char *arg_root = NULL;
 static bool arg_strict = false;
 
 static int verb_query(int argc, char *argv[], void *userdata) {
-        return hwdb_query(argv[1]);
+        return hwdb_query(argv[1], arg_root);
 }
 
 static int verb_update(int argc, char *argv[], void *userdata) {
@@ -73,8 +73,8 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "ust:r:h", options, NULL)) >= 0)
-                switch(c) {
+        while ((c = getopt_long(argc, argv, "sr:h", options, NULL)) >= 0)
+                switch (c) {
 
                 case 'h':
                         return help();

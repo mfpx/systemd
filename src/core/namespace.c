@@ -4,19 +4,24 @@
 #include <linux/loop.h>
 #include <sched.h>
 #include <stdio.h>
+#include <sys/file.h>
 #include <sys/mount.h>
 #include <unistd.h>
+#if WANT_LINUX_FS_H
 #include <linux/fs.h>
+#endif
 
 #include "alloc-util.h"
 #include "base-filesystem.h"
 #include "chase-symlinks.h"
 #include "dev-setup.h"
+#include "devnum-util.h"
 #include "env-util.h"
 #include "escape.h"
 #include "extension-release.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "glyph-util.h"
 #include "label.h"
 #include "list.h"
 #include "loop-util.h"
@@ -314,8 +319,6 @@ static void mount_entry_done(MountEntry *p) {
 }
 
 static int append_access_mounts(MountEntry **p, char **strv, MountMode mode, bool forcibly_require_prefix) {
-        char **i;
-
         assert(p);
 
         /* Adds a list of user-supplied READWRITE/READWRITE_IMPLICIT/READONLY/INACCESSIBLE entries */
@@ -350,8 +353,6 @@ static int append_access_mounts(MountEntry **p, char **strv, MountMode mode, boo
 }
 
 static int append_empty_dir_mounts(MountEntry **p, char **strv) {
-        char **i;
-
         assert(p);
 
         /* Adds tmpfs mounts to provide readable but empty directories. This is primarily used to implement the
@@ -419,7 +420,6 @@ static int append_extensions(
                 char **extension_directories) {
 
         _cleanup_strv_free_ char **overlays = NULL;
-        char **hierarchy, **extension_directory;
         int r;
 
         if (n == 0 && strv_isempty(extension_directories))
@@ -776,22 +776,20 @@ static void drop_nop(MountEntry *m, size_t *n) {
 
                 /* Only suppress such subtrees for READONLY, READWRITE and READWRITE_IMPLICIT entries */
                 if (IN_SET(f->mode, READONLY, READWRITE, READWRITE_IMPLICIT)) {
-                        MountEntry *p;
-                        bool found = false;
+                        MountEntry *found = NULL;
 
                         /* Now let's find the first parent of the entry we are looking at. */
-                        for (p = t-1; p >= m; p--) {
+                        for (MountEntry *p = PTR_SUB1(t, m); p; p = PTR_SUB1(p, m))
                                 if (path_startswith(mount_entry_path(f), mount_entry_path(p))) {
-                                        found = true;
+                                        found = p;
                                         break;
                                 }
-                        }
 
                         /* We found it, let's see if it's the same mode, if so, we can drop this entry */
-                        if (found && p->mode == f->mode) {
+                        if (found && found->mode == f->mode) {
                                 log_debug("%s (%s) is made redundant by %s (%s)",
                                           mount_entry_path(f), mount_mode_to_string(f->mode),
-                                          mount_entry_path(p), mount_mode_to_string(p->mode));
+                                          mount_entry_path(found), mount_mode_to_string(found->mode));
                                 mount_entry_done(f);
                                 continue;
                         }
@@ -892,10 +890,10 @@ add_symlink:
                 return 0;
 
         /* Create symlinks like /dev/char/1:9 → ../urandom */
-        if (asprintf(&sl, "%s/dev/%s/%u:%u",
+        if (asprintf(&sl, "%s/dev/%s/" DEVNUM_FORMAT_STR,
                      temporary_mount,
                      S_ISCHR(st.st_mode) ? "char" : "block",
-                     major(st.st_rdev), minor(st.st_rdev)) < 0)
+                     DEVNUM_FORMAT_VAL(st.st_rdev)) < 0)
                 return log_oom();
 
         (void) mkdir_parents(sl, 0755);
@@ -932,9 +930,9 @@ static int mount_private_dev(MountEntry *m) {
         if (r < 0)
                 goto fail;
 
-        r = label_fix_container(dev, "/dev", 0);
+        r = label_fix_full(AT_FDCWD, dev, "/dev", 0);
         if (r < 0) {
-                log_debug_errno(errno, "Failed to fix label of '%s' as /dev: %m", dev);
+                log_debug_errno(r, "Failed to fix label of '%s' as /dev: %m", dev);
                 goto fail;
         }
 
@@ -1162,7 +1160,7 @@ static int mount_tmpfs(const MountEntry *m) {
         if (r < 0)
                 return r;
 
-        r = label_fix_container(entry_path, inner_path, 0);
+        r = label_fix_full(AT_FDCWD, entry_path, inner_path, 0);
         if (r < 0)
                 return log_debug_errno(r, "Failed to fix label of '%s' as '%s': %m", entry_path, inner_path);
 
@@ -1223,7 +1221,7 @@ static int mount_image(const MountEntry *m, const char *root_directory) {
         }
 
         r = verity_dissect_and_mount(
-                                mount_entry_source(m), mount_entry_path(m), m->image_options,
+                                /* src_fd= */ -1, mount_entry_source(m), mount_entry_path(m), m->image_options,
                                 host_os_release_id, host_os_release_version_id, host_os_release_sysext_level, NULL);
         if (r == -ENOENT && m->ignore)
                 return 0;
@@ -1284,7 +1282,8 @@ static int follow_symlink(
                                        "Symlink loop on '%s'.",
                                        mount_entry_path(m));
 
-        log_debug("Followed mount entry path symlink %s → %s.", mount_entry_path(m), target);
+        log_debug("Followed mount entry path symlink %s %s %s.",
+                  mount_entry_path(m), special_glyph(SPECIAL_GLYPH_ARROW_RIGHT), target);
 
         mount_entry_consume_prefix(m, TAKE_PTR(target));
 
@@ -1423,7 +1422,8 @@ static int apply_one_mount(
                 if (r < 0)
                         return log_debug_errno(r, "Failed to follow symlinks on %s: %m", mount_entry_source(m));
 
-                log_debug("Followed source symlinks %s → %s.", mount_entry_source(m), chased);
+                log_debug("Followed source symlinks %s %s %s.",
+                          mount_entry_source(m), special_glyph(SPECIAL_GLYPH_ARROW_RIGHT), chased);
 
                 free_and_replace(m->source_malloc, chased);
 
@@ -1709,7 +1709,6 @@ static void drop_unused_mounts(const char *root_directory, MountEntry *mounts, s
 }
 
 static int create_symlinks_from_tuples(const char *root, char **strv_symlinks) {
-        char **src, **dst;
         int r;
 
         STRV_FOREACH_PAIR(src, dst, strv_symlinks) {
@@ -2063,6 +2062,12 @@ int setup_namespace(
                 if (r < 0)
                         return log_debug_errno(r, "Failed to create loop device for root image: %m");
 
+                /* Make sure udevd won't issue BLKRRPART (which might flush out the loaded partition table)
+                 * while we are still trying to mount things */
+                r = loop_device_flock(loop_device, LOCK_SH);
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to lock loopback device with LOCK_SH: %m");
+
                 r = dissect_image(
                                 loop_device->fd,
                                 &verity,
@@ -2411,6 +2416,14 @@ int setup_namespace(
                         goto finish;
                 }
 
+                /* Now release the block device lock, so that udevd is free to call BLKRRPART on the device
+                 * if it likes. */
+                r = loop_device_flock(loop_device, LOCK_UN);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to release lock on loopback block device: %m");
+                        goto finish;
+                }
+
                 if (decrypted_image) {
                         r = decrypted_image_relinquish(decrypted_image);
                         if (r < 0) {
@@ -2419,6 +2432,7 @@ int setup_namespace(
                         }
                 }
 
+                dissected_image_relinquish(dissected_image);
                 loop_device_relinquish(loop_device);
 
         } else if (root_directory) {
@@ -2562,7 +2576,6 @@ MountImage* mount_image_free_many(MountImage *m, size_t *n) {
 int mount_image_add(MountImage **m, size_t *n, const MountImage *item) {
         _cleanup_free_ char *s = NULL, *d = NULL;
         _cleanup_(mount_options_free_allp) MountOptions *options = NULL;
-        MountOptions *i;
         MountImage *c;
 
         assert(m);
@@ -2747,7 +2760,7 @@ static int setup_one_tmp_dir(const char *id, const char *prefix, char **path, ch
                         if (mkdir(y, 0777 | S_ISVTX) < 0)
                                     return -errno;
 
-                r = label_fix_container(y, prefix, 0);
+                r = label_fix_full(AT_FDCWD, y, prefix, 0);
                 if (r < 0)
                         return r;
 

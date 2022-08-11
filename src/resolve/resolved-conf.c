@@ -225,7 +225,7 @@ int config_parse_dnssd_service_name(
                 { 'a', specifier_architecture,    NULL },
                 { 'b', specifier_boot_id,         NULL },
                 { 'B', specifier_os_build_id,     NULL },
-                { 'H', specifier_host_name,       NULL }, /* We will use specifier_dnssd_host_name(). */
+                { 'H', specifier_hostname,        NULL }, /* We will use specifier_dnssd_hostname(). */
                 { 'm', specifier_machine_id,      NULL },
                 { 'o', specifier_os_id,           NULL },
                 { 'v', specifier_kernel_release,  NULL },
@@ -390,11 +390,11 @@ int config_parse_dnssd_txt(
                         assert_not_reached();
                 }
 
-                LIST_INSERT_AFTER(items, txt_data->txt, last, i);
+                LIST_INSERT_AFTER(items, txt_data->txts, last, i);
                 last = i;
         }
 
-        if (!LIST_IS_EMPTY(txt_data->txt)) {
+        if (txt_data->txts) {
                 LIST_PREPEND(items, s->txt_data_items, txt_data);
                 TAKE_PTR(txt_data);
         }

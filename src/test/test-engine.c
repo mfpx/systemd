@@ -93,7 +93,7 @@ int main(int argc, char *argv[]) {
         assert_se(set_unit_path(unit_dir) >= 0);
         assert_se(runtime_dir = setup_fake_runtime_dir());
 
-        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_BASIC, &m);
+        r = manager_new(LOOKUP_SCOPE_USER, MANAGER_TEST_RUN_BASIC, &m);
         if (manager_errno_skip_test(r))
                 return log_tests_skipped_errno(r, "manager_new");
         assert_se(r >= 0);
@@ -189,8 +189,8 @@ int main(int argc, char *argv[]) {
         assert_se(!hashmap_get(unit_get_dependencies(a, UNIT_PROPAGATES_RELOAD_TO), c));
         assert_se(!hashmap_get(unit_get_dependencies(c, UNIT_RELOAD_PROPAGATED_FROM), a));
 
-        assert_se(unit_add_dependency(a, UNIT_PROPAGATES_RELOAD_TO, b, true, UNIT_DEPENDENCY_UDEV) == 0);
-        assert_se(unit_add_dependency(a, UNIT_PROPAGATES_RELOAD_TO, c, true, UNIT_DEPENDENCY_PROC_SWAP) == 0);
+        assert_se(unit_add_dependency(a, UNIT_PROPAGATES_RELOAD_TO, b, true, UNIT_DEPENDENCY_UDEV) >= 0);
+        assert_se(unit_add_dependency(a, UNIT_PROPAGATES_RELOAD_TO, c, true, UNIT_DEPENDENCY_PROC_SWAP) >= 0);
 
         assert_se( hashmap_get(unit_get_dependencies(a, UNIT_PROPAGATES_RELOAD_TO), b));
         assert_se( hashmap_get(unit_get_dependencies(b, UNIT_RELOAD_PROPAGATED_FROM), a));

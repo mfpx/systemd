@@ -36,7 +36,7 @@
 
     <para>For command line parameters understood by the kernel, please
     see
-    <ulink url="https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html"><filename>kernel-parameters.html</filename></ulink>
+    <ulink url="https://docs.kernel.org/admin-guide/kernel-parameters.html"><filename>kernel-parameters.html</filename></ulink>
     and
     <citerefentry project='man-pages'><refentrytitle>bootparam</refentrytitle><manvolnum>7</manvolnum></citerefentry>.</para>
 
@@ -73,6 +73,8 @@
         <term><varname>systemd.machine_id=</varname></term>
         <term><varname>systemd.unified_cgroup_hierarchy</varname></term>
         <term><varname>systemd.legacy_systemd_cgroup_controller</varname></term>
+        <term><varname>systemd.set_credential=</varname></term>
+        <term><varname>systemd.import_credentials=</varname></term>
         <listitem>
           <para>Parameters understood by the system and service
           manager to control system behavior. For details, see

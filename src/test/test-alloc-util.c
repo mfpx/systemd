@@ -145,7 +145,7 @@ TEST(auto_erase_memory) {
                                              * end of the allocation, since malloc() enforces alignment */
         assert_se(p2 = new(uint8_t, 4703));
 
-        assert_se(genuine_random_bytes(p1, 4703, RANDOM_BLOCK) == 0);
+        assert_se(crypto_random_bytes(p1, 4703) == 0);
 
         /* before we exit the scope, do something with this data, so that the compiler won't optimize this away */
         memcpy(p2, p1, 4703);
@@ -163,7 +163,7 @@ TEST(auto_erase_memory) {
                 assert_se(MALLOC_SIZEOF_SAFE(f) >= sizeof(*f) * n);     \
                 assert_se(malloc_usable_size(f) >= sizeof(*f) * n);     \
                 assert_se(__builtin_object_size(f, 0) >= sizeof(*f) * n); \
-        } while(false)
+        } while (false)
 
 TEST(malloc_size_safe) {
         _cleanup_free_ uint32_t *f = NULL;

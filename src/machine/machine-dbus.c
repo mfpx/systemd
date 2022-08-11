@@ -928,6 +928,20 @@ int bus_machine_method_copy(sd_bus_message *message, void *userdata, sd_bus_erro
         if (r < 0)
                 return r;
 
+        if (endswith(sd_bus_message_get_member(message), "WithFlags")) {
+                uint64_t raw_flags;
+
+                r = sd_bus_message_read(message, "t", &raw_flags);
+                if (r < 0)
+                        return r;
+
+                if ((raw_flags & ~_MACHINE_COPY_FLAGS_MASK_PUBLIC) != 0)
+                        return -EINVAL;
+
+                if (raw_flags & MACHINE_COPY_REPLACE)
+                        copy_flags |= COPY_REPLACE;
+        }
+
         if (!path_is_absolute(src))
                 return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS, "Source path must be absolute.");
 
@@ -1278,85 +1292,71 @@ static const sd_bus_vtable machine_vtable[] = {
                       NULL,
                       bus_machine_method_terminate,
                       SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("Kill",
-                                 "si",
-                                 SD_BUS_PARAM(who)
-                                 SD_BUS_PARAM(signal),
-                                 NULL,,
-                                 bus_machine_method_kill,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("GetAddresses",
-                                 NULL,,
-                                 "a(iay)",
-                                 SD_BUS_PARAM(addresses),
-                                 bus_machine_method_get_addresses,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("GetOSRelease",
-                                 NULL,,
-                                 "a{ss}",
-                                 SD_BUS_PARAM(fields),
-                                 bus_machine_method_get_os_release,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("GetUIDShift",
-                                 NULL,,
-                                 "u",
-                                 SD_BUS_PARAM(shift),
-                                 bus_machine_method_get_uid_shift,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("OpenPTY",
-                                 NULL,,
-                                 "hs",
-                                 SD_BUS_PARAM(pty)
-                                 SD_BUS_PARAM(pty_path),
-                                 bus_machine_method_open_pty,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("OpenLogin",
-                                 NULL,,
-                                 "hs",
-                                 SD_BUS_PARAM(pty)
-                                 SD_BUS_PARAM(pty_path),
-                                 bus_machine_method_open_login,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("OpenShell",
-                                 "ssasas",
-                                 SD_BUS_PARAM(user)
-                                 SD_BUS_PARAM(path)
-                                 SD_BUS_PARAM(args)
-                                 SD_BUS_PARAM(environment),
-                                 "hs",
-                                 SD_BUS_PARAM(pty)
-                                 SD_BUS_PARAM(pty_path),
-                                 bus_machine_method_open_shell,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("BindMount",
-                                 "ssbb",
-                                 SD_BUS_PARAM(source)
-                                 SD_BUS_PARAM(destination)
-                                 SD_BUS_PARAM(read_only)
-                                 SD_BUS_PARAM(mkdir),
-                                 NULL,,
-                                 bus_machine_method_bind_mount,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("CopyFrom",
-                                 "ss",
-                                 SD_BUS_PARAM(source)
-                                 SD_BUS_PARAM(destination),
-                                 NULL,,
-                                 bus_machine_method_copy,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("CopyTo",
-                                 "ss",
-                                 SD_BUS_PARAM(source)
-                                 SD_BUS_PARAM(destination),
-                                 NULL,,
-                                 bus_machine_method_copy,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("OpenRootDirectory",
-                                 NULL,,
-                                 "h",
-                                 SD_BUS_PARAM(fd),
-                                 bus_machine_method_open_root_directory,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("Kill",
+                                SD_BUS_ARGS("s", who, "i", signal),
+                                SD_BUS_NO_RESULT,
+                                bus_machine_method_kill,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("GetAddresses",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("a(iay)", addresses),
+                                bus_machine_method_get_addresses,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("GetOSRelease",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("a{ss}", fields),
+                                bus_machine_method_get_os_release,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("GetUIDShift",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("u", shift),
+                                bus_machine_method_get_uid_shift,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("OpenPTY",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("h", pty, "s", pty_path),
+                                bus_machine_method_open_pty,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("OpenLogin",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("h", pty, "s", pty_path),
+                                bus_machine_method_open_login,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("OpenShell",
+                                SD_BUS_ARGS("s", user, "s", path, "as", args, "as", environment),
+                                SD_BUS_RESULT("h", pty, "s", pty_path),
+                                bus_machine_method_open_shell,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("BindMount",
+                                SD_BUS_ARGS("s", source, "s", destination, "b", read_only, "b", mkdir),
+                                SD_BUS_NO_RESULT,
+                                bus_machine_method_bind_mount,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("CopyFrom",
+                                SD_BUS_ARGS("s", source, "s", destination),
+                                SD_BUS_NO_RESULT,
+                                bus_machine_method_copy,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("CopyTo",
+                                SD_BUS_ARGS("s", source, "s", destination),
+                                SD_BUS_NO_RESULT,
+                                bus_machine_method_copy,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("CopyFromWithFlags",
+                                SD_BUS_ARGS("s", source, "s", destination, "t", flags),
+                                SD_BUS_NO_RESULT,
+                                bus_machine_method_copy,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("CopyToWithFlags",
+                                SD_BUS_ARGS("s", source, "s", destination, "t", flags),
+                                SD_BUS_NO_RESULT,
+                                bus_machine_method_copy,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("OpenRootDirectory",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("h", fd),
+                                bus_machine_method_open_root_directory,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
 
         SD_BUS_VTABLE_END
 };

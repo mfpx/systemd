@@ -61,9 +61,6 @@ int main(int argc, char *argv[]) {
         r = bpf_program_add_instructions(p, exit_insn, ELEMENTSOF(exit_insn));
         assert_se(r == 0);
 
-        if (getuid() != 0)
-                return log_tests_skipped("not running as root");
-
         r = bpf_firewall_supported();
         if (r == BPF_FIREWALL_UNSUPPORTED)
                 return log_tests_skipped("BPF firewalling not supported");
@@ -97,7 +94,7 @@ int main(int argc, char *argv[]) {
 
         /* The simple tests succeeded. Now let's try full unit-based use-case. */
 
-        assert_se(manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_BASIC, &m) >= 0);
+        assert_se(manager_new(LOOKUP_SCOPE_USER, MANAGER_TEST_RUN_BASIC, &m) >= 0);
         assert_se(manager_startup(m, NULL, NULL, NULL) >= 0);
 
         assert_se(u = unit_new(m, sizeof(Service)));

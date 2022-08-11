@@ -98,13 +98,13 @@ def test_valid_specifiers(*, user):
         test_content('f {} - - - - %b', '{}'.format(id128.get_boot().hex), user=user)
     test_content('f {} - - - - %H', '{}'.format(socket.gethostname()), user=user)
     test_content('f {} - - - - %v', '{}'.format(os.uname().release), user=user)
-    test_content('f {} - - - - %U', '{}'.format(os.getuid()), user=user)
-    test_content('f {} - - - - %G', '{}'.format(os.getgid()), user=user)
+    test_content('f {} - - - - %U', '{}'.format(os.getuid() if user else 0), user=user)
+    test_content('f {} - - - - %G', '{}'.format(os.getgid() if user else 0), user=user)
 
-    puser = pwd.getpwuid(os.getuid())
+    puser = pwd.getpwuid(os.getuid() if user else 0)
     test_content('f {} - - - - %u', '{}'.format(puser.pw_name), user=user)
 
-    pgroup = grp.getgrgid(os.getgid())
+    pgroup = grp.getgrgid(os.getgid() if user else 0)
     test_content('f {} - - - - %g', '{}'.format(pgroup.gr_name), user=user)
 
     # Note that %h is the only specifier in which we look the environment,
@@ -188,6 +188,14 @@ def test_hard_cleanup(*, user):
     label = 'valid_symlink-deep'
     test_content('f= {} - - - - ' + label, label, user=user, subpath='/deep/1/2', path_cb=valid_symlink)
 
+def test_base64():
+    test_line('f~ /tmp/base64-test - - - - UGlmZgpQYWZmClB1ZmYgCg==', user=False, returncode=0)
+
+    with open("/tmp/base64-test", mode='r') as f:
+        d = f.read()
+
+    assert d == "Piff\nPaff\nPuff \n"
+
 if __name__ == '__main__':
     test_invalids(user=False)
     test_invalids(user=True)
@@ -198,3 +206,5 @@ if __name__ == '__main__':
 
     test_hard_cleanup(user=False)
     test_hard_cleanup(user=True)
+
+    test_base64()

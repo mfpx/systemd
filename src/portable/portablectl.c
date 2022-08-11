@@ -90,7 +90,6 @@ static int determine_image(const char *image, bool permit_non_existing, char **r
 }
 
 static int attach_extensions_to_message(sd_bus_message *m, char **extensions) {
-        char **p;
         int r;
 
         assert(m);
@@ -580,7 +579,9 @@ static int maybe_enable_disable(sd_bus *bus, const char *path, bool enable) {
                 if (r < 0)
                         return bus_log_parse_error(r);
         }
+
         (void) bus_deserialize_and_dump_unit_file_changes(reply, arg_quiet, &changes, &n_changes);
+        unit_file_changes_free(changes, n_changes);
 
         return 0;
 }
@@ -596,11 +597,9 @@ static int maybe_start_stop_restart(sd_bus *bus, const char *path, const char *m
         if (!arg_now)
                 return 0;
 
-        r = sd_bus_call_method(
+        r = bus_call_method(
                         bus,
-                        "org.freedesktop.systemd1",
-                        "/org/freedesktop/systemd1",
-                        "org.freedesktop.systemd1.Manager",
+                        bus_systemd_mgr,
                         method,
                         &error,
                         &reply,
@@ -1174,7 +1173,6 @@ static int dump_profiles(void) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         _cleanup_strv_free_ char **l = NULL;
-        char **i;
         int r;
 
         r = acquire_bus(&bus);

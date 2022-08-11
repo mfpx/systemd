@@ -263,7 +263,7 @@
         on executables with setuid or setgid bits and will thus not
         function properly with this option enabled. Individual units
         cannot disable this option.
-        Also see <ulink url="https://www.kernel.org/doc/html/latest/userspace-api/no_new_privs.html">No New Privileges Flag</ulink>.
+        Also see <ulink url="https://docs.kernel.org/userspace-api/no_new_privs.html">No New Privileges Flag</ulink>.
         </para></listitem>
       </varlistentry>
 
@@ -368,6 +368,17 @@
         so that all units fall back to <varname>TimeoutStopSec=</varname>.
         <varname>DefaultRestartSec=</varname> defaults to
         100ms.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>DefaultDeviceTimeoutSec=</varname></term>
+
+        <listitem><para>Configures the default timeout for waiting for devices. It can be changed per
+        device via the <varname>x-systemd.device-timeout=</varname> option in <filename>/etc/fstab</filename>
+        and <filename>/etc/crypttab</filename> (see
+        <citerefentry><refentrytitle>systemd.mount</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
+        <citerefentry><refentrytitle>crypttab</refentrytitle><manvolnum>5</manvolnum></citerefentry>).
+        Defaults to 90s.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -505,7 +516,7 @@
         <term><varname>DefaultOOMPolicy=</varname></term>
 
         <listitem><para>Configure the default policy for reacting to processes being killed by the Linux
-        Out-Of-Memory (OOM) killer. This may be used to pick a global default for the per-unit
+        Out-Of-Memory (OOM) killer or <command>systemd-oomd</command>. This may be used to pick a global default for the per-unit
         <varname>OOMPolicy=</varname> setting. See
         <citerefentry><refentrytitle>systemd.service</refentrytitle><manvolnum>5</manvolnum></citerefentry>
         for details. Note that this default is not used for services that have <varname>Delegate=</varname>
@@ -524,6 +535,18 @@
         <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry> for
         details. Note that this setting has no effect on the OOM score adjustment value of the service
         manager process itself, it retains the original value set during its invocation.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>DefaultSmackProcessLabel=</varname></term>
+
+        <listitem><para>Takes a <option>SMACK64</option> security label as the argument. The process executed
+        by a unit will be started under this label if <varname>SmackProcessLabel=</varname> is not set in the
+        unit. See <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+        for the details.</para>
+
+        <para>If the value is <literal>/</literal>, only labels specified with <varname>SmackProcessLabel=</varname>
+        are assigned and the compile-time default is ignored.</para></listitem>
       </varlistentry>
     </variablelist>
   </refsect1>

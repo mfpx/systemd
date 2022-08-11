@@ -4,6 +4,7 @@
 
 #include "event-source.h"
 #include "event-util.h"
+#include "fd-util.h"
 #include "log.h"
 #include "string-util.h"
 
@@ -108,16 +109,40 @@ int event_reset_time_relative(
         return event_reset_time(e, s, clock, usec_add(usec_now, usec), accuracy, callback, userdata, priority, description, force_reset);
 }
 
-int event_source_disable(sd_event_source *s) {
-        if (!s)
-                return 0;
+int event_add_time_change(sd_event *e, sd_event_source **ret, sd_event_io_handler_t callback, void *userdata) {
+        _cleanup_(sd_event_source_unrefp) sd_event_source *s = NULL;
+        _cleanup_close_ int fd = -1;
+        int r;
 
-        return sd_event_source_set_enabled(s, SD_EVENT_OFF);
-}
+        assert(e);
 
-int event_source_is_enabled(sd_event_source *s) {
-        if (!s)
-                return false;
+        /* Allocates an IO event source that gets woken up whenever the clock changes. Needs to be recreated on each event */
 
-        return sd_event_source_get_enabled(s, NULL);
+        fd = time_change_fd();
+        if (fd < 0)
+                return fd;
+
+        r = sd_event_add_io(e, &s, fd, EPOLLIN, callback, userdata);
+        if (r < 0)
+                return r;
+
+        r = sd_event_source_set_io_fd_own(s, true);
+        if (r < 0)
+                return r;
+
+        TAKE_FD(fd);
+
+        r = sd_event_source_set_description(s, "time-change");
+        if (r < 0)
+                return r;
+
+        if (ret)
+                *ret = TAKE_PTR(s);
+        else {
+                r = sd_event_source_set_floating(s, true);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
 }

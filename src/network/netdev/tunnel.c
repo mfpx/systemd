@@ -7,6 +7,7 @@
 #include <linux/ip.h>
 #include <linux/ip6_tunnel.h>
 
+#include "af-list.h"
 #include "conf-parser.h"
 #include "hexdecoct.h"
 #include "missing_network.h"
@@ -334,9 +335,24 @@ static int netdev_gre_erspan_fill_message_create(NetDev *netdev, Link *link, sd_
         }
 
         if (netdev->kind == NETDEV_KIND_ERSPAN) {
-                r = sd_netlink_message_append_u32(m, IFLA_GRE_ERSPAN_INDEX, t->erspan_index);
+                r = sd_netlink_message_append_u8(m, IFLA_GRE_ERSPAN_VER, t->erspan_version);
                 if (r < 0)
                         return r;
+
+                if (t->erspan_version == 1) {
+                        r = sd_netlink_message_append_u32(m, IFLA_GRE_ERSPAN_INDEX, t->erspan_index);
+                        if (r < 0)
+                                return r;
+
+                } else if (t->erspan_version == 2) {
+                        r = sd_netlink_message_append_u8(m, IFLA_GRE_ERSPAN_DIR, t->erspan_direction);
+                        if (r < 0)
+                                return r;
+
+                        r = sd_netlink_message_append_u16(m, IFLA_GRE_ERSPAN_HWID, t->erspan_hwid);
+                        if (r < 0)
+                                return r;
+                }
         }
 
         r = tunnel_get_local_address(t, link, &local);
@@ -719,9 +735,6 @@ static int netdev_tunnel_verify(NetDev *netdev, const char *filename) {
                 return log_netdev_error_errno(netdev, SYNTHETIC_ERRNO(EINVAL),
                                               "FooOverUDP missing port configured in %s. Ignoring", filename);
 
-        if (netdev->kind == NETDEV_KIND_ERSPAN && (t->erspan_index >= (1 << 20) || t->erspan_index == 0))
-                return log_netdev_error_errno(netdev, SYNTHETIC_ERRNO(EINVAL), "Invalid erspan index %d. Ignoring", t->erspan_index);
-
         /* netlink_message_append_in_addr_union() is used for vti/vti6. So, t->family cannot be AF_UNSPEC. */
         if (netdev->kind == NETDEV_KIND_VTI)
                 t->family = AF_INET;
@@ -733,6 +746,20 @@ static int netdev_tunnel_verify(NetDev *netdev, const char *filename) {
                 return log_netdev_error_errno(netdev, SYNTHETIC_ERRNO(EINVAL),
                                               "The local address cannot be '%s' when Independent= or AssignToLoopback= is enabled, ignoring.",
                                               strna(netdev_local_address_type_to_string(t->local_type)));
+
+        return 0;
+}
+
+static int unset_local(Tunnel *t) {
+        assert(t);
+
+        /* Unset the previous assignment. */
+        t->local = IN_ADDR_NULL;
+        t->local_type = _NETDEV_LOCAL_ADDRESS_TYPE_INVALID;
+
+        /* If the remote address is not specified, also clear the address family. */
+        if (!in_addr_is_set(t->family, &t->remote))
+                t->family = AF_UNSPEC;
 
         return 0;
 }
@@ -759,16 +786,8 @@ int config_parse_tunnel_local_address(
         assert(rvalue);
         assert(userdata);
 
-        if (isempty(rvalue) || streq(rvalue, "any")) {
-                /* Unset the previous assignment. */
-                t->local = IN_ADDR_NULL;
-                t->local_type = _NETDEV_LOCAL_ADDRESS_TYPE_INVALID;
-
-                /* If the remote address is not specified, also clear the address family. */
-                if (!in_addr_is_set(t->family, &t->remote))
-                        t->family = AF_UNSPEC;
-                return 0;
-        }
+        if (isempty(rvalue) || streq(rvalue, "any"))
+                return unset_local(t);
 
         type = netdev_local_address_type_from_string(rvalue);
         if (IN_SET(type, NETDEV_LOCAL_ADDRESS_IPV4LL, NETDEV_LOCAL_ADDRESS_DHCP4))
@@ -783,6 +802,9 @@ int config_parse_tunnel_local_address(
                                    "Tunnel address \"%s\" invalid, ignoring assignment: %m", rvalue);
                         return 0;
                 }
+
+                if (in_addr_is_null(f, &buffer))
+                        return unset_local(t);
         }
 
         if (t->family != AF_UNSPEC && t->family != f) {
@@ -794,6 +816,20 @@ int config_parse_tunnel_local_address(
         t->family = f;
         t->local = buffer;
         t->local_type = type;
+        return 0;
+}
+
+static int unset_remote(Tunnel *t) {
+        assert(t);
+
+        /* Unset the previous assignment. */
+        t->remote = IN_ADDR_NULL;
+
+        /* If the local address is not specified, also clear the address family. */
+        if (t->local_type == _NETDEV_LOCAL_ADDRESS_TYPE_INVALID &&
+            !in_addr_is_set(t->family, &t->local))
+                t->family = AF_UNSPEC;
+
         return 0;
 }
 
@@ -818,16 +854,8 @@ int config_parse_tunnel_remote_address(
         assert(rvalue);
         assert(userdata);
 
-        if (isempty(rvalue) || streq(rvalue, "any")) {
-                /* Unset the previous assignment. */
-                t->remote = IN_ADDR_NULL;
-
-                /* If the local address is not specified, also clear the address family. */
-                if (t->local_type == _NETDEV_LOCAL_ADDRESS_TYPE_INVALID &&
-                    !in_addr_is_set(t->family, &t->local))
-                        t->family = AF_UNSPEC;
-                return 0;
-        }
+        if (isempty(rvalue) || streq(rvalue, "any"))
+                return unset_remote(t);
 
         r = in_addr_from_string_auto(rvalue, &f, &buffer);
         if (r < 0) {
@@ -835,6 +863,9 @@ int config_parse_tunnel_remote_address(
                            "Tunnel address \"%s\" invalid, ignoring assignment: %m", rvalue);
                 return 0;
         }
+
+        if (in_addr_is_null(f, &buffer))
+                return unset_remote(t);
 
         if (t->family != AF_UNSPEC && t->family != f) {
                 log_syntax(unit, LOG_WARNING, filename, line, 0,
@@ -1002,6 +1033,155 @@ int config_parse_6rd_prefix(
         return 0;
 }
 
+int config_parse_erspan_version(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint8_t n, *v = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *v = 1; /* defaults to 1 */
+                return 0;
+        }
+
+        r = safe_atou8(rvalue, &n);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to parse erspan version \"%s\", ignoring: %m", rvalue);
+                return 0;
+        }
+        if (!IN_SET(n, 0, 1, 2)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid erspan version \"%s\", which must be 0, 1 or 2, ignoring.", rvalue);
+                return 0;
+        }
+
+        *v = n;
+        return 0;
+}
+
+int config_parse_erspan_index(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint32_t n, *v = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *v = 0; /* defaults to 0 */
+                return 0;
+        }
+
+        r = safe_atou32(rvalue, &n);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to parse erspan index \"%s\", ignoring: %m", rvalue);
+                return 0;
+        }
+        if (n >= 0x100000) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid erspan index \"%s\", which must be less than 0x100000, ignoring.", rvalue);
+                return 0;
+        }
+
+        *v = n;
+        return 0;
+}
+
+int config_parse_erspan_direction(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint8_t *v = ASSERT_PTR(data);
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue) || streq(rvalue, "ingress"))
+                *v = 0; /* defaults to ingress */
+        else if (streq(rvalue, "egress"))
+                *v = 1;
+        else
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid erspan direction \"%s\", which must be \"ingress\" or \"egress\", ignoring.", rvalue);
+
+        return 0;
+}
+
+int config_parse_erspan_hwid(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint16_t n, *v = ASSERT_PTR(data);
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *v = 0; /* defaults to 0 */
+                return 0;
+        }
+
+        r = safe_atou16(rvalue, &n);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to parse erspan hwid \"%s\", ignoring: %m", rvalue);
+                return 0;
+        }
+        if (n >= 64) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid erspan index \"%s\", which must be less than 64, ignoring.", rvalue);
+                return 0;
+        }
+
+        *v = n;
+        return 0;
+}
+
 static void netdev_tunnel_init(NetDev *netdev) {
         Tunnel *t;
 
@@ -1020,6 +1200,7 @@ static void netdev_tunnel_init(NetDev *netdev) {
         t->ip6tnl_mode = _NETDEV_IP6_TNL_MODE_INVALID;
         t->ipv6_flowlabel = _NETDEV_IPV6_FLOWLABEL_INVALID;
         t->allow_localremote = -1;
+        t->erspan_version = 1;
 
         if (IN_SET(netdev->kind, NETDEV_KIND_IP6GRE, NETDEV_KIND_IP6GRETAP, NETDEV_KIND_IP6TNL))
                 t->ttl = DEFAULT_IPV6_TTL;

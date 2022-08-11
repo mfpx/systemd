@@ -3,6 +3,9 @@
 # shellcheck disable=SC2016
 set -eux
 
+# shellcheck source=test/units/assert.sh
+. "$(dirname "$0")"/assert.sh
+
 systemd-analyze log-level debug
 export SYSTEMD_LOG_LEVEL=debug
 
@@ -68,6 +71,7 @@ rm /tmp/testfile2.service
 cat <<EOF >/tmp/testfile.service
 [Service]
 ExecStart = echo hello
+DeviceAllow=/dev/sda
 EOF
 
 # Prevent regression from #13380 and #20859 where we can't verify hidden files
@@ -93,6 +97,9 @@ set +e
 systemd-analyze security --threshold=90 --offline=true /tmp/testfile.service \
     && { echo 'unexpected success'; exit 1; }
 set -e
+
+# Ensure we print the list of ACLs, see https://github.com/systemd/systemd/issues/23185
+systemd-analyze security --offline=true /tmp/testfile.service | grep -q -F "/dev/sda"
 
 rm /tmp/testfile.service
 
@@ -575,14 +582,14 @@ systemd-analyze security --threshold=90 --offline=true \
                            --root=/tmp/img/ testfile.service
 
 # The strict profile adds a lot of sanboxing options
-systemd-analyze security --threshold=20 --offline=true \
+systemd-analyze security --threshold=25 --offline=true \
                            --security-policy=/tmp/testfile.json \
                            --profile=strict \
                            --root=/tmp/img/ testfile.service
 
 set +e
 # The trusted profile doesn't add any sanboxing options
-systemd-analyze security --threshold=20 --offline=true \
+systemd-analyze security --threshold=25 --offline=true \
                            --security-policy=/tmp/testfile.json \
                            --profile=/usr/lib/systemd/portable/profile/trusted/service.conf \
                            --root=/tmp/img/ testfile.service \
@@ -599,6 +606,65 @@ rm /tmp/img/usr/lib/systemd/system/testfile.service
 if systemd-analyze --version | grep -q -F "+ELFUTILS"; then
     systemd-analyze inspect-elf --json=short /lib/systemd/systemd | grep -q -F '"elfType":"executable"'
 fi
+
+systemd-analyze --threshold=90 security systemd-journald.service
+
+# issue 23663
+check() {(
+    set +x
+    output=$(systemd-analyze security --offline="${2?}" "${3?}" | grep -F 'SystemCallFilter=')
+    assert_in "System call ${1?} list" "$output"
+    assert_in "[+✓] SystemCallFilter=~@swap" "$output"
+    assert_in "[+✓] SystemCallFilter=~@resources" "$output"
+    assert_in "[+✓] SystemCallFilter=~@reboot" "$output"
+    assert_in "[+✓] SystemCallFilter=~@raw-io" "$output"
+    assert_in "[-✗] SystemCallFilter=~@privileged" "$output"
+    assert_in "[+✓] SystemCallFilter=~@obsolete" "$output"
+    assert_in "[+✓] SystemCallFilter=~@mount" "$output"
+    assert_in "[+✓] SystemCallFilter=~@module" "$output"
+    assert_in "[+✓] SystemCallFilter=~@debug" "$output"
+    assert_in "[+✓] SystemCallFilter=~@cpu-emulation" "$output"
+    assert_in "[-✗] SystemCallFilter=~@clock" "$output"
+)}
+
+export -n SYSTEMD_LOG_LEVEL
+
+mkdir -p /run/systemd/system
+cat >/run/systemd/system/allow-list.service <<EOF
+[Service]
+ExecStart=false
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources:ENOANO @privileged
+SystemCallFilter=@clock
+EOF
+
+cat >/run/systemd/system/deny-list.service <<EOF
+[Service]
+ExecStart=false
+SystemCallFilter=~@known
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources:ENOANO @privileged
+SystemCallFilter=@clock
+EOF
+
+systemctl daemon-reload
+
+check allow yes /run/systemd/system/allow-list.service
+check allow no allow-list.service
+check deny yes /run/systemd/system/deny-list.service
+check deny no deny-list.service
+
+output=$(systemd-run -p "SystemCallFilter=@system-service" -p "SystemCallFilter=~@resources:ENOANO @privileged" -p "SystemCallFilter=@clock" sleep 60 2>&1)
+name=$(echo "$output" | awk '{ print $4 }')
+
+check allow yes /run/systemd/transient/"$name"
+check allow no "$name"
+
+output=$(systemd-run -p "SystemCallFilter=~@known" -p "SystemCallFilter=@system-service" -p "SystemCallFilter=~@resources:ENOANO @privileged" -p "SystemCallFilter=@clock" sleep 60 2>&1)
+name=$(echo "$output" | awk '{ print $4 }')
+
+check deny yes /run/systemd/transient/"$name"
+check deny no "$name"
 
 systemd-analyze log-level info
 

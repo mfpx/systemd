@@ -53,8 +53,8 @@ typedef enum {
         PROP_CHASSIS,
         PROP_DEPLOYMENT,
         PROP_LOCATION,
-        PROP_VENDOR,
-        PROP_MODEL,
+        PROP_HARDWARE_VENDOR,
+        PROP_HARDWARE_MODEL,
 
         /* Read from /etc/os-release (or /usr/lib/os-release) */
         PROP_OS_PRETTY_NAME,
@@ -128,7 +128,9 @@ static void context_read_machine_info(Context *c) {
                       (UINT64_C(1) << PROP_ICON_NAME) |
                       (UINT64_C(1) << PROP_CHASSIS) |
                       (UINT64_C(1) << PROP_DEPLOYMENT) |
-                      (UINT64_C(1) << PROP_LOCATION));
+                      (UINT64_C(1) << PROP_LOCATION) |
+                      (UINT64_C(1) << PROP_HARDWARE_VENDOR) |
+                      (UINT64_C(1) << PROP_HARDWARE_MODEL));
 
         r = parse_env_file(NULL, "/etc/machine-info",
                            "PRETTY_HOSTNAME", &c->data[PROP_PRETTY_HOSTNAME],
@@ -136,8 +138,8 @@ static void context_read_machine_info(Context *c) {
                            "CHASSIS", &c->data[PROP_CHASSIS],
                            "DEPLOYMENT", &c->data[PROP_DEPLOYMENT],
                            "LOCATION", &c->data[PROP_LOCATION],
-                           "VENDOR", &c->data[PROP_VENDOR],
-                           "MODEL", &c->data[PROP_MODEL]);
+                           "HARDWARE_VENDOR", &c->data[PROP_HARDWARE_VENDOR],
+                           "HARDWARE_MODEL", &c->data[PROP_HARDWARE_MODEL]);
         if (r < 0 && r != -ENOENT)
                 log_warning_errno(r, "Failed to read /etc/machine-info, ignoring: %m");
 
@@ -206,21 +208,19 @@ static int get_hardware_model(char **ret) {
         return get_dmi_data("ID_MODEL_FROM_DATABASE", "ID_MODEL", ret);
 }
 
-static int get_hardware_serial(char **ret) {
+static int get_hardware_firmware_data(const char *sysattr, char **ret) {
         _cleanup_(sd_device_unrefp) sd_device *device = NULL;
         _cleanup_free_ char *b = NULL;
         const char *s = NULL;
         int r;
 
+        assert(sysattr);
+
         r = sd_device_new_from_syspath(&device, "/sys/class/dmi/id");
         if (r < 0)
                 return log_debug_errno(r, "Failed to open /sys/class/dmi/id device, ignoring: %m");
 
-        (void) sd_device_get_sysattr_value(device, "product_serial", &s);
-        if (isempty(s))
-                /* Fallback to board serial */
-                (void) sd_device_get_sysattr_value(device, "board_serial", &s);
-
+        (void) sd_device_get_sysattr_value(device, sysattr, &s);
         if (!isempty(s)) {
                 b = strdup(s);
                 if (!b)
@@ -231,6 +231,20 @@ static int get_hardware_serial(char **ret) {
                 *ret = TAKE_PTR(b);
 
         return !isempty(s);
+}
+
+static int get_hardware_serial(char **ret) {
+         int r;
+
+         r = get_hardware_firmware_data("product_serial", ret);
+         if (r <= 0)
+                return get_hardware_firmware_data("board_serial", ret);
+
+         return r;
+}
+
+static int get_firmware_version(char **ret) {
+         return get_hardware_firmware_data("bios_version", ret);
 }
 
 static const char* valid_chassis(const char *chassis) {
@@ -259,8 +273,9 @@ static bool valid_deployment(const char *deployment) {
 static const char* fallback_chassis(void) {
         const char *chassis;
         _cleanup_free_ char *type = NULL;
+        Virtualization v;
         unsigned t;
-        int v, r;
+        int r;
 
         v = detect_virtualization();
         if (v < 0)
@@ -351,7 +366,7 @@ try_acpi:
          * http://www.acpi.info/DOWNLOADS/ACPIspec50.pdf
          */
 
-        switch(t) {
+        switch (t) {
 
         case 1: /* Desktop */
         case 3: /* Workstation */
@@ -563,7 +578,7 @@ static int property_get_hardware_property(
 
         assert(reply);
         assert(c);
-        assert(IN_SET(prop, PROP_VENDOR, PROP_MODEL));
+        assert(IN_SET(prop, PROP_HARDWARE_VENDOR, PROP_HARDWARE_MODEL));
         assert(getter);
 
         context_read_machine_info(c);
@@ -583,7 +598,7 @@ static int property_get_hardware_vendor(
                 void *userdata,
                 sd_bus_error *error) {
 
-        return property_get_hardware_property(reply, userdata, PROP_VENDOR, get_hardware_vendor);
+        return property_get_hardware_property(reply, userdata, PROP_HARDWARE_VENDOR, get_hardware_vendor);
 }
 
 static int property_get_hardware_model(
@@ -595,7 +610,23 @@ static int property_get_hardware_model(
                 void *userdata,
                 sd_bus_error *error) {
 
-        return property_get_hardware_property(reply, userdata, PROP_MODEL, get_hardware_model);
+        return property_get_hardware_property(reply, userdata, PROP_HARDWARE_MODEL, get_hardware_model);
+}
+
+static int property_get_firmware_version(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        _cleanup_free_ char *firmware_version = NULL;
+
+        (void) get_firmware_version(&firmware_version);
+
+        return sd_bus_message_append(reply, "s", firmware_version);
 }
 
 static int property_get_hostname(
@@ -1125,7 +1156,7 @@ static int method_get_hardware_serial(sd_bus_message *m, void *userdata, sd_bus_
 
 static int method_describe(sd_bus_message *m, void *userdata, sd_bus_error *error) {
         _cleanup_free_ char *hn = NULL, *dhn = NULL, *in = NULL, *text = NULL,
-                *chassis = NULL, *vendor = NULL, *model = NULL, *serial = NULL;
+                *chassis = NULL, *vendor = NULL, *model = NULL, *serial = NULL, *firmware_version = NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
         sd_id128_t product_uuid = SD_ID128_NULL;
@@ -1179,9 +1210,9 @@ static int method_describe(sd_bus_message *m, void *userdata, sd_bus_error *erro
 
         assert_se(uname(&u) >= 0);
 
-        if (isempty(c->data[PROP_VENDOR]))
+        if (isempty(c->data[PROP_HARDWARE_VENDOR]))
                 (void) get_hardware_vendor(&vendor);
-        if (isempty(c->data[PROP_MODEL]))
+        if (isempty(c->data[PROP_HARDWARE_MODEL]))
                 (void) get_hardware_model(&model);
 
         if (privileged) {
@@ -1189,6 +1220,7 @@ static int method_describe(sd_bus_message *m, void *userdata, sd_bus_error *erro
                 (void) id128_get_product(&product_uuid);
                 (void) get_hardware_serial(&serial);
         }
+        (void) get_firmware_version(&firmware_version);
 
         r = json_build(&v, JSON_BUILD_OBJECT(
                                        JSON_BUILD_PAIR("Hostname", JSON_BUILD_STRING(hn)),
@@ -1206,9 +1238,10 @@ static int method_describe(sd_bus_message *m, void *userdata, sd_bus_error *erro
                                        JSON_BUILD_PAIR("OperatingSystemPrettyName", JSON_BUILD_STRING(c->data[PROP_OS_PRETTY_NAME])),
                                        JSON_BUILD_PAIR("OperatingSystemCPEName", JSON_BUILD_STRING(c->data[PROP_OS_CPE_NAME])),
                                        JSON_BUILD_PAIR("OperatingSystemHomeURL", JSON_BUILD_STRING(c->data[PROP_OS_HOME_URL])),
-                                       JSON_BUILD_PAIR("HardwareVendor", JSON_BUILD_STRING(vendor ?: c->data[PROP_VENDOR])),
-                                       JSON_BUILD_PAIR("HardwareModel", JSON_BUILD_STRING(model ?: c->data[PROP_MODEL])),
+                                       JSON_BUILD_PAIR("HardwareVendor", JSON_BUILD_STRING(vendor ?: c->data[PROP_HARDWARE_VENDOR])),
+                                       JSON_BUILD_PAIR("HardwareModel", JSON_BUILD_STRING(model ?: c->data[PROP_HARDWARE_MODEL])),
                                        JSON_BUILD_PAIR("HardwareSerial", JSON_BUILD_STRING(serial)),
+                                       JSON_BUILD_PAIR("FirmwareVersion", JSON_BUILD_STRING(firmware_version)),
                                        JSON_BUILD_PAIR_CONDITION(!sd_id128_is_null(product_uuid), "ProductUUID", JSON_BUILD_ID128(product_uuid)),
                                        JSON_BUILD_PAIR_CONDITION(sd_id128_is_null(product_uuid), "ProductUUID", JSON_BUILD_NULL)));
 
@@ -1249,69 +1282,53 @@ static const sd_bus_vtable hostname_vtable[] = {
         SD_BUS_PROPERTY("HomeURL", "s", property_get_os_release_field, offsetof(Context, data) + sizeof(char*) * PROP_OS_HOME_URL, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HardwareVendor", "s", property_get_hardware_vendor, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HardwareModel", "s", property_get_hardware_model, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("FirmwareVersion", "s", property_get_firmware_version, 0, SD_BUS_VTABLE_PROPERTY_CONST),
 
-        SD_BUS_METHOD_WITH_NAMES("SetHostname",
-                                 "sb",
-                                 SD_BUS_PARAM(hostname)
-                                 SD_BUS_PARAM(interactive),
-                                 NULL,,
-                                 method_set_hostname,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("SetStaticHostname",
-                                 "sb",
-                                 SD_BUS_PARAM(hostname)
-                                 SD_BUS_PARAM(interactive),
-                                 NULL,,
-                                 method_set_static_hostname,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("SetPrettyHostname",
-                                 "sb",
-                                 SD_BUS_PARAM(hostname)
-                                 SD_BUS_PARAM(interactive),
-                                 NULL,,
-                                 method_set_pretty_hostname,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("SetIconName",
-                                 "sb",
-                                 SD_BUS_PARAM(icon)
-                                 SD_BUS_PARAM(interactive),
-                                 NULL,,
-                                 method_set_icon_name,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("SetChassis",
-                                 "sb",
-                                 SD_BUS_PARAM(chassis)
-                                 SD_BUS_PARAM(interactive),
-                                 NULL,,
-                                 method_set_chassis,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("SetDeployment",
-                                 "sb",
-                                 SD_BUS_PARAM(deployment)
-                                 SD_BUS_PARAM(interactive),
-                                 NULL,,
-                                 method_set_deployment,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("SetLocation",
-                                 "sb",
-                                 SD_BUS_PARAM(location)
-                                 SD_BUS_PARAM(interactive),
-                                 NULL,,
-                                 method_set_location,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("GetProductUUID",
-                                 "b",
-                                 SD_BUS_PARAM(interactive),
-                                 "ay",
-                                 SD_BUS_PARAM(uuid),
-                                 method_get_product_uuid,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD_WITH_NAMES("GetHardwareSerial",
-                                 NULL,,
-                                 "s",
-                                 SD_BUS_PARAM(serial),
-                                 method_get_hardware_serial,
-                                 SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("SetHostname",
+                                SD_BUS_ARGS("s", hostname, "b", interactive),
+                                SD_BUS_NO_RESULT,
+                                method_set_hostname,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("SetStaticHostname",
+                                SD_BUS_ARGS("s", hostname, "b", interactive),
+                                SD_BUS_NO_RESULT,
+                                method_set_static_hostname,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("SetPrettyHostname",
+                                SD_BUS_ARGS("s", hostname, "b", interactive),
+                                SD_BUS_NO_RESULT,
+                                method_set_pretty_hostname,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("SetIconName",
+                                SD_BUS_ARGS("s", icon, "b", interactive),
+                                SD_BUS_NO_RESULT,
+                                method_set_icon_name,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("SetChassis",
+                                SD_BUS_ARGS("s", chassis, "b", interactive),
+                                SD_BUS_NO_RESULT,
+                                method_set_chassis,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("SetDeployment",
+                                SD_BUS_ARGS("s", deployment, "b", interactive),
+                                SD_BUS_NO_RESULT,
+                                method_set_deployment,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("SetLocation",
+                                SD_BUS_ARGS("s", location, "b", interactive),
+                                SD_BUS_NO_RESULT,
+                                method_set_location,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("GetProductUUID",
+                                SD_BUS_ARGS("b", interactive),
+                                SD_BUS_RESULT("ay", uuid),
+                                method_get_product_uuid,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD_WITH_ARGS("GetHardwareSerial",
+                                SD_BUS_NO_ARGS,
+                                SD_BUS_RESULT("s", serial),
+                                method_get_hardware_serial,
+                                SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD_WITH_ARGS("Describe",
                                 SD_BUS_NO_ARGS,
                                 SD_BUS_RESULT("s", json),

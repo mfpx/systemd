@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <net/if.h>
+#include <net/if_arp.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -16,6 +17,7 @@
 #include "fd-util.h"
 #include "log.h"
 #include "macro.h"
+#include "path-util.h"
 #include "process-util.h"
 #include "resolved-dns-packet.h"
 #include "resolved-dns-question.h"
@@ -30,7 +32,7 @@
 #include "sparse-endian.h"
 #include "tests.h"
 
-static struct sockaddr_in SERVER_ADDRESS;
+static union sockaddr_union server_address;
 
 /* Bytes of the questions & answers used in the test, including TCP DNS 2-byte length prefix */
 static const uint8_t QUESTION_A[] =  {
@@ -109,7 +111,7 @@ static void *tcp_dns_server(void *p) {
 
         assert_se((bindfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) >= 0);
         assert_se(setsockopt(bindfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) >= 0);
-        assert_se(bind(bindfd, &SERVER_ADDRESS, sizeof(SERVER_ADDRESS)) >= 0);
+        assert_se(bind(bindfd, &server_address.sa, SOCKADDR_LEN(server_address)) >= 0);
         assert_se(listen(bindfd, 1) >= 0);
         assert_se((acceptfd = accept(bindfd, NULL, NULL)) >= 0);
         server_handle(acceptfd);
@@ -125,15 +127,15 @@ static void *tls_dns_server(void *p) {
         int r;
         _cleanup_close_ int fd_server = -1, fd_tls = -1;
         _cleanup_free_ char *cert_path = NULL, *key_path = NULL;
-        _cleanup_free_ char *ip_str = NULL, *bind_str = NULL;
+        _cleanup_free_ char *bind_str = NULL;
 
         assert_se(get_testdata_dir("test-resolve/selfsigned.cert", &cert_path) >= 0);
         assert_se(get_testdata_dir("test-resolve/selfsigned.key", &key_path) >= 0);
 
-        assert_se(in_addr_to_string(SERVER_ADDRESS.sin_family,
-                                    &(union in_addr_union){.in = SERVER_ADDRESS.sin_addr},
-                                    &ip_str) >= 0);
-        assert_se(asprintf(&bind_str, "%s:%d", ip_str, be16toh(SERVER_ADDRESS.sin_port)) >= 0);
+        assert_se(asprintf(&bind_str, "%s:%d",
+                           IN_ADDR_TO_STRING(server_address.in.sin_family,
+                                             sockaddr_in_addr(&server_address.sa)),
+                           be16toh(server_address.in.sin_port)) >= 0);
 
         /* We will hook one of the socketpair ends to OpenSSL's TLS server
          * stdin/stdout, so we will be able to read and write plaintext
@@ -246,7 +248,7 @@ static void test_dns_stream(bool tls) {
         assert_se((clientfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) >= 0);
 
         for (int i = 0; i < 100; i++) {
-                r = connect(clientfd, &SERVER_ADDRESS, sizeof(SERVER_ADDRESS));
+                r = connect(clientfd, &server_address.sa, SOCKADDR_LEN(server_address));
                 if (r >= 0)
                         break;
                 usleep(EVENT_TIMEOUT_USEC / 100);
@@ -265,8 +267,8 @@ static void test_dns_stream(bool tls) {
         if (tls) {
                 DnsServer server = {
                         .manager = &manager,
-                        .family = SERVER_ADDRESS.sin_family,
-                        .address.in = SERVER_ADDRESS.sin_addr
+                        .family = server_address.sa.sa_family,
+                        .address = *sockaddr_in_addr(&server_address.sa),
                 };
 
                 assert_se(dnstls_manager_init(&manager) >= 0);
@@ -330,16 +332,41 @@ static void test_dns_stream(bool tls) {
 
 static void try_isolate_network(void) {
         _cleanup_close_ int socket_fd = -1;
+        int r;
 
-        if (unshare(CLONE_NEWUSER | CLONE_NEWNET) < 0) {
-                log_warning("test-resolved-stream: Can't create user and network ns, running on host");
-                return;
+        /* First test if CLONE_NEWUSER/CLONE_NEWNET can actually work for us, i.e. we can open the namespaces
+         * and then still access the build dir we are run from. We do that in a child process since it's
+         * nasty if we have to go back from the namespace once we entered it and realized it cannot work. */
+        r = safe_fork("(usernstest)", FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        if (r == 0) { /* child */
+                _cleanup_free_ char *rt = NULL, *d = NULL;
+
+                if (unshare(CLONE_NEWUSER | CLONE_NEWNET) < 0) {
+                        log_warning_errno(errno, "test-resolved-stream: Can't create user and network ns, running on host: %m");
+                        _exit(EXIT_FAILURE);
+                }
+
+                assert_se(get_process_exe(0, &rt) >= 0);
+                assert_se(path_extract_directory(rt, &d) >= 0);
+
+                if (access(d, F_OK) < 0) {
+                        log_warning_errno(errno, "test-resolved-stream: Can't access /proc/self/exe from user/network ns, running on host: %m");
+                        _exit(EXIT_FAILURE);
+                }
+
+                _exit(EXIT_SUCCESS);
         }
+        if (r == -EPROTO) /* EPROTO means nonzero exit code of child, i.e. the tests in the child failed */
+                return;
+        assert_se(r > 0);
+
+        /* Now that we know that the unshare() is safe, let's actually do it */
+        assert_se(unshare(CLONE_NEWUSER | CLONE_NEWNET) >= 0);
 
         /* Bring up the loopback interfaceon the newly created network namespace */
         struct ifreq req = { .ifr_ifindex = 1 };
         assert_se((socket_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) >= 0);
-        assert_se(ioctl(socket_fd,SIOCGIFNAME,&req) >= 0);
+        assert_se(ioctl(socket_fd, SIOCGIFNAME, &req) >= 0);
         assert_se(ioctl(socket_fd, SIOCGIFFLAGS, &req) >= 0);
         assert_se(FLAGS_SET(req.ifr_flags, IFF_LOOPBACK));
         req.ifr_flags |= IFF_UP;
@@ -347,10 +374,10 @@ static void try_isolate_network(void) {
 }
 
 int main(int argc, char **argv) {
-        SERVER_ADDRESS = (struct sockaddr_in) {
-                .sin_family = AF_INET,
-                .sin_port = htobe16(12345),
-                .sin_addr.s_addr = htobe32(INADDR_LOOPBACK)
+        server_address = (union sockaddr_union) {
+                .in.sin_family = AF_INET,
+                .in.sin_port = htobe16(12345),
+                .in.sin_addr.s_addr = htobe32(INADDR_LOOPBACK)
         };
 
         test_setup_logging(LOG_DEBUG);

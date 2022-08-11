@@ -22,7 +22,6 @@
 static int cg_any_controller_used_for_v1(void) {
         _cleanup_free_ char *buf = NULL;
         _cleanup_strv_free_ char **lines = NULL;
-        char **line;
         int r;
 
         r = read_full_virtual_file("/proc/cgroups", &buf, NULL);
@@ -172,6 +171,12 @@ int cg_weight_parse(const char *s, uint64_t *ret) {
 
         *ret = u;
         return 0;
+}
+
+int cg_cpu_weight_parse(const char *s, uint64_t *ret) {
+        if (streq_ptr(s, "idle"))
+                return *ret = CGROUP_WEIGHT_IDLE;
+        return cg_weight_parse(s, ret);
 }
 
 int cg_cpu_shares_parse(const char *s, uint64_t *ret) {

@@ -103,9 +103,6 @@ int manager_serialize(
         (void) serialize_bool(f, "taint-logged", m->taint_logged);
         (void) serialize_bool(f, "service-watchdogs", m->service_watchdogs);
 
-        /* After switching root, udevd has not been started yet. So, enumeration results should not be emitted. */
-        (void) serialize_bool(f, "honor-device-enumeration", !switching_root);
-
         if (m->show_status_overridden != _SHOW_STATUS_INVALID)
                 (void) serialize_item(f, "show-status-overridden",
                                       show_status_to_string(m->show_status_overridden));
@@ -309,9 +306,11 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
 
                                 r = fd_get_path(fd, &fn);
                                 if (r < 0)
-                                        log_debug_errno(r, "Received serialized fd %i → %m", fd);
+                                        log_debug_errno(r, "Received serialized fd %i %s %m",
+                                                        fd, special_glyph(SPECIAL_GLYPH_ARROW_RIGHT));
                                 else
-                                        log_debug("Received serialized fd %i → %s", fd, strna(fn));
+                                        log_debug("Received serialized fd %i %s %s",
+                                                  fd, special_glyph(SPECIAL_GLYPH_ARROW_RIGHT), strna(fn));
                         }
                 }
         }
@@ -396,15 +395,6 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                                 log_notice("Failed to parse service-watchdogs flag '%s', ignoring.", val);
                         else
                                 m->service_watchdogs = b;
-
-                } else if ((val = startswith(l, "honor-device-enumeration="))) {
-                        int b;
-
-                        b = parse_boolean(val);
-                        if (b < 0)
-                                log_notice("Failed to parse honor-device-enumeration flag '%s', ignoring.", val);
-                        else
-                                m->honor_device_enumeration = b;
 
                 } else if ((val = startswith(l, "show-status-overridden="))) {
                         ShowStatus s;
@@ -542,7 +532,7 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
 
                         if (q < _MANAGER_TIMESTAMP_MAX) /* found it */
                                 (void) deserialize_dual_timestamp(val, m->timestamps + q);
-                        else if (!startswith(l, "kdbus-fd=")) /* ignore kdbus */
+                        else if (!STARTSWITH_SET(l, "kdbus-fd=", "honor-device-enumeration=")) /* ignore deprecated values */
                                 log_notice("Unknown serialization item '%s', ignoring.", l);
                 }
         }

@@ -83,7 +83,7 @@ static int apply_file(const char *filename, bool ignore_enoent) {
                 return log_error_errno(r, "Failed to open file '%s': %m", filename);
         }
 
-        log_debug("Applying %s…", pp);
+        log_debug("Applying %s%s", pp, special_glyph(SPECIAL_GLYPH_ELLIPSIS));
         for (unsigned line = 1;; line++) {
                 _cleanup_free_ char *text = NULL;
                 char *p;
@@ -213,7 +213,6 @@ static int run(int argc, char *argv[]) {
                 }
         else {
                 _cleanup_strv_free_ char **files = NULL;
-                char **f;
 
                 r = conf_files_list_strv(&files, ".conf", NULL, 0, (const char**) CONF_PATHS_STRV("binfmt.d"));
                 if (r < 0)

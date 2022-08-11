@@ -16,6 +16,64 @@ systemd-run -p LoadCredential=passwd:/etc/passwd \
 ( cat /etc/passwd /etc/shadow && echo -n wuff ) | cmp /tmp/ts54-concat
 rm /tmp/ts54-concat
 
+# Test that SetCredential= acts as fallback for LoadCredential=
+echo piff > /tmp/ts54-fallback
+[ "$(systemd-run -p LoadCredential=paff:/tmp/ts54-fallback -p SetCredential=paff:poff --pipe --wait systemd-creds cat paff)" = "piff" ]
+rm /tmp/ts54-fallback
+[ "$(systemd-run -p LoadCredential=paff:/tmp/ts54-fallback -p SetCredential=paff:poff --pipe --wait systemd-creds cat paff)" = "poff" ]
+
+if systemd-detect-virt -q -c ; then
+    expected_credential=mynspawncredential
+    expected_value=strangevalue
+elif [ -d /sys/firmware/qemu_fw_cfg/by_name ]; then
+    # Verify that passing creds through kernel cmdline works
+    [ "$(systemd-creds --system cat kernelcmdlinecred)" = "uff" ]
+
+    # And that it also works via SMBIOS
+    [ "$(systemd-creds --system cat smbioscredential)" = "magicdata" ]
+    [ "$(systemd-creds --system cat binarysmbioscredential)" = "magicbinarydata" ]
+
+    # If we aren't run in nspawn, we are run in qemu
+    systemd-detect-virt -q -v
+    expected_credential=myqemucredential
+    expected_value=othervalue
+
+    # Verify that writing a sysctl via the kernel cmdline worked
+    [ "$(cat /proc/sys/kernel/domainname)" = "sysctltest" ]
+
+    # Verify that creating a user via sysusers via the kernel cmdline worked
+    grep -q ^credtestuser: /etc/passwd
+
+    # Verify that writing a file via tmpfiles worked
+    [ "$(cat /tmp/sourcedfromcredential)" = "tmpfilessecret" ]
+    [ "$(cat /etc/motd.d/50-provision.conf)" = "hello" ]
+    [ "$(cat /etc/issue.d/50-provision.conf)" = "welcome" ]
+else
+    echo "qemu_fw_cfg support missing in kernel. Sniff!"
+    expected_credential=""
+    expected_value=""
+fi
+
+if [ "$expected_credential" != "" ] ; then
+    # If this test is run in nspawn a credential should have been passed to us. See test/TEST-54-CREDS/test.sh
+    [ "$(systemd-creds --system cat "$expected_credential")" = "$expected_value" ]
+
+    # Test that propagation from system credential to service credential works
+    [ "$(systemd-run -p LoadCredential="$expected_credential" --pipe --wait systemd-creds cat "$expected_credential")" = "$expected_value" ]
+
+    # Check it also works, if we rename it while propagating it
+    [ "$(systemd-run -p LoadCredential=miau:"$expected_credential" --pipe --wait systemd-creds cat miau)" = "$expected_value" ]
+
+    # Combine it with a fallback (which should have no effect, given the cred should be passed down)
+    [ "$(systemd-run -p LoadCredential="$expected_credential" -p SetCredential="$expected_credential":zzz --pipe --wait systemd-creds cat "$expected_credential")" = "$expected_value" ]
+
+    # This should succeed
+    systemd-run -p AssertCredential="$expected_credential" -p Type=oneshot true
+
+    # And this should fail
+    systemd-run -p AssertCredential="undefinedcredential" -p Type=oneshot true && { echo 'unexpected success'; exit 1; }
+fi
+
 # Verify that the creds are immutable
 systemd-run -p LoadCredential=passwd:/etc/passwd \
             -p DynamicUser=1 \

@@ -48,7 +48,7 @@ static int parse_argv(int argc, char *argv[]) {
         int c;
 
         while ((c = getopt_long(argc, argv, "ust:r:Vh", options, NULL)) >= 0)
-                switch(c) {
+                switch (c) {
                 case 'u':
                         arg_update = true;
                         break;
@@ -95,7 +95,7 @@ int hwdb_main(int argc, char *argv[], void *userdata) {
         }
 
         if (arg_test)
-                return hwdb_query(arg_test);
+                return hwdb_query(arg_test, NULL);
 
         return 0;
 }

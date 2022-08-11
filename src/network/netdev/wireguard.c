@@ -23,8 +23,8 @@
 #include "networkd-route-util.h"
 #include "networkd-route.h"
 #include "networkd-util.h"
+#include "parse-helpers.h"
 #include "parse-util.h"
-#include "path-util.h"
 #include "random-util.h"
 #include "resolve-private.h"
 #include "string-util.h"
@@ -147,7 +147,7 @@ cancel:
 }
 
 static int wireguard_set_peer_one(NetDev *netdev, sd_netlink_message *message, const WireguardPeer *peer, uint16_t index, WireguardIPmask **mask_start) {
-        WireguardIPmask *mask, *start;
+        WireguardIPmask *start, *last = NULL;
         uint16_t j = 0;
         int r;
 
@@ -196,8 +196,10 @@ static int wireguard_set_peer_one(NetDev *netdev, sd_netlink_message *message, c
                 r = wireguard_set_ipmask_one(netdev, message, mask, ++j);
                 if (r < 0)
                         return r;
-                if (r == 0)
+                if (r == 0) {
+                        last = mask;
                         break;
+                }
         }
 
         r = sd_netlink_message_close_container(message);
@@ -208,8 +210,8 @@ static int wireguard_set_peer_one(NetDev *netdev, sd_netlink_message *message, c
         if (r < 0)
                 return log_netdev_error_errno(netdev, r, "Could not add wireguard peer: %m");
 
-        *mask_start = mask; /* Start next cycle from this mask. */
-        return !mask;
+        *mask_start = last; /* Start next cycle from this mask. */
+        return !last;
 
 cancel:
         r = sd_netlink_message_cancel_array(message);
@@ -222,7 +224,7 @@ cancel:
 static int wireguard_set_interface(NetDev *netdev) {
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *message = NULL;
         WireguardIPmask *mask_start = NULL;
-        WireguardPeer *peer, *peer_start;
+        WireguardPeer *peer_start;
         bool sent_once = false;
         uint32_t serial;
         Wireguard *w;
@@ -267,14 +269,17 @@ static int wireguard_set_interface(NetDev *netdev) {
                 if (r < 0)
                         return log_netdev_error_errno(netdev, r, "Could not append wireguard peer attributes: %m");
 
+                WireguardPeer *peer_last = NULL;
                 LIST_FOREACH(peers, peer, peer_start) {
                         r = wireguard_set_peer_one(netdev, message, peer, ++i, &mask_start);
                         if (r < 0)
                                 return r;
-                        if (r == 0)
+                        if (r == 0) {
+                                peer_last = peer;
                                 break;
+                        }
                 }
-                peer_start = peer; /* Start next cycle from this peer. */
+                peer_start = peer_last; /* Start next cycle from this peer. */
 
                 r = sd_netlink_message_close_container(message);
                 if (r < 0)
@@ -370,7 +375,7 @@ static int wireguard_peer_resolve_handler(
         if (peer->n_retries > 0) {
                 r = event_reset_time_relative(netdev->manager->event,
                                               &peer->resolve_retry_event_source,
-                                              clock_boottime_or_monotonic(),
+                                              CLOCK_BOOTTIME,
                                               peer_next_resolve_usec(peer), 0,
                                               on_resolve_retry, peer, 0, "wireguard-resolve-retry", true);
                 if (r < 0)
@@ -400,7 +405,7 @@ static int peer_resolve_endpoint(WireguardPeer *peer) {
                 /* Not necessary to resolve the endpoint. */
                 return 0;
 
-        if (event_source_is_enabled(peer->resolve_retry_event_source) > 0)
+        if (sd_event_source_get_enabled(peer->resolve_retry_event_source, NULL) > 0)
                 /* Timer event source is enabled. The endpoint will be resolved later. */
                 return 0;
 
@@ -424,7 +429,6 @@ static int peer_resolve_endpoint(WireguardPeer *peer) {
 }
 
 static void wireguard_resolve_endpoints(NetDev *netdev) {
-        WireguardPeer *peer;
         Wireguard *w;
 
         assert(netdev);
@@ -708,13 +712,11 @@ int config_parse_wireguard_allowed_ips(
 
                 masked = addr;
                 assert_se(in_addr_mask(family, &masked, prefixlen) >= 0);
-                if (!in_addr_equal(family, &masked, &addr)) {
-                        _cleanup_free_ char *buf = NULL;
-
-                        (void) in_addr_prefix_to_string(family, &masked, prefixlen, &buf);
+                if (!in_addr_equal(family, &masked, &addr))
                         log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                   "Specified address '%s' is not properly masked, assuming '%s'.", word, strna(buf));
-                }
+                                   "Specified address '%s' is not properly masked, assuming '%s'.",
+                                   word,
+                                   IN_ADDR_PREFIX_TO_STRING(family, &masked, prefixlen));
 
                 ipmask = new(WireguardIPmask, 1);
                 if (!ipmask)
@@ -1083,8 +1085,6 @@ static int wireguard_read_key_file(const char *filename, uint8_t dest[static WG_
 
         assert(dest);
 
-        (void) warn_file_is_world_accessible(filename, NULL, NULL, 0);
-
         r = read_full_file_full(
                         AT_FDCWD, filename, UINT64_MAX, SIZE_MAX,
                         READ_FULL_FILE_SECURE | READ_FULL_FILE_UNBASE64 | READ_FULL_FILE_WARN_WORLD_READABLE | READ_FULL_FILE_CONNECT_SOCKET,
@@ -1124,7 +1124,6 @@ static int wireguard_peer_verify(WireguardPeer *peer) {
 }
 
 static int wireguard_verify(NetDev *netdev, const char *filename) {
-        WireguardPeer *peer, *peer_next;
         Wireguard *w;
         int r;
 
@@ -1143,9 +1142,7 @@ static int wireguard_verify(NetDev *netdev, const char *filename) {
                                               "%s: Missing PrivateKey= or PrivateKeyFile=, "
                                               "Ignoring network device.", filename);
 
-        LIST_FOREACH_SAFE(peers, peer, peer_next, w->peers) {
-                WireguardIPmask *ipmask;
-
+        LIST_FOREACH(peers, peer, w->peers) {
                 if (wireguard_peer_verify(peer) < 0) {
                         wireguard_peer_free(peer);
                         continue;

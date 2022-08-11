@@ -23,6 +23,7 @@
 #include "gpt.h"
 #include "parse-util.h"
 #include "string-util.h"
+#include "strv.h"
 #include "strxcpyx.h"
 #include "udev-builtin.h"
 
@@ -57,6 +58,10 @@ static void print_property(sd_device *dev, bool test, const char *name, const ch
                 udev_builtin_add_property(dev, test, "ID_FS_LABEL", s);
                 blkid_encode_string(value, s, sizeof(s));
                 udev_builtin_add_property(dev, test, "ID_FS_LABEL_ENC", s);
+
+        } else if (STR_IN_SET(name, "FSSIZE", "FSLASTBLOCK", "FSBLOCKSIZE")) {
+                strscpyl(s, sizeof(s), "ID_FS_", name + 2, NULL);
+                udev_builtin_add_property(dev, test, s, value);
 
         } else if (streq(name, "PTTYPE")) {
                 udev_builtin_add_property(dev, test, "ID_PART_TABLE_TYPE", value);
@@ -293,6 +298,9 @@ static int builtin_blkid(sd_device *dev, sd_netlink **rtnl, int argc, char *argv
         blkid_probe_set_superblocks_flags(pr,
                 BLKID_SUBLKS_LABEL | BLKID_SUBLKS_UUID |
                 BLKID_SUBLKS_TYPE | BLKID_SUBLKS_SECTYPE |
+#ifdef BLKID_SUBLKS_FSINFO
+                BLKID_SUBLKS_FSINFO |
+#endif
                 BLKID_SUBLKS_USAGE | BLKID_SUBLKS_VERSION);
 
         if (noraid)
@@ -302,11 +310,12 @@ static int builtin_blkid(sd_device *dev, sd_netlink **rtnl, int argc, char *argv
         if (r < 0)
                 return log_device_debug_errno(dev, r, "Failed to get device name: %m");
 
-        fd = open(devnode, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+        fd = sd_device_open(dev, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
         if (fd < 0) {
-                log_device_debug_errno(dev, errno, "Failed to open block device %s%s: %m",
-                                       devnode, errno == ENOENT ? ", ignoring" : "");
-                return errno == ENOENT ? 0 : -errno;
+                bool ignore = ERRNO_IS_DEVICE_ABSENT(fd);
+                log_device_debug_errno(dev, fd, "Failed to open block device %s%s: %m",
+                                       devnode, ignore ? ", ignoring" : "");
+                return ignore ? 0 : fd;
         }
 
         errno = 0;

@@ -74,7 +74,7 @@ static int log_helper(void *userdata, int level, int error, const char *file, in
         return r;
 }
 
-static int verify_conditions(char **lines, UnitFileScope scope, const char *unit, const char *root) {
+static int verify_conditions(char **lines, LookupScope scope, const char *unit, const char *root) {
         _cleanup_(manager_freep) Manager *m = NULL;
         Unit *u;
         int r, q = 1;
@@ -114,8 +114,6 @@ static int verify_conditions(char **lines, UnitFileScope scope, const char *unit
                 if (r < 0)
                         return r;
         } else {
-                char **line;
-
                 r = unit_new_for_name(m, sizeof(Service), "test.service", &u);
                 if (r < 0)
                         return log_error_errno(r, "Failed to create test.service: %m");
@@ -139,5 +137,11 @@ static int verify_conditions(char **lines, UnitFileScope scope, const char *unit
 }
 
 int verb_condition(int argc, char *argv[], void *userdata) {
-        return verify_conditions(strv_skip(argv, 1), arg_scope, arg_unit, arg_root);
+        int r;
+
+        r = verify_conditions(strv_skip(argv, 1), arg_scope, arg_unit, arg_root);
+        if (r < 0)
+                return r;
+
+        return EXIT_SUCCESS;
 }

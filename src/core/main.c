@@ -6,6 +6,7 @@
 #include <linux/oom.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #if HAVE_SECCOMP
 #include <seccomp.h>
@@ -50,6 +51,7 @@
 #include "hexdecoct.h"
 #include "hostname-setup.h"
 #include "ima-setup.h"
+#include "import-creds.h"
 #include "killall.h"
 #include "kmod-setup.h"
 #include "limits-util.h"
@@ -132,6 +134,7 @@ static usec_t arg_default_restart_usec;
 static usec_t arg_default_timeout_start_usec;
 static usec_t arg_default_timeout_stop_usec;
 static usec_t arg_default_timeout_abort_usec;
+static usec_t arg_default_device_timeout_usec;
 static bool arg_default_timeout_abort_set;
 static usec_t arg_default_start_limit_interval;
 static unsigned arg_default_start_limit_burst;
@@ -168,6 +171,7 @@ static void *arg_random_seed;
 static size_t arg_random_seed_size;
 static int arg_default_oom_score_adjust;
 static bool arg_default_oom_score_adjust_set;
+static char *arg_default_smack_process_label;
 
 /* A copy of the original environment block */
 static char **saved_env = NULL;
@@ -624,6 +628,7 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultTimeoutStartSec",       config_parse_sec,                   0,                        &arg_default_timeout_start_usec   },
                 { "Manager", "DefaultTimeoutStopSec",        config_parse_sec,                   0,                        &arg_default_timeout_stop_usec    },
                 { "Manager", "DefaultTimeoutAbortSec",       config_parse_default_timeout_abort, 0,                        NULL                              },
+                { "Manager", "DefaultDeviceTimeoutSec",      config_parse_sec,                   0,                        &arg_default_device_timeout_usec  },
                 { "Manager", "DefaultRestartSec",            config_parse_sec,                   0,                        &arg_default_restart_usec         },
                 { "Manager", "DefaultStartLimitInterval",    config_parse_sec,                   0,                        &arg_default_start_limit_interval }, /* obsolete alias */
                 { "Manager", "DefaultStartLimitIntervalSec", config_parse_sec,                   0,                        &arg_default_start_limit_interval },
@@ -656,6 +661,11 @@ static int parse_config_file(void) {
                 { "Manager", "CtrlAltDelBurstAction",        config_parse_emergency_action,      0,                        &arg_cad_burst_action             },
                 { "Manager", "DefaultOOMPolicy",             config_parse_oom_policy,            0,                        &arg_default_oom_policy           },
                 { "Manager", "DefaultOOMScoreAdjust",        config_parse_oom_score_adjust,      0,                        NULL                              },
+#if ENABLE_SMACK
+                { "Manager", "DefaultSmackProcessLabel",     config_parse_string,                0,                        &arg_default_smack_process_label  },
+#else
+                { "Manager", "DefaultSmackProcessLabel",     config_parse_warn_compat,           DISABLED_CONFIGURATION,   NULL                              },
+#endif
                 {}
         };
 
@@ -708,6 +718,7 @@ static void set_manager_defaults(Manager *m) {
         m->default_timeout_stop_usec = arg_default_timeout_stop_usec;
         m->default_timeout_abort_usec = arg_default_timeout_abort_usec;
         m->default_timeout_abort_set = arg_default_timeout_abort_set;
+        m->default_device_timeout_usec = arg_default_device_timeout_usec;
         m->default_restart_usec = arg_default_restart_usec;
         m->default_start_limit_interval = arg_default_start_limit_interval;
         m->default_start_limit_burst = arg_default_start_limit_burst;
@@ -728,6 +739,8 @@ static void set_manager_defaults(Manager *m) {
         m->default_oom_policy = arg_default_oom_policy;
         m->default_oom_score_adjust_set = arg_default_oom_score_adjust_set;
         m->default_oom_score_adjust = arg_default_oom_score_adjust;
+
+        (void) manager_set_default_smack_process_label(m, arg_default_smack_process_label);
 
         (void) manager_set_default_rlimits(m, arg_default_rlimit);
 
@@ -1074,9 +1087,8 @@ static int help(void) {
                "  -h --help                      Show this help\n"
                "     --version                   Show version\n"
                "     --test                      Determine initial transaction, dump it and exit\n"
-               "     --system                    In combination with --test: operate as system service manager\n"
-               "     --user                      In combination with --test: operate as per-user service manager\n"
-               "     --no-pager                  Do not pipe output into a pager\n"
+               "     --system                    Combined with --test: operate in system mode\n"
+               "     --user                      Combined with --test: operate in user mode\n"
                "     --dump-configuration-items  Dump understood unit configuration items\n"
                "     --dump-bus-properties       Dump exposed bus properties\n"
                "     --bus-introspect=PATH       Write XML introspection data\n"
@@ -1086,14 +1098,17 @@ static int help(void) {
                "     --crash-reboot[=BOOL]       Reboot on crash\n"
                "     --crash-shell[=BOOL]        Run shell on crash\n"
                "     --confirm-spawn[=BOOL]      Ask for confirmation when spawning processes\n"
-               "     --show-status[=BOOL]        Show status updates on the console during bootup\n"
-               "     --log-target=TARGET         Set log target (console, journal, kmsg, journal-or-kmsg, null)\n"
-               "     --log-level=LEVEL           Set log level (debug, info, notice, warning, err, crit, alert, emerg)\n"
+               "     --show-status[=BOOL]        Show status updates on the console during boot\n"
+               "     --log-target=TARGET         Set log target (console, journal, kmsg,\n"
+               "                                                 journal-or-kmsg, null)\n"
+               "     --log-level=LEVEL           Set log level (debug, info, notice, warning,\n"
+               "                                                err, crit, alert, emerg)\n"
                "     --log-color[=BOOL]          Highlight important log messages\n"
                "     --log-location[=BOOL]       Include code location in log messages\n"
                "     --log-time[=BOOL]           Prefix log messages with current time\n"
                "     --default-standard-output=  Set default standard output for services\n"
                "     --default-standard-error=   Set default standard error output for services\n"
+               "     --no-pager                  Do not pipe output into a pager\n"
                "\nSee the %s for details.\n",
                program_invocation_short_name,
                ansi_highlight(),
@@ -1286,12 +1301,12 @@ static void test_usr(void) {
 
         /* Check that /usr is either on the same file system as / or mounted already. */
 
-        if (dir_is_empty("/usr") <= 0)
+        if (dir_is_empty("/usr", /* ignore_hidden_or_backup= */ false) <= 0)
                 return;
 
         log_warning("/usr appears to be on its own filesystem and is not already mounted. This is not a supported setup. "
                     "Some things will probably break (sometimes even silently) in mysterious ways. "
-                    "Consult http://freedesktop.org/wiki/Software/systemd/separate-usr-is-broken for more information.");
+                    "Consult https://www.freedesktop.org/wiki/Software/systemd/separate-usr-is-broken for more information.");
 }
 
 static int enforce_syscall_archs(Set *archs) {
@@ -1308,29 +1323,46 @@ static int enforce_syscall_archs(Set *archs) {
         return 0;
 }
 
-static int status_welcome(void) {
-        _cleanup_free_ char *pretty_name = NULL, *ansi_color = NULL;
+static int os_release_status(void) {
+        _cleanup_free_ char *pretty_name = NULL, *name = NULL, *version = NULL,
+                            *ansi_color = NULL, *support_end = NULL;
         int r;
-
-        if (!show_status_on(arg_show_status))
-                return 0;
 
         r = parse_os_release(NULL,
                              "PRETTY_NAME", &pretty_name,
-                             "ANSI_COLOR", &ansi_color);
+                             "NAME",        &name,
+                             "VERSION",     &version,
+                             "ANSI_COLOR",  &ansi_color,
+                             "SUPPORT_END", &support_end);
         if (r < 0)
-                log_full_errno(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, r,
-                               "Failed to read os-release file, ignoring: %m");
+                return log_full_errno(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, r,
+                                      "Failed to read os-release file, ignoring: %m");
 
-        if (log_get_show_color())
-                return status_printf(NULL, 0,
-                                     "\nWelcome to \x1B[%sm%s\x1B[0m!\n",
-                                     isempty(ansi_color) ? "1" : ansi_color,
-                                     isempty(pretty_name) ? "Linux" : pretty_name);
-        else
-                return status_printf(NULL, 0,
-                                     "\nWelcome to %s!\n",
-                                     isempty(pretty_name) ? "Linux" : pretty_name);
+        const char *label = empty_to_null(pretty_name) ?: empty_to_null(name) ?: "Linux";
+
+        if (show_status_on(arg_show_status)) {
+                if (log_get_show_color())
+                        status_printf(NULL, 0,
+                                      "\nWelcome to \x1B[%sm%s\x1B[0m!\n",
+                                      empty_to_null(ansi_color) ?: "1",
+                                      label);
+                else
+                        status_printf(NULL, 0,
+                                      "\nWelcome to %s!\n",
+                                      label);
+        }
+
+        if (support_end && os_release_support_ended(support_end, false) > 0)
+                /* pretty_name may include the version already, so we'll print the version only if we
+                 * have it and we're not using pretty_name. */
+                status_printf(ANSI_HIGHLIGHT_RED "  !!  " ANSI_NORMAL, 0,
+                              "This OS version (%s%s%s) is past its end-of-support date (%s)",
+                              label,
+                              (pretty_name || !version) ? "" : " version ",
+                              (pretty_name || !version) ? "" : version,
+                              support_end);
+
+        return 0;
 }
 
 static int write_container_id(void) {
@@ -1717,13 +1749,6 @@ static void filter_args(
                         continue;
                 }
 
-                if (startswith(src[i],
-                               in_initrd() ? "rd.systemd.unit=" : "systemd.unit="))
-                        continue;
-
-                if (runlevel_to_target(src[i]))
-                        continue;
-
                 /* Seems we have a good old option. Let's pass it over to the new instance. */
                 dst[(*dst_index)++] = src[i];
         }
@@ -1944,6 +1969,8 @@ static int invoke_main_loop(
                         return objective;
 
                 case MANAGER_SWITCH_ROOT:
+                        manager_set_switching_root(m, true);
+
                         if (!m->switch_root_init) {
                                 r = prepare_reexecute(m, &arg_serialization, ret_fds, true);
                                 if (r < 0) {
@@ -2009,6 +2036,7 @@ static void log_execution_mode(bool *ret_first_boot) {
         assert(ret_first_boot);
 
         if (arg_system) {
+                struct utsname uts;
                 int v;
 
                 log_info("systemd " GIT_VERSION " running in %ssystem mode (%s)",
@@ -2046,6 +2074,14 @@ static void log_execution_mode(bool *ret_first_boot) {
                                 log_debug("Detected initialized system, this is not the first boot.");
                         }
                 }
+
+                assert_se(uname(&uts) >= 0);
+
+                if (strverscmp_improved(uts.release, KERNEL_BASELINE_VERSION) < 0)
+                        log_warning("Warning! Reported kernel version %s is older than systemd's required baseline kernel version %s. "
+                                    "Your mileage may vary.", uts.release, KERNEL_BASELINE_VERSION);
+                else
+                        log_debug("Kernel version %s, our baseline is %s", uts.release, KERNEL_BASELINE_VERSION);
         } else {
                 if (DEBUG_LOGGING) {
                         _cleanup_free_ char *t = NULL;
@@ -2094,7 +2130,7 @@ static int initialize_runtime(
                                 return r;
                         }
 
-                        status_welcome();
+                        (void) os_release_status();
                         (void) hostname_setup(true);
                         /* Force transient machine-id on first boot. */
                         machine_id_setup(NULL, first_boot, arg_machine_id, NULL);
@@ -2105,11 +2141,9 @@ static int initialize_runtime(
                         write_container_id();
                 }
 
-                if (arg_watchdog_device) {
-                        r = watchdog_set_device(arg_watchdog_device);
-                        if (r < 0)
-                                log_warning_errno(r, "Failed to set watchdog device to %s, ignoring: %m", arg_watchdog_device);
-                }
+                r = watchdog_set_device(arg_watchdog_device);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to set watchdog device to %s, ignoring: %m", arg_watchdog_device);
         } else {
                 _cleanup_free_ char *p = NULL;
 
@@ -2167,6 +2201,10 @@ static int initialize_runtime(
         /* Bump up RLIMIT_NOFILE for systemd itself */
         (void) bump_rlimit_nofile(saved_rlimit_nofile);
         (void) bump_rlimit_memlock(saved_rlimit_memlock);
+
+        /* Pull credentials from various sources into a common credential directory */
+        if (arg_system && !skip_setup)
+                (void) import_credentials();
 
         return 0;
 }
@@ -2319,7 +2357,6 @@ static void fallback_rlimit_memlock(const struct rlimit *saved_rlimit_memlock) {
 }
 
 static void setenv_manager_environment(void) {
-        char **p;
         int r;
 
         STRV_FOREACH(p, arg_manager_environment) {
@@ -2355,14 +2392,15 @@ static void reset_arguments(void) {
         arg_default_timeout_stop_usec = DEFAULT_TIMEOUT_USEC;
         arg_default_timeout_abort_usec = DEFAULT_TIMEOUT_USEC;
         arg_default_timeout_abort_set = false;
+        arg_default_device_timeout_usec = DEFAULT_TIMEOUT_USEC;
         arg_default_start_limit_interval = DEFAULT_START_LIMIT_INTERVAL;
         arg_default_start_limit_burst = DEFAULT_START_LIMIT_BURST;
         arg_runtime_watchdog = 0;
         arg_reboot_watchdog = 10 * USEC_PER_MINUTE;
         arg_kexec_watchdog = 0;
         arg_pretimeout_watchdog = 0;
-        arg_early_core_pattern = NULL;
-        arg_watchdog_device = NULL;
+        arg_early_core_pattern = mfree(arg_early_core_pattern);
+        arg_watchdog_device = mfree(arg_watchdog_device);
         arg_watchdog_pretimeout_governor = mfree(arg_watchdog_pretimeout_governor);
 
         arg_default_environment = strv_free(arg_default_environment);
@@ -2397,6 +2435,7 @@ static void reset_arguments(void) {
         arg_clock_usec = 0;
 
         arg_default_oom_score_adjust_set = false;
+        arg_default_smack_process_label = mfree(arg_default_smack_process_label);
 }
 
 static void determine_default_oom_score_adjust(void) {
@@ -2768,7 +2807,7 @@ int main(int argc, char *argv[]) {
 
                 /* Load the kernel modules early. */
                 if (!skip_setup)
-                        kmod_setup();
+                        (void) kmod_setup();
 
                 /* Mount /proc, /sys and friends, so that /proc/cmdline and /proc/$PID/fd is available. */
                 r = mount_setup(loaded_policy, skip_setup);
@@ -2786,11 +2825,17 @@ int main(int argc, char *argv[]) {
         } else {
                 /* Running as user instance */
                 arg_system = false;
+                log_set_always_reopen_console(true);
                 log_set_target(LOG_TARGET_AUTO);
                 log_open();
 
                 /* clear the kernel timestamp, because we are not PID 1 */
                 kernel_timestamp = DUAL_TIMESTAMP_NULL;
+
+                /* Clear ambient capabilities, so services do not inherit them implicitly. Dropping them does
+                 * not affect the permitted and effective sets which are important for the manager itself to
+                 * operate. */
+                capability_ambient_set_apply(0, /* also_inherit= */ false);
 
                 if (mac_selinux_init() < 0) {
                         error_message = "Failed to initialize SELinux support";
@@ -2886,7 +2931,7 @@ int main(int argc, char *argv[]) {
         if (r < 0)
                 goto finish;
 
-        r = manager_new(arg_system ? UNIT_FILE_SYSTEM : UNIT_FILE_USER,
+        r = manager_new(arg_system ? LOOKUP_SCOPE_SYSTEM : LOOKUP_SCOPE_USER,
                         arg_action == ACTION_TEST ? MANAGER_TEST_FULL : 0,
                         &m);
         if (r < 0) {
@@ -2904,6 +2949,7 @@ int main(int argc, char *argv[]) {
         set_manager_defaults(m);
         set_manager_settings(m);
         manager_set_first_boot(m, first_boot);
+        manager_set_switching_root(m, arg_switched_root);
 
         /* Remember whether we should queue the default job */
         queue_default_job = !arg_serialization || arg_switched_root;
@@ -2991,7 +3037,6 @@ finish:
                 /* Cleanup watchdog_device strings for valgrind. We need them
                  * in become_shutdown() so normally we cannot free them yet. */
                 watchdog_free_device();
-                arg_watchdog_device = mfree(arg_watchdog_device);
                 reset_arguments();
                 return retval;
         }

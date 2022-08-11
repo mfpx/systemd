@@ -217,8 +217,6 @@ static int link_push_uplink_to_dhcp_server(
                 break;
 
         case SD_DHCP_LEASE_NTP: {
-                char **i;
-
                 /* For NTP things are similar, but for NTP hostnames can be configured too, which we cannot
                  * propagate via DHCP. Hence let's only propagate those which are IP addresses. */
 
@@ -541,13 +539,7 @@ static bool dhcp_server_is_ready_to_configure(Link *link) {
 
         assert(link);
 
-        if (!link->network)
-                return false;
-
-        if (!IN_SET(link->state, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED))
-                return false;
-
-        if (link->set_flags_messages > 0)
+        if (!link_is_ready_to_configure(link, /* allow_unmanaged = */ false))
                 return false;
 
         if (!link_has_carrier(link))

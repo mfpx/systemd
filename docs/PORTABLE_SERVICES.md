@@ -168,8 +168,8 @@ requirements are made for an image that can be attached/detached with
    must be a raw disk image either containing only one, naked file system, or
    an image with a partition table understood by the Linux kernel with only a
    single partition defined, or alternatively, a GPT partition table with a set
-   of properly marked partitions following the [Discoverable Partitions
-   Specification](https://systemd.io/DISCOVERABLE_PARTITIONS).
+   of properly marked partitions following the
+   [Discoverable Partitions Specification](DISCOVERABLE_PARTITIONS.md).
 
 3. The image must at least contain one matching unit file, with the right name
    prefix and suffix (see above). The unit file is searched in the usual paths,
@@ -337,7 +337,7 @@ services copied onto the host.
 
 ## Links
 
-[portablectl(1)](https://www.freedesktop.org/software/systemd/man/portablectl.html)<br>
-[systemd-portabled.service(8)](https://www.freedesktop.org/software/systemd/man/systemd-portabled.service.html)<br>
+[`portablectl(1)`](https://www.freedesktop.org/software/systemd/man/portablectl.html)<br>
+[`systemd-portabled.service(8)`](https://www.freedesktop.org/software/systemd/man/systemd-portabled.service.html)<br>
 [Walkthrough for Portable Services](https://0pointer.net/blog/walkthrough-for-portable-services.html)<br>
 [Repo with examples](https://github.com/systemd/portable-walkthrough)

@@ -133,8 +133,6 @@ static int bpf_foreign_test_to_string(enum bpf_attach_type attach_type, const ch
 }
 
 static char **unlink_paths_and_free(char **paths) {
-        char **i;
-
         STRV_FOREACH(i, paths)
                 (void) unlink(*i);
 
@@ -303,7 +301,7 @@ int main(int argc, char *argv[]) {
         assert_se(set_unit_path(unit_dir) >= 0);
         assert_se(runtime_dir = setup_fake_runtime_dir());
 
-        assert_se(manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_BASIC, &m) >= 0);
+        assert_se(manager_new(LOOKUP_SCOPE_USER, MANAGER_TEST_RUN_BASIC, &m) >= 0);
         assert_se(manager_startup(m, NULL, NULL, NULL) >= 0);
 
         assert_se(test_bpf_cgroup_programs(m,

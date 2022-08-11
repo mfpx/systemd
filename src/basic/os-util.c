@@ -8,6 +8,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "glyph-util.h"
 #include "macro.h"
 #include "os-util.h"
 #include "parse-util.h"
@@ -146,8 +147,9 @@ int open_extension_release(const char *root, const char *extension, char **ret_p
                                 if (k != 0)
                                         continue;
 
-                                log_debug("%s/%s: 'user.extension-release.strict' attribute is false…",
-                                          extension_release_dir_path, de->d_name);
+                                log_debug("%s/%s: 'user.extension-release.strict' attribute is false%s",
+                                          extension_release_dir_path, de->d_name,
+                                          special_glyph(SPECIAL_GLYPH_ELLIPSIS));
 
                                 /* We already found what we were looking for, but there's another candidate?
                                  * We treat this as an error, as we want to enforce that there are no ambiguities
@@ -170,15 +172,19 @@ int open_extension_release(const char *root, const char *extension, char **ret_p
                         }
                 }
         } else {
-                const char *p;
-
-                FOREACH_STRING(p, "/etc/os-release", "/usr/lib/os-release") {
-                        r = chase_symlinks(p, root, CHASE_PREFIX_ROOT,
+                const char *var = secure_getenv("SYSTEMD_OS_RELEASE");
+                if (var)
+                        r = chase_symlinks(var, root, 0,
                                            ret_path ? &q : NULL,
                                            ret_fd ? &fd : NULL);
-                        if (r != -ENOENT)
-                                break;
-                }
+                else
+                        FOREACH_STRING(path, "/etc/os-release", "/usr/lib/os-release") {
+                                r = chase_symlinks(path, root, CHASE_PREFIX_ROOT,
+                                                   ret_path ? &q : NULL,
+                                                   ret_fd ? &fd : NULL);
+                                if (r != -ENOENT)
+                                        break;
+                        }
         }
         if (r < 0)
                 return r;
@@ -273,7 +279,6 @@ int load_os_release_pairs(const char *root, char ***ret) {
 
 int load_os_release_pairs_with_prefix(const char *root, const char *prefix, char ***ret) {
         _cleanup_strv_free_ char **os_release_pairs = NULL, **os_release_pairs_prefixed = NULL;
-        char **p, **q;
         int r;
 
         r = load_os_release_pairs(root, &os_release_pairs);
@@ -311,4 +316,39 @@ int load_extension_release_pairs(const char *root, const char *extension, char *
                 return r;
 
         return load_env_file_pairs(f, p, ret);
+}
+
+int os_release_support_ended(const char *support_end, bool quiet) {
+        _cleanup_free_ char *_support_end_alloc = NULL;
+        int r;
+
+        if (!support_end) {
+                /* If the caller has the variably handy, they can pass it in. If not, we'll read it
+                 * ourselves. */
+
+                r = parse_os_release(NULL,
+                                     "SUPPORT_END", &_support_end_alloc);
+                if (r < 0)
+                        return log_full_errno((r == -ENOENT || quiet) ? LOG_DEBUG : LOG_WARNING, r,
+                                              "Failed to read os-release file, ignoring: %m");
+                if (!_support_end_alloc)
+                        return false;  /* no end date defined */
+
+                support_end = _support_end_alloc;
+        }
+
+        struct tm tm = {};
+
+        const char *k = strptime(support_end, "%Y-%m-%d", &tm);
+        if (!k || *k)
+                return log_full_errno(quiet ? LOG_DEBUG : LOG_WARNING, SYNTHETIC_ERRNO(EINVAL),
+                                      "Failed to parse SUPPORT_END= in os-release file, ignoring: %m");
+
+        time_t eol = mktime(&tm);
+        if (eol == (time_t) -1)
+                return log_full_errno(quiet ? LOG_DEBUG : LOG_WARNING, SYNTHETIC_ERRNO(EINVAL),
+                                      "Failed to convert SUPPORT_END= in os-release file, ignoring: %m");
+
+        usec_t ts = now(CLOCK_REALTIME);
+        return DIV_ROUND_UP(ts, USEC_PER_SEC) > (usec_t) eol;
 }

@@ -127,7 +127,7 @@ static int parse_line(EtcHosts *hosts, unsigned nr, const char *line) {
                         continue;
                 }
 
-                r = strv_extend(&item->names, name);
+                r = strv_extend_with_size(&item->names, &item->n_names, name);
                 if (r < 0)
                         return log_oom();
 
@@ -192,7 +192,6 @@ static void strip_localhost(EtcHosts *hosts) {
 
         for (size_t j = 0; j < ELEMENTSOF(local_in_addrs); j++) {
                 bool all_localhost, in_order;
-                char **i;
 
                 item = hashmap_get(hosts->by_address, local_in_addrs + j);
                 if (!item)
@@ -295,7 +294,7 @@ static int manager_etc_hosts_read(Manager *m) {
         usec_t ts;
         int r;
 
-        assert_se(sd_event_now(m->event, clock_boottime_or_monotonic(), &ts) >= 0);
+        assert_se(sd_event_now(m->event, CLOCK_BOOTTIME, &ts) >= 0);
 
         /* See if we checked /etc/hosts recently already */
         if (m->etc_hosts_last != USEC_INFINITY && m->etc_hosts_last + ETC_HOSTS_RECHECK_USEC > ts)
@@ -392,9 +391,7 @@ int manager_etc_hosts_lookup(Manager *m, DnsQuestion* q, DnsAnswer **answer) {
                 }
 
                 if (found_ptr) {
-                        char **n;
-
-                        r = dns_answer_reserve(answer, strv_length(item->names));
+                        r = dns_answer_reserve(answer, item->n_names);
                         if (r < 0)
                                 return r;
 

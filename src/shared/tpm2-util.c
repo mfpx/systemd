@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include "efi-api.h"
 #include "extract-word.h"
 #include "parse-util.h"
+#include "stat-util.h"
 #include "tpm2-util.h"
+#include "virt.h"
 
 #if HAVE_TPM2
 #include "alloc-util.h"
@@ -927,7 +930,7 @@ int tpm2_seal(
 
         log_debug("Generating secret key data.");
 
-        r = genuine_random_bytes(hmac_sensitive.sensitive.data.buffer, hmac_sensitive.sensitive.data.size, RANDOM_BLOCK);
+        r = crypto_random_bytes(hmac_sensitive.sensitive.data.buffer, hmac_sensitive.sensitive.data.size);
         if (r < 0) {
                 log_error_errno(r, "Failed to generate secret key: %m");
                 goto finish;
@@ -1452,4 +1455,31 @@ int tpm2_primary_alg_from_string(const char *alg) {
         if (streq_ptr(alg, "rsa"))
                 return TPM2_ALG_RSA;
         return -EINVAL;
+}
+
+Tpm2Support tpm2_support(void) {
+        Tpm2Support support = TPM2_SUPPORT_NONE;
+        int r;
+
+        if (detect_container() <= 0) {
+                /* Check if there's a /dev/tpmrm* device via sysfs. If we run in a container we likely just
+                 * got the host sysfs mounted. Since devices are generally not virtualized for containers,
+                 * let's assume containers never have a TPM, at least for now. */
+
+                r = dir_is_empty("/sys/class/tpmrm", /* ignore_hidden_or_backup= */ false);
+                if (r < 0) {
+                        if (r != -ENOENT)
+                                log_debug_errno(r, "Unable to test whether /sys/class/tpmrm/ exists and is populated, assuming it is not: %m");
+                } else if (r == 0) /* populated! */
+                        support |= TPM2_SUPPORT_DRIVER;
+        }
+
+        if (efi_has_tpm2())
+                support |= TPM2_SUPPORT_FIRMWARE;
+
+#if HAVE_TPM2
+        support |= TPM2_SUPPORT_SYSTEM;
+#endif
+
+        return support;
 }

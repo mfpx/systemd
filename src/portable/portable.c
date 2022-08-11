@@ -58,7 +58,6 @@ static bool prefix_match(const char *unit, const char *prefix) {
 
 static bool unit_match(const char *unit, char **matches) {
         const char *dot;
-        char **i;
 
         dot = strrchr(unit, '.');
         if (!dot)
@@ -182,7 +181,6 @@ static int extract_now(
         _cleanup_close_ int os_release_fd = -1;
         _cleanup_free_ char *os_release_path = NULL;
         const char *os_release_id;
-        char **i;
         int r;
 
         /* Extracts the metadata from a directory tree 'where'. Extracts two kinds of information: the /etc/os-release
@@ -233,7 +231,7 @@ static int extract_now(
         /* Then, send unit file data to the parent (or/and add it to the hashmap). For that we use our usual unit
          * discovery logic. Note that we force looking inside of /lib/systemd/system/ for units too, as we mightbe
          * compiled for a split-usr system but the image might be a legacy-usr one. */
-        r = lookup_paths_init(&paths, UNIT_FILE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, where);
+        r = lookup_paths_init(&paths, LOOKUP_SCOPE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, where);
         if (r < 0)
                 return log_debug_errno(r, "Failed to acquire lookup paths: %m");
 
@@ -360,6 +358,10 @@ static int portable_extract_by_path(
 
                 /* We now have a loopback block device, let's fork off a child in its own mount namespace, mount it
                  * there, and extract the metadata we need. The metadata is sent from the child back to us. */
+
+                r = loop_device_flock(d, LOCK_SH);
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to acquire lock on loopback block device: %m");
 
                 BLOCK_SIGNALS(SIGCHLD);
 
@@ -528,15 +530,12 @@ static int extract_image_and_extensions(
         int r;
 
         assert(name_or_path);
-        assert(matches);
 
         r = image_find_harder(IMAGE_PORTABLE, name_or_path, NULL, &image);
         if (r < 0)
                 return r;
 
         if (!strv_isempty(extension_image_paths)) {
-                char **p;
-
                 extension_images = ordered_hashmap_new(&image_hash_ops);
                 if (!extension_images)
                         return -ENOMEM;
@@ -583,6 +582,8 @@ static int extract_image_and_extensions(
                                    "PORTABLE_PREFIXES", &prefixes);
                 if (r < 0)
                         return r;
+                if (isempty(id))
+                        return sd_bus_error_set_errnof(error, SYNTHETIC_ERRNO(ESTALE), "Image %s os-release metadata lacks the ID field", name_or_path);
 
                 if (prefixes) {
                         valid_prefixes = strv_split(prefixes, WHITESPACE);
@@ -1261,8 +1262,6 @@ static int install_image_and_extensions_symlinks(
 }
 
 static bool prefix_matches_compatible(char **matches, char **valid_prefixes) {
-        char **m;
-
         /* Checks if all 'matches' are included in the list of 'valid_prefixes' */
 
         STRV_FOREACH(m, matches)
@@ -1346,12 +1345,12 @@ int portable_attach(
                                 strempty(extensions_joined));
         }
 
-        r = lookup_paths_init(&paths, UNIT_FILE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, NULL);
+        r = lookup_paths_init(&paths, LOOKUP_SCOPE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, NULL);
         if (r < 0)
                 return r;
 
         HASHMAP_FOREACH(item, unit_files) {
-                r = unit_file_exists(UNIT_FILE_SYSTEM, &paths, item->name);
+                r = unit_file_exists(LOOKUP_SCOPE_SYSTEM, &paths, item->name);
                 if (r < 0)
                         return sd_bus_error_set_errnof(error, r, "Failed to determine whether unit '%s' exists on the host: %m", item->name);
                 if (!FLAGS_SET(flags, PORTABLE_REATTACH) && r > 0)
@@ -1380,7 +1379,6 @@ int portable_attach(
 
 static bool marker_matches_images(const char *marker, const char *name_or_path, char **extension_image_paths) {
         _cleanup_strv_free_ char **root_and_extensions = NULL;
-        char **image_name_or_path;
         const char *a;
         int r;
 
@@ -1436,17 +1434,28 @@ static bool marker_matches_images(const char *marker, const char *name_or_path, 
                         size_t l;
 
                         /* We shall match against a path. Let's ignore any prefix here though, as often there are many ways to
-                        * reach the same file. However, in this mode, let's validate any file suffix. */
+                         * reach the same file. However, in this mode, let's validate any file suffix.
+                         * But also ensure that we don't fail if both components don't have a '/' at all
+                         * (strcspn returns the full length of the string in that case, which might not
+                         * match as the versions might differ). */
 
                         l = strcspn(a, "/");
                         b = last_path_component(*image_name_or_path);
 
-                        if (strcspn(b, "/") != l)
+                        if ((a[l] != '/') != !strchr(b, '/')) /* One is a directory, the other is not */
+                                return false;
+
+                        if (a[l] != 0 && strcspn(b, "/") != l)
                                 return false;
 
                         underscore = strchr(b, '_');
                         if (underscore)
                                 l = underscore - b;
+                        else { /* Either component could be versioned */
+                                underscore = strchr(a, '_');
+                                if (underscore)
+                                        l = underscore - a;
+                        }
 
                         if (!strneq(a, b, l))
                                 return false;
@@ -1527,6 +1536,7 @@ int portable_detach(
 
         _cleanup_(lookup_paths_free) LookupPaths paths = {};
         _cleanup_set_free_ Set *unit_files = NULL, *markers = NULL;
+        _cleanup_free_ char *extensions = NULL;
         _cleanup_closedir_ DIR *d = NULL;
         const char *where, *item;
         int ret = 0;
@@ -1534,7 +1544,7 @@ int portable_detach(
 
         assert(name_or_path);
 
-        r = lookup_paths_init(&paths, UNIT_FILE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, NULL);
+        r = lookup_paths_init(&paths, LOOKUP_SCOPE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, NULL);
         if (r < 0)
                 return r;
 
@@ -1549,40 +1559,47 @@ int portable_detach(
         }
 
         FOREACH_DIRENT(de, d, return log_debug_errno(errno, "Failed to enumerate '%s' directory: %m", where)) {
-                _cleanup_free_ char *marker = NULL;
-                UnitFileState state;
+                _cleanup_free_ char *marker = NULL, *unit_name = NULL;
+                const char *dot;
 
-                if (!unit_name_is_valid(de->d_name, UNIT_NAME_ANY))
+                /* When a portable service is enabled with "portablectl --copy=symlink --enable --now attach",
+                 * and is disabled with "portablectl --enable --now detach", which calls DisableUnitFilesWithFlags
+                 * DBus method, the main unit file is removed, but its drop-ins are not. Hence, here we need
+                 * to list both main unit files and drop-in directories (without the main unit files). */
+
+                dot = endswith(de->d_name, ".d");
+                if (dot)
+                        unit_name = strndup(de->d_name, dot - de->d_name);
+                else
+                        unit_name = strdup(de->d_name);
+                if (!unit_name)
+                        return -ENOMEM;
+
+                if (!unit_name_is_valid(unit_name, UNIT_NAME_ANY))
                         continue;
 
                 /* Filter out duplicates */
-                if (set_contains(unit_files, de->d_name))
+                if (set_contains(unit_files, unit_name))
                         continue;
 
-                if (!IN_SET(de->d_type, DT_LNK, DT_REG))
+                if (dot ? !IN_SET(de->d_type, DT_LNK, DT_DIR) : !IN_SET(de->d_type, DT_LNK, DT_REG))
                         continue;
 
-                r = test_chroot_dropin(d, where, de->d_name, name_or_path, extension_image_paths, &marker);
+                r = test_chroot_dropin(d, where, unit_name, name_or_path, extension_image_paths, &marker);
                 if (r < 0)
                         return r;
                 if (r == 0)
                         continue;
 
-                r = unit_file_lookup_state(UNIT_FILE_SYSTEM, &paths, de->d_name, &state);
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to determine unit file state of '%s': %m", de->d_name);
-                if (!IN_SET(state, UNIT_FILE_STATIC, UNIT_FILE_DISABLED, UNIT_FILE_LINKED, UNIT_FILE_RUNTIME, UNIT_FILE_LINKED_RUNTIME))
-                        return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' is in state '%s', can't detach.", de->d_name, unit_file_state_to_string(state));
-
-                r = unit_file_is_active(bus, de->d_name, error);
+                r = unit_file_is_active(bus, unit_name, error);
                 if (r < 0)
                         return r;
                 if (!FLAGS_SET(flags, PORTABLE_REATTACH) && r > 0)
-                        return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' is active, can't detach.", de->d_name);
+                        return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' is active, can't detach.", unit_name);
 
-                r = set_put_strdup(&unit_files, de->d_name);
+                r = set_ensure_consume(&unit_files, &string_hash_ops_free, TAKE_PTR(unit_name));
                 if (r < 0)
-                        return log_debug_errno(r, "Failed to add unit name '%s' to set: %m", de->d_name);
+                        return log_oom_debug();
 
                 for (const char *p = marker;;) {
                         _cleanup_free_ char *image = NULL;
@@ -1606,7 +1623,6 @@ int portable_detach(
 
         SET_FOREACH(item, unit_files) {
                 _cleanup_free_ char *md = NULL;
-                const char *suffix;
 
                 if (unlinkat(dirfd(d), item, 0) < 0) {
                         log_debug_errno(errno, "Can't remove unit file %s/%s: %m", where, item);
@@ -1682,8 +1698,17 @@ int portable_detach(
         return ret;
 
 not_found:
-        log_debug("No unit files associated with '%s' found. Image not attached?", name_or_path);
-        return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "No unit files associated with '%s' found. Image not attached?", name_or_path);
+        extensions = strv_join(extension_image_paths, ", ");
+        if (!extensions)
+                return -ENOMEM;
+
+        r = sd_bus_error_setf(error,
+                              BUS_ERROR_NO_SUCH_UNIT,
+                              "No unit files associated with '%s%s%s' found attached to the system. Image not attached?",
+                              name_or_path,
+                              isempty(extensions) ? "" : "' or any of its extensions '",
+                              isempty(extensions) ? "" : extensions);
+        return log_debug_errno(r, "%s", error->message);
 }
 
 static int portable_get_state_internal(
@@ -1704,7 +1729,7 @@ static int portable_get_state_internal(
         assert(name_or_path);
         assert(ret);
 
-        r = lookup_paths_init(&paths, UNIT_FILE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, NULL);
+        r = lookup_paths_init(&paths, LOOKUP_SCOPE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, NULL);
         if (r < 0)
                 return r;
 
@@ -1740,7 +1765,7 @@ static int portable_get_state_internal(
                 if (r == 0)
                         continue;
 
-                r = unit_file_lookup_state(UNIT_FILE_SYSTEM, &paths, de->d_name, &state);
+                r = unit_file_lookup_state(LOOKUP_SCOPE_SYSTEM, &paths, de->d_name, &state);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to determine unit file state of '%s': %m", de->d_name);
                 if (!IN_SET(state, UNIT_FILE_STATIC, UNIT_FILE_DISABLED, UNIT_FILE_LINKED, UNIT_FILE_LINKED_RUNTIME))

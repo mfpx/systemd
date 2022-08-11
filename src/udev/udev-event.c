@@ -611,7 +611,6 @@ static int on_spawn_io(sd_event_source *s, int fd, uint32_t revents, void *userd
         /* Log output only if we watch stderr. */
         if (l > 0 && spawn->fd_stderr >= 0) {
                 _cleanup_strv_free_ char **v = NULL;
-                char **q;
 
                 r = strv_split_newlines_full(&v, p, EXTRACT_RETAIN_ESCAPE);
                 if (r < 0)
@@ -696,9 +695,9 @@ static int on_spawn_sigchld(sd_event_source *s, const siginfo_t *si, void *userd
 
 static int spawn_wait(Spawn *spawn) {
         _cleanup_(sd_event_unrefp) sd_event *e = NULL;
-        _cleanup_(sd_event_source_unrefp) sd_event_source *sigchld_source = NULL;
-        _cleanup_(sd_event_source_unrefp) sd_event_source *stdout_source = NULL;
-        _cleanup_(sd_event_source_unrefp) sd_event_source *stderr_source = NULL;
+        _cleanup_(sd_event_source_disable_unrefp) sd_event_source *sigchld_source = NULL;
+        _cleanup_(sd_event_source_disable_unrefp) sd_event_source *stdout_source = NULL;
+        _cleanup_(sd_event_source_disable_unrefp) sd_event_source *stderr_source = NULL;
         int r;
 
         assert(spawn);
@@ -870,15 +869,21 @@ int udev_event_spawn(
 }
 
 static int rename_netif(UdevEvent *event) {
-        sd_device *dev = event->dev;
         const char *oldname;
+        sd_device *dev;
         unsigned flags;
         int ifindex, r;
+
+        assert(event);
 
         if (!event->name)
                 return 0; /* No new name is requested. */
 
-        r = sd_device_get_sysname(dev, &oldname);
+        dev = ASSERT_PTR(event->dev);
+
+        /* Read sysname from cloned sd-device object, otherwise use-after-free is triggered, as the
+         * main object will be renamed and dev->sysname will be freed in device_rename(). */
+        r = sd_device_get_sysname(event->dev_db_clone, &oldname);
         if (r < 0)
                 return log_device_error_errno(dev, r, "Failed to get sysname: %m");
 
@@ -967,9 +972,6 @@ static int update_devnode(UdevEvent *event) {
                 if (r < 0 && r != -ENOENT)
                         return log_device_error_errno(dev, r, "Failed to get devnode mode: %m");
         }
-        if (event->mode == MODE_INVALID && gid_is_valid(event->gid) && event->gid > 0)
-                /* If group is set, but mode is not set, "upgrade" mode for the group. */
-                event->mode = 0660;
 
         bool apply_mac = device_for_action(dev, SD_DEVICE_ADD);
 

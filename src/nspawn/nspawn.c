@@ -78,13 +78,13 @@
 #include "nspawn-settings.h"
 #include "nspawn-setuid.h"
 #include "nspawn-stub-pid1.h"
+#include "nspawn-util.h"
 #include "nspawn.h"
 #include "nulstr-util.h"
 #include "os-util.h"
 #include "pager.h"
 #include "parse-argument.h"
 #include "parse-util.h"
-#include "path-util.h"
 #include "pretty-print.h"
 #include "process-util.h"
 #include "ptyfwd.h"
@@ -230,6 +230,7 @@ static Credential *arg_credentials = NULL;
 static size_t arg_n_credentials = 0;
 static char **arg_bind_user = NULL;
 static bool arg_suppress_sync = false;
+static char *arg_settings_filename = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(arg_directory, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_template, freep);
@@ -263,6 +264,7 @@ STATIC_DESTRUCTOR_REGISTER(arg_seccomp, seccomp_releasep);
 STATIC_DESTRUCTOR_REGISTER(arg_cpu_set, cpu_set_reset);
 STATIC_DESTRUCTOR_REGISTER(arg_sysctl, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_bind_user, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_settings_filename, freep);
 
 static int handle_arg_console(const char *arg) {
         if (streq(arg, "help")) {
@@ -357,12 +359,16 @@ static int help(void) {
                "     --keep-unit            Do not register a scope for the machine, reuse\n"
                "                            the service unit nspawn is running in\n\n"
                "%3$sUser Namespacing:%4$s\n"
-               "  -U --private-users=pick   Run within user namespace, autoselect UID/GID range\n"
-               "     --private-users[=UIDBASE[:NUIDS]]\n"
+               "     --private-users=no     Run without user namespacing\n"
+               "     --private-users=yes|pick|identity\n"
+               "                            Run within user namespace, autoselect UID/GID range\n"
+               "     --private-users=UIDBASE[:NUIDS]\n"
                "                            Similar, but with user configured UID/GID range\n"
                "     --private-users-ownership=MODE\n"
                "                            Adjust ('chown') or map ('map') OS tree ownership\n"
-               "                            to private UID/GID range\n\n"
+               "                            to private UID/GID range\n"
+               "  -U                        Equivalent to --private-users=pick and\n"
+               "                            --private-users-ownership=auto\n\n"
                "%3$sNetworking:%4$s\n"
                "     --private-network      Disable network in container\n"
                "     --network-interface=INTERFACE\n"
@@ -509,7 +515,7 @@ static int detect_unified_cgroup_hierarchy_from_image(const char *directory) {
         if (r > 0) {
                 /* Unified cgroup hierarchy support was added in 230. Unfortunately the detection
                  * routine only detects 231, so we'll have a false negative here for 230. */
-                r = systemd_installation_has_version(directory, 230);
+                r = systemd_installation_has_version(directory, "230");
                 if (r < 0)
                         return log_error_errno(r, "Failed to determine systemd version in container: %m");
                 if (r > 0)
@@ -518,7 +524,7 @@ static int detect_unified_cgroup_hierarchy_from_image(const char *directory) {
                         arg_unified_cgroup_hierarchy = CGROUP_UNIFIED_NONE;
         } else if (cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER) > 0) {
                 /* Mixed cgroup hierarchy support was added in 233 */
-                r = systemd_installation_has_version(directory, 233);
+                r = systemd_installation_has_version(directory, "233");
                 if (r < 0)
                         return log_error_errno(r, "Failed to determine systemd version in container: %m");
                 if (r > 0)
@@ -2564,7 +2570,7 @@ static int setup_hostname(void) {
 
 static int setup_journal(const char *directory) {
         _cleanup_free_ char *d = NULL;
-        const char *dirname, *p, *q;
+        const char *p, *q;
         sd_id128_t this_id;
         bool try;
         int r;
@@ -2678,7 +2684,7 @@ static int setup_journal(const char *directory) {
         } else if (access(p, F_OK) < 0)
                 return 0;
 
-        if (dir_is_empty(q) == 0)
+        if (dir_is_empty(q, /* ignore_hidden_or_backup= */ false) == 0)
                 log_warning("%s is not empty, proceeding anyway.", q);
 
         r = userns_mkdir(directory, p, 0755, 0, 0);
@@ -3046,11 +3052,21 @@ static int determine_names(void) {
                 if (!hostname_is_valid(arg_machine, 0))
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to determine machine name automatically, please use -M.");
 
+                /* Copy the machine name before the random suffix is added below, otherwise we won't be able
+                 * to match fixed config file names. */
+                arg_settings_filename = strjoin(arg_machine, ".nspawn");
+                if (!arg_settings_filename)
+                        return log_oom();
+
                 /* Add a random suffix when this is an ephemeral machine, so that we can run many
                  * instances at once without manually having to specify -M each time. */
                 if (arg_ephemeral)
                         if (strextendf(&arg_machine, "-%016" PRIx64, random_u64()) < 0)
                                 return log_oom();
+        } else {
+                arg_settings_filename = strjoin(arg_machine, ".nspawn");
+                if (!arg_settings_filename)
+                        return log_oom();
         }
 
         return 0;
@@ -3149,7 +3165,6 @@ static int patch_sysctl(void) {
         };
 
         unsigned long flags;
-        char **k, **v;
         int r;
 
         flags = effective_clone_ns_flags();
@@ -3207,6 +3222,7 @@ static int inner_child(
                 NULL, /* LISTEN_PID */
                 NULL, /* NOTIFY_SOCKET */
                 NULL, /* CREDENTIALS_DIRECTORY */
+                NULL, /* LANG */
                 NULL
         };
         const char *exec_target;
@@ -3475,6 +3491,13 @@ static int inner_child(
                 n_env++;
         }
 
+        if (arg_start_mode != START_BOOT) {
+                envp[n_env] = strdup("LANG=" SYSTEMD_NSPAWN_LOCALE);
+                if (!envp[n_env])
+                        return log_oom();
+                n_env++;
+        }
+
         env_use = strv_env_merge(envp, os_release_pairs, arg_setenv);
         if (!env_use)
                 return log_oom();
@@ -3513,7 +3536,6 @@ static int inner_child(
         (void) fdset_close_others(fds);
 
         if (arg_start_mode == START_BOOT) {
-                const char *init;
                 char **a;
                 size_t m;
 
@@ -3552,10 +3574,13 @@ static int inner_child(
                         /* If we cannot change the directory, we'll end up in /, that is expected. */
                         (void) chdir(home ?: "/root");
 
-                execle("/bin/bash", "-bash", NULL, env_use);
-                execle("/bin/sh", "-sh", NULL, env_use);
+                execle(DEFAULT_USER_SHELL, "-" DEFAULT_USER_SHELL_NAME, NULL, env_use);
+                if (!streq(DEFAULT_USER_SHELL, "/bin/bash"))
+                        execle("/bin/bash", "-bash", NULL, env_use);
+                if (!streq(DEFAULT_USER_SHELL, "/bin/sh"))
+                        execle("/bin/sh", "-sh", NULL, env_use);
 
-                exec_target = "/bin/bash, /bin/sh";
+                exec_target = DEFAULT_USER_SHELL ", /bin/bash, /bin/sh";
         }
 
         return log_error_errno(errno, "execv(%s) failed: %m", exec_target);
@@ -4113,8 +4138,8 @@ static int make_uid_map_string(
          * quadruplet, consisting of host and container UID + GID. */
 
         for (size_t i = 0; i < n_bind_user_uid; i++) {
-                uid_t payload_uid = bind_user_uid[i*2+offset],
-                        host_uid = bind_user_uid[i*2+offset+1];
+                uid_t payload_uid = bind_user_uid[i*4+offset],
+                        host_uid = bind_user_uid[i*4+offset+1];
 
                 assert(previous_uid <= payload_uid);
                 assert(payload_uid < arg_uid_range);
@@ -4604,7 +4629,6 @@ static int load_settings(void) {
         _cleanup_(settings_freep) Settings *settings = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *p = NULL;
-        const char *fn, *i;
         int r;
 
         if (arg_oci_bundle)
@@ -4615,13 +4639,11 @@ static int load_settings(void) {
         if (FLAGS_SET(arg_settings_mask, _SETTINGS_MASK_ALL))
                 return 0;
 
-        fn = strjoina(arg_machine, ".nspawn");
-
         /* We first look in the admin's directories in /etc and /run */
         FOREACH_STRING(i, "/etc/systemd/nspawn", "/run/systemd/nspawn") {
                 _cleanup_free_ char *j = NULL;
 
-                j = path_join(i, fn);
+                j = path_join(i, arg_settings_filename);
                 if (!j)
                         return log_oom();
 
@@ -4645,11 +4667,11 @@ static int load_settings(void) {
                  * actual image we shall boot. */
 
                 if (arg_image) {
-                        p = file_in_same_dir(arg_image, fn);
+                        p = file_in_same_dir(arg_image, arg_settings_filename);
                         if (!p)
                                 return log_oom();
                 } else if (arg_directory && !path_equal(arg_directory, "/")) {
-                        p = file_in_same_dir(arg_directory, fn);
+                        p = file_in_same_dir(arg_directory, arg_settings_filename);
                         if (!p)
                                 return log_oom();
                 }
@@ -5366,12 +5388,6 @@ static int initialize_rlimits(void) {
 }
 
 static int cant_be_in_netns(void) {
-        union sockaddr_union sa = {
-                .un = {
-                        .sun_family = AF_UNIX,
-                        .sun_path = "/run/udev/control",
-                },
-        };
         char udev_path[STRLEN("/proc//ns/net") + DECIMAL_STR_MAX(pid_t)];
         _cleanup_free_ char *udev_ns = NULL, *our_ns = NULL;
         _cleanup_close_ int fd = -1;
@@ -5389,13 +5405,13 @@ static int cant_be_in_netns(void) {
         if (fd < 0)
                 return log_error_errno(errno, "Failed to allocate udev control socket: %m");
 
-        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
-
-                if (errno == ENOENT || ERRNO_IS_DISCONNECT(errno))
+        r = connect_unix_path(fd, AT_FDCWD, "/run/udev/control");
+        if (r < 0) {
+                if (r == -ENOENT || ERRNO_IS_DISCONNECT(r))
                         return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
                                                "Sorry, but --image= requires access to the host's /run/ hierarchy, since we need access to udev.");
 
-                return log_error_errno(errno, "Failed to connect socket to udev control socket: %m");
+                return log_error_errno(r, "Failed to connect socket to udev control socket: %m");
         }
 
         r = getpeercred(fd, &ucred);
@@ -5733,6 +5749,13 @@ static int run(int argc, char *argv[]) {
                                 &loop);
                 if (r < 0) {
                         log_error_errno(r, "Failed to set up loopback block device: %m");
+                        goto finish;
+                }
+
+                /* Take a LOCK_SH lock on the device, so that udevd doesn't issue BLKRRPART in our back */
+                r = loop_device_flock(loop, LOCK_SH);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to take lock on loopback block device: %m");
                         goto finish;
                 }
 

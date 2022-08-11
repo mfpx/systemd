@@ -871,11 +871,9 @@ static int process_root_args(void) {
         etc_passwd = prefix_roota(arg_root, "/etc/passwd");
         etc_shadow = prefix_roota(arg_root, "/etc/shadow");
 
-        /* We only mess with passwd and shadow if both do not exist or --force is specified. These files are
-         * tightly coupled and hence we make sure we have permission from the user to create/modify both
-         * files. */
-        if ((laccess(etc_passwd, F_OK) >= 0 || laccess(etc_shadow, F_OK) >= 0) && !arg_force)
+        if (laccess(etc_passwd, F_OK) >= 0 && laccess(etc_shadow, F_OK) >= 0 && !arg_force)
                 return 0;
+
         /* Don't create/modify passwd and shadow if not asked */
         if (!(arg_root_password || arg_prompt_root_password || arg_copy_root_password || arg_delete_root_password ||
               arg_root_shell || arg_prompt_root_shell || arg_copy_root_shell))
@@ -984,37 +982,37 @@ static int help(void) {
 
         printf("%s [OPTIONS...]\n\n"
                "Configures basic settings of the system.\n\n"
-               "  -h --help                                 Show this help\n"
-               "     --version                              Show package version\n"
-               "     --root=PATH                            Operate on an alternate filesystem root\n"
-               "     --image=PATH                           Operate on an alternate filesystem image\n"
-               "     --locale=LOCALE                        Set primary locale (LANG=)\n"
-               "     --locale-messages=LOCALE               Set message locale (LC_MESSAGES=)\n"
-               "     --keymap=KEYMAP                        Set keymap\n"
-               "     --timezone=TIMEZONE                    Set timezone\n"
-               "     --hostname=NAME                        Set hostname\n"
-               "     --machine-ID=ID                        Set machine ID\n"
-               "     --root-password=PASSWORD               Set root password from plaintext password\n"
-               "     --root-password-file=FILE              Set root password from file\n"
-               "     --root-password-hashed=HASHED_PASSWORD Set root password from hashed password\n"
-               "     --root-shell=SHELL                     Set root shell\n"
-               "     --prompt-locale                        Prompt the user for locale settings\n"
-               "     --prompt-keymap                        Prompt the user for keymap settings\n"
-               "     --prompt-timezone                      Prompt the user for timezone\n"
-               "     --prompt-hostname                      Prompt the user for hostname\n"
-               "     --prompt-root-password                 Prompt the user for root password\n"
-               "     --prompt-root-shell                    Prompt the user for root shell\n"
-               "     --prompt                               Prompt for all of the above\n"
-               "     --copy-locale                          Copy locale from host\n"
-               "     --copy-keymap                          Copy keymap from host\n"
-               "     --copy-timezone                        Copy timezone from host\n"
-               "     --copy-root-password                   Copy root password from host\n"
-               "     --copy-root-shell                      Copy root shell from host\n"
-               "     --copy                                 Copy locale, keymap, timezone, root password\n"
-               "     --setup-machine-id                     Generate a new random machine ID\n"
-               "     --force                                Overwrite existing files\n"
-               "     --delete-root-password                 Delete root password\n"
-               "     --welcome=no                           Disable the welcome text\n"
+               "  -h --help                       Show this help\n"
+               "     --version                    Show package version\n"
+               "     --root=PATH                  Operate on an alternate filesystem root\n"
+               "     --image=PATH                 Operate on an alternate filesystem image\n"
+               "     --locale=LOCALE              Set primary locale (LANG=)\n"
+               "     --locale-messages=LOCALE     Set message locale (LC_MESSAGES=)\n"
+               "     --keymap=KEYMAP              Set keymap\n"
+               "     --timezone=TIMEZONE          Set timezone\n"
+               "     --hostname=NAME              Set hostname\n"
+               "     --machine-ID=ID              Set machine ID\n"
+               "     --root-password=PASSWORD     Set root password from plaintext password\n"
+               "     --root-password-file=FILE    Set root password from file\n"
+               "     --root-password-hashed=HASH  Set root password from hashed password\n"
+               "     --root-shell=SHELL           Set root shell\n"
+               "     --prompt-locale              Prompt the user for locale settings\n"
+               "     --prompt-keymap              Prompt the user for keymap settings\n"
+               "     --prompt-timezone            Prompt the user for timezone\n"
+               "     --prompt-hostname            Prompt the user for hostname\n"
+               "     --prompt-root-password       Prompt the user for root password\n"
+               "     --prompt-root-shell          Prompt the user for root shell\n"
+               "     --prompt                     Prompt for all of the above\n"
+               "     --copy-locale                Copy locale from host\n"
+               "     --copy-keymap                Copy keymap from host\n"
+               "     --copy-timezone              Copy timezone from host\n"
+               "     --copy-root-password         Copy root password from host\n"
+               "     --copy-root-shell            Copy root shell from host\n"
+               "     --copy                       Copy locale, keymap, timezone, root password\n"
+               "     --setup-machine-id           Generate a new random machine ID\n"
+               "     --force                      Overwrite existing files\n"
+               "     --delete-root-password       Delete root password\n"
+               "     --welcome=no                 Disable the welcome text\n"
                "\nSee the %s for details.\n",
                program_invocation_short_name,
                link);

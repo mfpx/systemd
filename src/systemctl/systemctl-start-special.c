@@ -18,7 +18,7 @@
 #include "systemctl.h"
 
 static int load_kexec_kernel(void) {
-        _cleanup_(boot_config_free) BootConfig config = {};
+        _cleanup_(boot_config_free) BootConfig config = BOOT_CONFIG_NULL;
         _cleanup_free_ char *kernel = NULL, *initrd = NULL, *options = NULL;
         const BootEntry *e;
         pid_t pid;
@@ -32,7 +32,7 @@ static int load_kexec_kernel(void) {
         if (access(KEXEC, X_OK) < 0)
                 return log_error_errno(errno, KEXEC" is not available: %m");
 
-        r = boot_entries_load_config_auto(NULL, NULL, &config);
+        r = boot_config_load_auto(&config, NULL, NULL);
         if (r == -ENOKEY)
                 /* The call doesn't log about ENOKEY, let's do so here. */
                 return log_error_errno(r,
@@ -40,6 +40,10 @@ static int load_kexec_kernel(void) {
                                        is_efi_boot()
                                        ? "Cannot automatically load kernel: ESP mount point not found."
                                        : "Automatic loading works only on systems booted with EFI.");
+        if (r < 0)
+                return r;
+
+        r = boot_config_select_special_entries(&config, /* skip_efivars= */ false);
         if (r < 0)
                 return r;
 
@@ -242,10 +246,10 @@ int verb_start_special(int argc, char *argv[], void *userdata) {
 int verb_start_system_special(int argc, char *argv[], void *userdata) {
         /* Like start_special above, but raises an error when running in user mode */
 
-        if (arg_scope != UNIT_FILE_SYSTEM)
+        if (arg_scope != LOOKUP_SCOPE_SYSTEM)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Bad action for %s mode.",
-                                       arg_scope == UNIT_FILE_GLOBAL ? "--global" : "--user");
+                                       arg_scope == LOOKUP_SCOPE_GLOBAL ? "--global" : "--user");
 
         return verb_start_special(argc, argv, userdata);
 }

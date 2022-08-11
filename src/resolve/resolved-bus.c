@@ -180,14 +180,8 @@ static int reply_query_state(DnsQuery *q) {
                         sd_bus_error_setf(&error, _BUS_ERROR_DNS "NXDOMAIN", "'%s' not found", dns_query_string(q));
                 else {
                         const char *rc, *n;
-                        char p[DECIMAL_STR_MAX(q->answer_rcode)];
 
-                        rc = dns_rcode_to_string(q->answer_rcode);
-                        if (!rc) {
-                                xsprintf(p, "%i", q->answer_rcode);
-                                rc = p;
-                        }
-
+                        rc = FORMAT_DNS_RCODE(q->answer_rcode);
                         n = strjoina(_BUS_ERROR_DNS, rc);
                         sd_bus_error_setf(&error, n, "Could not resolve '%s', server or network returned error %s", dns_query_string(q), rc);
                 }
@@ -596,11 +590,9 @@ static void bus_method_resolve_address_complete(DnsQuery *query) {
         }
 
         if (added <= 0) {
-                _cleanup_free_ char *ip = NULL;
-
-                (void) in_addr_to_string(q->request_family, &q->request_address, &ip);
                 r = reply_method_errorf(q, BUS_ERROR_NO_SUCH_RR,
-                                               "Address '%s' does not have any RR of requested type", strnull(ip));
+                                        "Address %s does not have any RR of requested type",
+                                        IN_ADDR_TO_STRING(q->request_family, &q->request_address));
                 goto finish;
         }
 
@@ -863,7 +855,6 @@ static int bus_method_resolve_record(sd_bus_message *message, void *userdata, sd
 static int append_srv(DnsQuery *q, sd_bus_message *reply, DnsResourceRecord *rr) {
         _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *canonical = NULL;
         _cleanup_free_ char *normalized = NULL;
-        DnsQuery *aux;
         int r;
 
         assert(q);
@@ -994,7 +985,6 @@ static int append_srv(DnsQuery *q, sd_bus_message *reply, DnsResourceRecord *rr)
 }
 
 static int append_txt(sd_bus_message *reply, DnsResourceRecord *rr) {
-        DnsTxtItem *i;
         int r;
 
         assert(reply);
@@ -1025,7 +1015,6 @@ static void resolve_service_all_complete(DnsQuery *query) {
         DnsQuestion *question;
         DnsResourceRecord *rr;
         unsigned added = 0;
-        DnsQuery *aux;
         int r;
 
         assert(q);
@@ -1448,7 +1437,6 @@ static int bus_property_get_dns_servers_internal(
                 bool extended) {
 
         Manager *m = userdata;
-        DnsServer *s;
         Link *l;
         int r;
 
@@ -1507,7 +1495,7 @@ static int bus_property_get_fallback_dns_servers_internal(
                 sd_bus_error *error,
                 bool extended) {
 
-        DnsServer *s, **f = userdata;
+        DnsServer **f = userdata;
         int r;
 
         assert(reply);
@@ -1600,7 +1588,6 @@ static int bus_property_get_domains(
                 sd_bus_error *error) {
 
         Manager *m = userdata;
-        DnsSearchDomain *d;
         Link *l;
         int r;
 
@@ -1658,7 +1645,6 @@ static int bus_property_get_cache_statistics(
 
         uint64_t size = 0, hit = 0, miss = 0;
         Manager *m = userdata;
-        DnsScope *s;
 
         assert(reply);
         assert(m);
@@ -1751,7 +1737,6 @@ static int bus_property_get_resolv_conf_mode(
 
 static int bus_method_reset_statistics(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         Manager *m = userdata;
-        DnsScope *s;
 
         assert(message);
         assert(m);
@@ -1906,13 +1891,10 @@ static int bus_method_register_service(sd_bus_message *message, void *userdata, 
         _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
         _cleanup_(dnssd_service_freep) DnssdService *service = NULL;
         _cleanup_(sd_bus_track_unrefp) sd_bus_track *bus_track = NULL;
+        const char *name, *name_template, *type;
         _cleanup_free_ char *path = NULL;
-        _cleanup_free_ char *instance_name = NULL;
-        Manager *m = userdata;
         DnssdService *s = NULL;
-        const char *name;
-        const char *name_template;
-        const char *type;
+        Manager *m = userdata;
         uid_t euid;
         int r;
 
@@ -1960,7 +1942,7 @@ static int bus_method_register_service(sd_bus_message *message, void *userdata, 
         if (!service->type)
                 return log_oom();
 
-        r = dnssd_render_instance_name(service, &instance_name);
+        r = dnssd_render_instance_name(m, service, NULL);
         if (r < 0)
                 return r;
 
@@ -2000,7 +1982,7 @@ static int bus_method_register_service(sd_bus_message *message, void *userdata, 
                         if (r < 0)
                                 return r;
 
-                        LIST_INSERT_AFTER(items, txt_data->txt, last, i);
+                        LIST_INSERT_AFTER(items, txt_data->txts, last, i);
                         last = i;
 
                         r = sd_bus_message_exit_container(message);
@@ -2015,7 +1997,7 @@ static int bus_method_register_service(sd_bus_message *message, void *userdata, 
                 if (r < 0)
                         return r;
 
-                if (txt_data->txt) {
+                if (txt_data->txts) {
                         LIST_PREPEND(items, service->txt_data_items, txt_data);
                         txt_data = NULL;
                 }
@@ -2034,7 +2016,7 @@ static int bus_method_register_service(sd_bus_message *message, void *userdata, 
                 if (!txt_data)
                         return log_oom();
 
-                r = dns_txt_item_new_empty(&txt_data->txt);
+                r = dns_txt_item_new_empty(&txt_data->txts);
                 if (r < 0)
                         return r;
 

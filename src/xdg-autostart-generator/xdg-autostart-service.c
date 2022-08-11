@@ -396,7 +396,7 @@ int xdg_autostart_format_exec_start(
 
         first_arg = true;
         for (i = n = 0; exec_split[i]; i++) {
-                _cleanup_free_ char *c = NULL, *raw = NULL, *p = NULL, *escaped = NULL, *quoted = NULL;
+                _cleanup_free_ char *c = NULL, *raw = NULL, *percent = NULL;
                 ssize_t l;
 
                 l = cunescape(exec_split[i], 0, &c);
@@ -412,11 +412,7 @@ int xdg_autostart_format_exec_start(
                         if (r < 0)
                                 return log_info_errno(r, "Exec binary '%s' does not exist: %m", c);
 
-                        escaped = cescape(executable);
-                        if (!escaped)
-                                return log_oom();
-
-                        free_and_replace(exec_split[n++], escaped);
+                        free_and_replace(exec_split[n++], executable);
                         continue;
                 }
 
@@ -445,23 +441,16 @@ int xdg_autostart_format_exec_start(
                 raw = strreplace(c, "%%", "%");
                 if (!raw)
                         return log_oom();
-                p = strreplace(raw, "%", "%%");
-                if (!p)
-                        return log_oom();
-                escaped = cescape(p);
-                if (!escaped)
+                percent = strreplace(raw, "%", "%%");
+                if (!percent)
                         return log_oom();
 
-                quoted = strjoin("\"", escaped, "\"");
-                if (!quoted)
-                        return log_oom();
-
-                free_and_replace(exec_split[n++], quoted);
+                free_and_replace(exec_split[n++], percent);
         }
         for (; exec_split[n]; n++)
                 exec_split[n] = mfree(exec_split[n]);
 
-        res = strv_join(exec_split, " ");
+        res = quote_command_line(exec_split, SHELL_ESCAPE_EMPTY);
         if (!res)
                 return log_oom();
 
@@ -494,8 +483,9 @@ static int xdg_autostart_generate_desktop_condition(
                 if (!e_autostart_condition)
                         return log_oom();
 
-                log_debug("%s: ExecCondition converted to %s --condition \"%s\"…",
-                          service->path, gnome_autostart_condition_path, e_autostart_condition);
+                log_debug("%s: ExecCondition converted to %s --condition \"%s\"%s",
+                          service->path, gnome_autostart_condition_path, e_autostart_condition,
+                          special_glyph(SPECIAL_GLYPH_ELLIPSIS));
 
                 fprintf(f,
                          "ExecCondition=%s --condition \"%s\"\n",
@@ -649,6 +639,7 @@ int xdg_autostart_service_generate_unit(
         if (r < 0)
                 return r;
 
-        log_debug("%s: symlinking %s in xdg-desktop-autostart.target/.wants…", service->path, service->name);
+        log_debug("%s: symlinking %s in xdg-desktop-autostart.target/.wants%s",
+                  service->path, service->name, special_glyph(SPECIAL_GLYPH_ELLIPSIS));
         return generator_add_symlink(dest, "xdg-desktop-autostart.target", "wants", service->name);
 }

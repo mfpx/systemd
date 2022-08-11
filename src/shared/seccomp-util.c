@@ -80,6 +80,11 @@ uint32_t seccomp_local_archs[] = {
                 SCMP_ARCH_MIPSEL64,
                 SCMP_ARCH_MIPS64N32,
                 SCMP_ARCH_MIPSEL64N32, /* native */
+#elif defined(__hppa64__) && defined(SCMP_ARCH_PARISC) && defined(SCMP_ARCH_PARISC64)
+                SCMP_ARCH_PARISC,
+                SCMP_ARCH_PARISC64,    /* native */
+#elif defined(__hppa__) && defined(SCMP_ARCH_PARISC)
+                SCMP_ARCH_PARISC,
 #elif defined(__powerpc64__) && __BYTE_ORDER == __BIG_ENDIAN
                 SCMP_ARCH_PPC,
                 SCMP_ARCH_PPC64LE,
@@ -107,7 +112,7 @@ const char* seccomp_arch_to_string(uint32_t c) {
          * Names used here should be the same as those used for ConditionArchitecture=,
          * except for "subarchitectures" like x32. */
 
-        switch(c) {
+        switch (c) {
         case SCMP_ARCH_NATIVE:
                 return "native";
         case SCMP_ARCH_X86:
@@ -132,6 +137,14 @@ const char* seccomp_arch_to_string(uint32_t c) {
                 return "mips64-le";
         case SCMP_ARCH_MIPSEL64N32:
                 return "mips64-le-n32";
+#ifdef SCMP_ARCH_PARISC
+        case SCMP_ARCH_PARISC:
+                return "parisc";
+#endif
+#ifdef SCMP_ARCH_PARISC64
+        case SCMP_ARCH_PARISC64:
+                return "parisc64";
+#endif
         case SCMP_ARCH_PPC:
                 return "ppc";
         case SCMP_ARCH_PPC64:
@@ -181,6 +194,14 @@ int seccomp_arch_from_string(const char *n, uint32_t *ret) {
                 *ret = SCMP_ARCH_MIPSEL64;
         else if (streq(n, "mips64-le-n32"))
                 *ret = SCMP_ARCH_MIPSEL64N32;
+#ifdef SCMP_ARCH_PARISC
+        else if (streq(n, "parisc"))
+                *ret = SCMP_ARCH_PARISC;
+#endif
+#ifdef SCMP_ARCH_PARISC64
+        else if (streq(n, "parisc64"))
+                *ret = SCMP_ARCH_PARISC64;
+#endif
         else if (streq(n, "ppc"))
                 *ret = SCMP_ARCH_PPC;
         else if (streq(n, "ppc64"))
@@ -718,6 +739,9 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 .value =
                 "capget\0"      /* Able to query arbitrary processes */
                 "clone\0"
+                /* ia64 as the only architecture has clone2, a replacement for clone, but ia64 doesn't
+                 * implement seccomp, so we don't need to list it at all. C.f.
+                 * acce2f71779c54086962fefce3833d886c655f62 in the kernel. */
                 "clone3\0"
                 "execveat\0"
                 "fork\0"
@@ -925,6 +949,7 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 .name = "@known",
                 .help = "All known syscalls declared in the kernel",
                 .value =
+                "@obsolete\0"
 #include "syscall-list.h"
         },
 };
@@ -1120,7 +1145,7 @@ int seccomp_load_syscall_filter_set_raw(uint32_t default_action, Hashmap* filter
                 if (ERRNO_IS_SECCOMP_FATAL(r))
                         return r;
                 if (r < 0)
-                        log_debug_errno(r, "Failed to install systemc call filter for architecture %s, skipping: %m",
+                        log_debug_errno(r, "Failed to install system call filter for architecture %s, skipping: %m",
                                         seccomp_arch_to_string(arch));
         }
 
@@ -1226,6 +1251,21 @@ int seccomp_restrict_namespaces(unsigned long retain) {
                 r = seccomp_init_for_arch(&seccomp, arch, SCMP_ACT_ALLOW);
                 if (r < 0)
                         return r;
+
+                /* We cannot filter on individual flags to clone3(), and we need to disable the
+                 * syscall altogether. ENOSYS is used instead of EPERM, so that glibc and other
+                 * users shall fall back to clone(), as if on an older kernel.
+                 *
+                 * C.f. https://github.com/flatpak/flatpak/commit/a10f52a7565c549612c92b8e736a6698a53db330,
+                 * https://github.com/moby/moby/issues/42680. */
+
+                r = seccomp_rule_add_exact(
+                                seccomp,
+                                SCMP_ACT_ERRNO(ENOSYS),
+                                SCMP_SYS(clone3),
+                                0);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to add clone3() rule for architecture %s, ignoring: %m", seccomp_arch_to_string(arch));
 
                 if ((retain & NAMESPACE_FLAGS_ALL) == 0)
                         /* If every single kind of namespace shall be prohibited, then let's block the whole setns() syscall
@@ -1424,6 +1464,12 @@ int seccomp_restrict_address_families(Set *address_families, bool allow_list) {
                 case SCMP_ARCH_X86:
                 case SCMP_ARCH_MIPSEL:
                 case SCMP_ARCH_MIPS:
+#ifdef SCMP_ARCH_PARISC
+                case SCMP_ARCH_PARISC:
+#endif
+#ifdef SCMP_ARCH_PARISC64
+                case SCMP_ARCH_PARISC64:
+#endif
                 case SCMP_ARCH_PPC:
                 case SCMP_ARCH_PPC64:
                 case SCMP_ARCH_PPC64LE:
@@ -1674,7 +1720,11 @@ int seccomp_memory_deny_write_execute(void) {
 
                 /* Note that on some architectures shmat() isn't available, and the call is multiplexed through ipc().
                  * We ignore that here, which means there's still a way to get writable/executable
-                 * memory, if an IPC key is mapped like this. That's a pity, but no total loss. */
+                 * memory, if an IPC key is mapped like this. That's a pity, but no total loss.
+                 *
+                 * Also, PARISC isn't here right now because it still needs executable memory, but work is in progress
+                 * on that front (kernel work done in 5.18).
+                 */
 
                 case SCMP_ARCH_X86:
                 case SCMP_ARCH_S390:
@@ -1708,7 +1758,7 @@ int seccomp_memory_deny_write_execute(void) {
 
                 /* Please add more definitions here, if you port systemd to other architectures! */
 
-#if !defined(__i386__) && !defined(__x86_64__) && !defined(__powerpc__) && !defined(__powerpc64__) && !defined(__arm__) && !defined(__aarch64__) && !defined(__s390__) && !defined(__s390x__) && !(defined(__riscv) && __riscv_xlen == 64)
+#if !defined(__i386__) && !defined(__x86_64__) && !defined(__hppa__) && !defined(__hppa64__) && !defined(__powerpc__) && !defined(__powerpc64__) && !defined(__arm__) && !defined(__aarch64__) && !defined(__s390__) && !defined(__s390x__) && !(defined(__riscv) && __riscv_xlen == 64)
 #warning "Consider adding the right mmap() syscall definitions here!"
 #endif
                 }
@@ -1837,7 +1887,6 @@ int seccomp_restrict_archs(Set *archs) {
 
 int parse_syscall_archs(char **l, Set **ret_archs) {
         _cleanup_set_free_ Set *archs = NULL;
-        char **s;
         int r;
 
         assert(l);

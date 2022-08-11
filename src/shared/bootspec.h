@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+#include "json.h"
+#include "set.h"
 #include "string-util.h"
 
 typedef enum BootEntryType {
@@ -55,38 +57,62 @@ typedef struct BootConfig {
 
         BootEntry *entries;
         size_t n_entries;
+
         ssize_t default_entry;
         ssize_t selected_entry;
+
+        Set *inodes_seen;
 } BootConfig;
 
-static inline BootEntry* boot_config_find_entry(BootConfig *config, const char *id) {
-        assert(config);
-        assert(id);
+#define BOOT_CONFIG_NULL              \
+        {                             \
+                .default_entry = -1,  \
+                .selected_entry = -1, \
+        }
 
-        for (size_t j = 0; j < config->n_entries; j++)
-                if (streq_ptr(config->entries[j].id, id) ||
-                    streq_ptr(config->entries[j].id_old, id))
-                        return config->entries + j;
+const char* boot_entry_type_to_string(BootEntryType);
 
-        return NULL;
-}
+BootEntry* boot_config_find_entry(BootConfig *config, const char *id);
 
-static inline BootEntry* boot_config_default_entry(BootConfig *config) {
+static inline const BootEntry* boot_config_default_entry(const BootConfig *config) {
         assert(config);
 
         if (config->default_entry < 0)
                 return NULL;
 
+        assert((size_t) config->default_entry < config->n_entries);
         return config->entries + config->default_entry;
 }
 
 void boot_config_free(BootConfig *config);
-int boot_entries_load_config(const char *esp_path, const char *xbootldr_path, BootConfig *config);
-int boot_entries_load_config_auto(const char *override_esp_path, const char *override_xbootldr_path, BootConfig *config);
-int boot_entries_augment_from_loader(BootConfig *config, char **list, bool only_auto);
+
+int boot_loader_read_conf(BootConfig *config, FILE *file, const char *path);
+
+int boot_config_load_type1(
+                BootConfig *config,
+                FILE *f,
+                const char *root,
+                const char *dir,
+                const char *id);
+
+int boot_config_finalize(BootConfig *config);
+int boot_config_load(BootConfig *config, const char *esp_path, const char *xbootldr_path);
+int boot_config_load_auto(BootConfig *config, const char *override_esp_path, const char *override_xbootldr_path);
+int boot_config_augment_from_loader(BootConfig *config, char **list, bool only_auto);
+
+int boot_config_select_special_entries(BootConfig *config, bool skip_efivars);
 
 static inline const char* boot_entry_title(const BootEntry *entry) {
         assert(entry);
 
-        return entry->show_title ?: entry->title ?: entry->id;
+        return ASSERT_PTR(entry->show_title ?: entry->title ?: entry->id);
 }
+
+int show_boot_entry(
+                const BootEntry *e,
+                bool show_as_default,
+                bool show_as_selected,
+                bool show_reported);
+int show_boot_entries(
+                const BootConfig *config,
+                JsonFormatFlags json_format);

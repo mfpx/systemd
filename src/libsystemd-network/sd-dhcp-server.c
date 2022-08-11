@@ -737,7 +737,7 @@ static int parse_request(uint8_t code, uint8_t len, const void *option, void *us
 
         assert(req);
 
-        switch(code) {
+        switch (code) {
         case SD_DHCP_OPTION_IP_ADDRESS_LEASE_TIME:
                 if (len == 4)
                         req->lifetime = unaligned_read_be32(option);
@@ -987,7 +987,7 @@ static int server_ack_request(sd_dhcp_server *server, DHCPRequest *req, DHCPLeas
         assert(req);
         assert(address != 0);
 
-        r = sd_event_now(server->event, clock_boottime_or_monotonic(), &time_now);
+        r = sd_event_now(server->event, CLOCK_BOOTTIME, &time_now);
         if (r < 0)
                 return r;
 
@@ -1039,7 +1039,7 @@ static int dhcp_server_cleanup_expired_leases(sd_dhcp_server *server) {
 
         assert(server);
 
-        r = sd_event_now(server->event, clock_boottime_or_monotonic(), &time_now);
+        r = sd_event_now(server->event, CLOCK_BOOTTIME, &time_now);
         if (r < 0)
                 return r;
 
@@ -1096,7 +1096,7 @@ int dhcp_server_handle_message(sd_dhcp_server *server, DHCPMessage *message, siz
         existing_lease = hashmap_get(server->bound_leases_by_client_id, &req->client_id);
         static_lease = hashmap_get(server->static_leases_by_client_id, &req->client_id);
 
-        switch(type) {
+        switch (type) {
 
         case DHCP_DISCOVER: {
                 be32_t address = INADDR_ANY;

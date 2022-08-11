@@ -16,7 +16,7 @@
   Lesser General Public License for more details.
 
   You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
+  along with systemd; If not, see <https://www.gnu.org/licenses/>.
 ***/
 
 #include <inttypes.h>
@@ -40,8 +40,8 @@ enum {
         SD_DHCP_CLIENT_EVENT_EXPIRED            = 3,
         SD_DHCP_CLIENT_EVENT_RENEW              = 4,
         SD_DHCP_CLIENT_EVENT_SELECTING          = 5,
-        SD_DHCP_CLIENT_EVENT_TRANSIENT_FAILURE  = 6, /* Sent when we have not received a reply after the first few attempts.
-                                                      * The client may want to start acquiring link-local addresses. */
+        SD_DHCP_CLIENT_EVENT_TRANSIENT_FAILURE  = 6 /* Sent when we have not received a reply after the first few attempts.
+                                                     * The client may want to start acquiring link-local addresses. */
 };
 
 /* https://www.iana.org/assignments/bootp-dhcp-parameters/bootp-dhcp-parameters.xhtml#options */
@@ -134,7 +134,7 @@ enum {
         SD_DHCP_OPTION_NDS_SERVER                     = 85,  /* [RFC2241] */
         SD_DHCP_OPTION_NDS_TREE_NAME                  = 86,  /* [RFC2241] */
         SD_DHCP_OPTION_NDS_CONTEXT                    = 87,  /* [RFC2241] */
-        SD_DHCP_OPTION_BCMCS_CONTROLLER_DOMAIN_NAM    = 88,  /* [RFC4280] */
+        SD_DHCP_OPTION_BCMCS_CONTROLLER_DOMAIN_NAME   = 88,  /* [RFC4280] */
         SD_DHCP_OPTION_BCMCS_CONTROLLER_ADDRESS       = 89,  /* [RFC4280] */
         SD_DHCP_OPTION_AUTHENTICATION                 = 90,  /* [RFC3118] */
         SD_DHCP_OPTION_CLIENT_LAST_TRANSACTION_TIME   = 91,  /* [RFC4388] */
@@ -173,7 +173,7 @@ enum {
         SD_DHCP_OPTION_CAPWAP_AC_ADDRESS              = 138, /* [RFC5417] */
         SD_DHCP_OPTION_MOS_ADDRESS                    = 139, /* [RFC5678] */
         SD_DHCP_OPTION_MOS_FQDN                       = 140, /* [RFC5678] */
-        SD_DHCP_OPTION_SIP_SERVICE_DOMAINS            = 141, /* [RFC6011] */
+        SD_DHCP_OPTION_SIP_SERVICE_DOMAIN             = 141, /* [RFC6011] */
         SD_DHCP_OPTION_ANDSF_ADDRESS                  = 142, /* [RFC6153] */
         SD_DHCP_OPTION_SZTP_REDIRECT                  = 143, /* [RFC8572] */
         SD_DHCP_OPTION_GEOLOC                         = 144, /* [RFC6225] */
@@ -212,13 +212,13 @@ enum {
         SD_DHCP_OPTION_PRIVATE_CLASSLESS_STATIC_ROUTE = 249, /* [RFC7844] */
         SD_DHCP_OPTION_PRIVATE_PROXY_AUTODISCOVERY    = 252, /* [RFC7844] */
         SD_DHCP_OPTION_PRIVATE_LAST                   = 254,
-        SD_DHCP_OPTION_END                            = 255, /* [RFC2132] */
+        SD_DHCP_OPTION_END                            = 255 /* [RFC2132] */
 };
 
 /* Suboptions for SD_DHCP_OPTION_RELAY_AGENT_INFORMATION option */
 enum {
         SD_DHCP_RELAY_AGENT_CIRCUIT_ID             = 1,
-        SD_DHCP_RELAY_AGENT_REMOTE_ID              = 2,
+        SD_DHCP_RELAY_AGENT_REMOTE_ID              = 2
 };
 
 typedef struct sd_dhcp_client sd_dhcp_client;
@@ -247,7 +247,7 @@ int sd_dhcp_client_set_ifname(
 int sd_dhcp_client_get_ifname(sd_dhcp_client *client, const char **ret);
 int sd_dhcp_client_set_mac(
                 sd_dhcp_client *client,
-                const uint8_t *addr,
+                const uint8_t *hw_addr,
                 const uint8_t *bcast_addr,
                 size_t addr_len,
                 uint16_t arp_type);
@@ -256,14 +256,14 @@ int sd_dhcp_client_set_client_id(
                 uint8_t type,
                 const uint8_t *data,
                 size_t data_len);
-int sd_dhcp_client_set_iaid_duid(
+__extension__ int sd_dhcp_client_set_iaid_duid(
                 sd_dhcp_client *client,
                 bool iaid_set,
                 uint32_t iaid,
                 uint16_t duid_type,
                 const void *duid,
                 size_t duid_len);
-int sd_dhcp_client_set_iaid_duid_llt(
+__extension__ int sd_dhcp_client_set_iaid_duid_llt(
                 sd_dhcp_client *client,
                 bool iaid_set,
                 uint32_t iaid,

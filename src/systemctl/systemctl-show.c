@@ -64,7 +64,7 @@ typedef struct ExecStatusInfo {
 
         ExecCommandFlags flags;
 
-        LIST_FIELDS(struct ExecStatusInfo, exec);
+        LIST_FIELDS(struct ExecStatusInfo, exec_status_info_list);
 } ExecStatusInfo;
 
 static void exec_status_info_free(ExecStatusInfo *i) {
@@ -263,7 +263,7 @@ typedef struct UnitStatusInfo {
         uint64_t default_memory_min;
         uint64_t default_memory_low;
 
-        LIST_HEAD(ExecStatusInfo, exec);
+        LIST_HEAD(ExecStatusInfo, exec_status_info_list);
 } UnitStatusInfo;
 
 static void unit_status_info_free(UnitStatusInfo *info) {
@@ -281,8 +281,8 @@ static void unit_status_info_free(UnitStatusInfo *info) {
                 unit_condition_free(c);
         }
 
-        while ((p = info->exec)) {
-                LIST_REMOVE(exec, info->exec, p);
+        while ((p = info->exec_status_info_list)) {
+                LIST_REMOVE(exec_status_info_list, info->exec_status_info_list, p);
                 exec_status_info_free(p);
         }
 }
@@ -298,17 +298,30 @@ static void format_active_state(const char *active_state, const char **active_on
                 *active_on = *active_off = "";
 }
 
+static void format_enable_state(const char *enable_state, const char **enable_on, const char **enable_off) {
+        assert(enable_on);
+        assert(enable_off);
+
+        if (streq_ptr(enable_state, "disabled")) {
+                *enable_on = ansi_highlight_yellow();
+                *enable_off = ansi_normal();
+        } else if (streq_ptr(enable_state, "enabled")) {
+                *enable_on = ansi_highlight_green();
+                *enable_off = ansi_normal();
+        } else
+                *enable_on = *enable_off = "";
+}
+
 static void print_status_info(
                 sd_bus *bus,
                 UnitStatusInfo *i,
                 bool *ellipsized) {
 
         const char *active_on, *active_off, *on, *off, *ss, *fs;
+        const char *enable_on, *enable_off, *preset_on, *preset_off;
         _cleanup_free_ char *formatted_path = NULL;
-        ExecStatusInfo *p;
         usec_t timestamp;
         const char *path;
-        char **t, **t2;
         int r;
 
         assert(i);
@@ -317,6 +330,8 @@ static void print_status_info(
          * printer */
 
         format_active_state(i->active_state, &active_on, &active_off);
+        format_enable_state(i->unit_file_state, &enable_on, &enable_off);
+        format_enable_state(i->unit_file_preset, &preset_on, &preset_off);
 
         const SpecialGlyph glyph = unit_active_state_to_glyph(unit_active_state_from_string(i->active_state));
 
@@ -347,12 +362,12 @@ static void print_status_info(
                 bool show_preset = !isempty(i->unit_file_preset) &&
                         show_preset_for_state(unit_file_state_from_string(i->unit_file_state));
 
-                printf("     Loaded: %s%s%s (%s; %s%s%s)\n",
+                printf("     Loaded: %s%s%s (%s; %s%s%s%s%s%s%s)\n",
                        on, strna(i->load_state), off,
                        path,
-                       i->unit_file_state,
-                       show_preset ? "; vendor preset: " : "",
-                       show_preset ? i->unit_file_preset : "");
+                       enable_on, i->unit_file_state, enable_off,
+                       show_preset ? "; preset: " : "",
+                       preset_on, show_preset ? i->unit_file_preset : "", preset_off);
 
         } else if (path)
                 printf("     Loaded: %s%s%s (%s)\n",
@@ -367,7 +382,6 @@ static void print_status_info(
         if (!strv_isempty(i->dropin_paths)) {
                 _cleanup_free_ char *dir = NULL;
                 bool last = false;
-                char ** dropin;
 
                 STRV_FOREACH(dropin, i->dropin_paths) {
                         _cleanup_free_ char *dropin_formatted = NULL;
@@ -488,7 +502,6 @@ static void print_status_info(
         }
 
         if (!i->condition_result && i->condition_timestamp > 0) {
-                UnitCondition *c;
                 int n = 0;
 
                 printf("  Condition: start %scondition failed%s at %s; %s\n",
@@ -553,7 +566,7 @@ static void print_status_info(
                 printf("\n");
         }
 
-        LIST_FOREACH(exec, p, i->exec) {
+        LIST_FOREACH(exec_status_info_list, p, i->exec_status_info_list) {
                 _cleanup_free_ char *argv = NULL;
                 bool good;
 
@@ -766,7 +779,7 @@ static void print_status_info(
                                 getuid(),
                                 get_output_flags() | OUTPUT_BEGIN_NEWLINE,
                                 SD_JOURNAL_LOCAL_ONLY,
-                                arg_scope == UNIT_FILE_SYSTEM,
+                                arg_scope == LOOKUP_SCOPE_SYSTEM,
                                 ellipsized);
 
         if (i->need_daemon_reload)
@@ -774,8 +787,6 @@ static void print_status_info(
 }
 
 static void show_unit_help(UnitStatusInfo *i) {
-        char **p;
-
         assert(i);
 
         if (!i->documentation) {
@@ -933,7 +944,7 @@ static int map_exec(sd_bus *bus, const char *member, sd_bus_message *m, sd_bus_e
         if (!info)
                 return -ENOMEM;
 
-        LIST_FIND_TAIL(exec, i->exec, last);
+        LIST_FIND_TAIL(exec_status_info_list, i->exec_status_info_list, last);
 
         while ((r = exec_status_info_deserialize(m, info, is_ex_prop)) > 0) {
 
@@ -941,7 +952,7 @@ static int map_exec(sd_bus *bus, const char *member, sd_bus_message *m, sd_bus_e
                 if (!info->name)
                         return -ENOMEM;
 
-                LIST_INSERT_AFTER(exec, i->exec, last, info);
+                LIST_INSERT_AFTER(exec_status_info_list, i->exec_status_info_list, last, info);
                 last = info;
 
                 info = new0(ExecStatusInfo, 1);
@@ -1078,7 +1089,6 @@ static int print_property(const char *name, const char *expected_value, sd_bus_m
 
                         if (FLAGS_SET(flags, BUS_PRINT_PROPERTY_SHOW_EMPTY) || allow_list || !strv_isempty(l)) {
                                 bool first = true;
-                                char **i;
 
                                 if (!FLAGS_SET(flags, BUS_PRINT_PROPERTY_ONLY_VALUE)) {
                                         fputs(name, stdout);
@@ -1444,7 +1454,6 @@ static int print_property(const char *name, const char *expected_value, sd_bus_m
                                 return bus_log_parse_error(r);
 
                         for (;;) {
-                                _cleanup_free_ char *str = NULL;
                                 uint32_t prefixlen;
                                 int32_t family;
                                 const void *ap;
@@ -1481,10 +1490,8 @@ static int print_property(const char *name, const char *expected_value, sd_bus_m
                                 if (prefixlen > FAMILY_ADDRESS_SIZE(family) * 8)
                                         continue;
 
-                                if (in_addr_prefix_to_string(family, (const union in_addr_union*) ap, prefixlen, &str) < 0)
-                                        continue;
-
-                                if (!strextend_with_separator(&addresses, " ", str))
+                                if (!strextend_with_separator(&addresses, " ",
+                                                              IN_ADDR_PREFIX_TO_STRING(family, ap, prefixlen)))
                                         return log_oom();
                         }
 
@@ -1970,7 +1977,6 @@ static int show_one(
                 .io_read_bytes = UINT64_MAX,
                 .io_write_bytes = UINT64_MAX,
         };
-        char **pp;
         int r;
 
         assert(path);
@@ -2061,6 +2067,7 @@ static int get_unit_dbus_path_by_pid(
 
 static int show_all(
                 sd_bus *bus,
+                SystemctlShowMode show_mode,
                 bool *new_line,
                 bool *ellipsized) {
 
@@ -2086,7 +2093,7 @@ static int show_all(
                 if (!p)
                         return log_oom();
 
-                r = show_one(bus, p, u->id, SYSTEMCTL_SHOW_STATUS, new_line, ellipsized);
+                r = show_one(bus, p, u->id, show_mode, new_line, ellipsized);
                 if (r < 0)
                         return r;
                 if (r > 0 && ret == 0)
@@ -2137,12 +2144,18 @@ static int show_system_status(sd_bus *bus) {
         printf("    State: %s%s%s\n",
                on, strna(mi.state), off);
 
+        printf("    Units: %" PRIu32 " loaded (incl. loaded aliases)\n", mi.n_names);
         printf("     Jobs: %" PRIu32 " queued\n", mi.n_jobs);
         printf("   Failed: %" PRIu32 " units\n", mi.n_failed_units);
 
         printf("    Since: %s; %s\n",
                FORMAT_TIMESTAMP_STYLE(mi.timestamp, arg_timestamp_style),
                FORMAT_TIMESTAMP_RELATIVE(mi.timestamp));
+
+        printf("  systemd: %s\n", mi.version);
+
+        if (!isempty(mi.tainted))
+                printf("  Tainted: %s%s%s\n", ansi_highlight_yellow(), mi.tainted, ansi_normal());
 
         printf("   CGroup: %s\n", empty_to_root(mi.control_group));
 
@@ -2181,20 +2194,30 @@ int verb_show(int argc, char *argv[], void *userdata) {
 
         pager_open(arg_pager_flags);
 
-        /* If no argument is specified inspect the manager itself */
-        if (show_mode == SYSTEMCTL_SHOW_PROPERTIES && argc <= 1)
-                return show_one(bus, "/org/freedesktop/systemd1", NULL, show_mode, &new_line, &ellipsized);
+        if (argc <= 1) {
+                /* If no argument or filter is specified inspect the manager itself:
+                 * systemctl status → we show status of the manager
+                 * systemctl status --all → status of the manager + status of all units
+                 * systemctl status --state=… → status of units in listed states
+                 * systemctl status --type=… → status of units of listed types
+                 * systemctl status --failed → status of failed units, mirroring systemctl list-units --failed
+                 */
 
-        if (show_mode == SYSTEMCTL_SHOW_STATUS && argc <= 1) {
+                if (!arg_states && !arg_types) {
+                        if (show_mode == SYSTEMCTL_SHOW_PROPERTIES)
+                                r = show_one(bus, "/org/freedesktop/systemd1", NULL, show_mode, &new_line, &ellipsized);
+                        else
+                                r = show_system_status(bus);
+                        if (r < 0)
+                                return r;
 
-                show_system_status(bus);
-                new_line = true;
+                        new_line = true;
+                }
 
-                if (arg_all)
-                        ret = show_all(bus, &new_line, &ellipsized);
+                if (arg_all || arg_states || arg_types)
+                        ret = show_all(bus, show_mode, &new_line, &ellipsized);
         } else {
                 _cleanup_free_ char **patterns = NULL;
-                char **name;
 
                 STRV_FOREACH(name, strv_skip(argv, 1)) {
                         _cleanup_free_ char *path = NULL, *unit = NULL;

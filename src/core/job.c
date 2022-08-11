@@ -716,8 +716,8 @@ static void job_emit_done_message(Unit *u, uint32_t job_id, JobType t, JobResult
                                 log_unit_struct(
                                         u,
                                         job_done_messages[result].log_level,
-                                        "MESSAGE=%s was skipped because all trigger condition checks failed.",
-                                        ident,
+                                        LOG_MESSAGE("%s was skipped because all trigger condition checks failed.",
+                                                    ident),
                                         "JOB_ID=%" PRIu32, job_id,
                                         "JOB_TYPE=%s", job_type_to_string(t),
                                         "JOB_RESULT=%s", job_result_to_string(result),
@@ -727,11 +727,11 @@ static void job_emit_done_message(Unit *u, uint32_t job_id, JobType t, JobResult
                                 log_unit_struct(
                                         u,
                                         job_done_messages[result].log_level,
-                                        "MESSAGE=%s was skipped because of a failed condition check (%s=%s%s).",
-                                        ident,
-                                        condition_type_to_string(c->type),
-                                        c->negate ? "!" : "",
-                                        c->parameter,
+                                        LOG_MESSAGE("%s was skipped because of a failed condition check (%s=%s%s).",
+                                                    ident,
+                                                    condition_type_to_string(c->type),
+                                                    c->negate ? "!" : "",
+                                                    c->parameter),
                                         "JOB_ID=%" PRIu32, job_id,
                                         "JOB_TYPE=%s", job_type_to_string(t),
                                         "JOB_RESULT=%s", job_result_to_string(result),
@@ -889,8 +889,8 @@ int job_run_and_invalidate(Job *j) {
                         job_set_state(j, JOB_WAITING); /* Hmm, not ready after all, let's return to JOB_WAITING state */
                 else if (r == -EALREADY) /* already being executed */
                         r = job_finish_and_invalidate(j, JOB_DONE, true, true);
-                else if (r == -ECOMM)    /* condition failed, but all is good. Return 'skip' if caller requested it. */
-                        r = job_finish_and_invalidate(j, j->return_skip_on_cond_failure ? JOB_SKIPPED : JOB_DONE, true, false);
+                else if (r == -ECOMM)
+                        r = job_finish_and_invalidate(j, JOB_DONE, true, false);
                 else if (r == -EBADR)
                         r = job_finish_and_invalidate(j, JOB_SKIPPED, true, false);
                 else if (r == -ENOEXEC)

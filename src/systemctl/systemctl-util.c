@@ -46,7 +46,7 @@ int acquire_bus(BusFocus focus, sd_bus **ret) {
         if (!buses[focus]) {
                 bool user;
 
-                user = arg_scope != UNIT_FILE_SYSTEM;
+                user = arg_scope != LOOKUP_SCOPE_SYSTEM;
 
                 if (focus == BUS_MANAGER)
                         r = bus_connect_transport_systemd(arg_transport, arg_host, user, &buses[focus]);
@@ -73,7 +73,7 @@ void ask_password_agent_open_maybe(void) {
         if (arg_dry_run)
                 return;
 
-        if (arg_scope != UNIT_FILE_SYSTEM)
+        if (arg_scope != LOOKUP_SCOPE_SYSTEM)
                 return;
 
         ask_password_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -82,7 +82,7 @@ void ask_password_agent_open_maybe(void) {
 void polkit_agent_open_maybe(void) {
         /* Open the polkit agent as a child process if necessary */
 
-        if (arg_scope != UNIT_FILE_SYSTEM)
+        if (arg_scope != LOOKUP_SCOPE_SYSTEM)
                 return;
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -234,7 +234,6 @@ int get_unit_list(
 
 int expand_unit_names(sd_bus *bus, char **names, const char* suffix, char ***ret, bool *ret_expanded) {
         _cleanup_strv_free_ char **mangled = NULL, **globs = NULL;
-        char **name;
         int r;
 
         assert(bus);
@@ -292,9 +291,6 @@ int check_triggering_units(sd_bus *bus, const char *unit) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_free_ char *n = NULL, *dbus_path = NULL, *load_state = NULL;
         _cleanup_strv_free_ char **triggered_by = NULL;
-        bool print_warning_label = true;
-        UnitActiveState active_state;
-        char **i;
         int r;
 
         r = unit_name_mangle(unit, 0, &n);
@@ -323,7 +319,10 @@ int check_triggering_units(sd_bus *bus, const char *unit) {
         if (r < 0)
                 return log_error_errno(r, "Failed to get triggered by array of %s: %s", n, bus_error_message(&error, r));
 
+        bool first = true;
         STRV_FOREACH(i, triggered_by) {
+                UnitActiveState active_state;
+
                 r = get_state_one_unit(bus, *i, &active_state);
                 if (r < 0)
                         return r;
@@ -331,9 +330,9 @@ int check_triggering_units(sd_bus *bus, const char *unit) {
                 if (!IN_SET(active_state, UNIT_ACTIVE, UNIT_RELOADING))
                         continue;
 
-                if (print_warning_label) {
+                if (first) {
                         log_warning("Warning: Stopping %s, but it can still be activated by:", n);
-                        print_warning_label = false;
+                        first = false;
                 }
 
                 log_warning("  %s", *i);
@@ -378,16 +377,12 @@ int need_daemon_reload(sd_bus *bus, const char *unit) {
 void warn_unit_file_changed(const char *unit) {
         assert(unit);
 
-        log_warning("%sWarning:%s The unit file, source configuration file or drop-ins of %s changed on disk. Run 'systemctl%s daemon-reload' to reload units.",
-                    ansi_highlight_red(),
-                    ansi_normal(),
+        log_warning("Warning: The unit file, source configuration file or drop-ins of %s changed on disk. Run 'systemctl%s daemon-reload' to reload units.",
                     unit,
-                    arg_scope == UNIT_FILE_SYSTEM ? "" : " --user");
+                    arg_scope == LOOKUP_SCOPE_SYSTEM ? "" : " --user");
 }
 
 int unit_file_find_path(LookupPaths *lp, const char *unit_name, char **ret_unit_path) {
-        char **p;
-
         assert(lp);
         assert(unit_name);
 
@@ -666,7 +661,6 @@ int unit_exists(LookupPaths *lp, const char *unit) {
 
 int append_unit_dependencies(sd_bus *bus, char **names, char ***ret) {
         _cleanup_strv_free_ char **with_deps = NULL;
-        char **name;
 
         assert(bus);
         assert(ret);
@@ -710,13 +704,14 @@ int maybe_extend_with_unit_dependencies(sd_bus *bus, char ***list) {
 int unit_get_dependencies(sd_bus *bus, const char *name, char ***ret) {
         _cleanup_strv_free_ char **deps = NULL;
 
-        static const struct bus_properties_map map[_DEPENDENCY_MAX][6] = {
+        static const struct bus_properties_map map[_DEPENDENCY_MAX][7] = {
                 [DEPENDENCY_FORWARD] = {
                         { "Requires",    "as", NULL, 0 },
                         { "Requisite",   "as", NULL, 0 },
                         { "Wants",       "as", NULL, 0 },
                         { "ConsistsOf",  "as", NULL, 0 },
                         { "BindsTo",     "as", NULL, 0 },
+                        { "Upholds",     "as", NULL, 0 },
                         {}
                 },
                 [DEPENDENCY_REVERSE] = {
@@ -725,6 +720,7 @@ int unit_get_dependencies(sd_bus *bus, const char *name, char ***ret) {
                         { "WantedBy",    "as", NULL, 0 },
                         { "PartOf",      "as", NULL, 0 },
                         { "BoundBy",     "as", NULL, 0 },
+                        { "UpheldBy",    "as", NULL, 0 },
                         {}
                 },
                 [DEPENDENCY_AFTER] = {
@@ -819,7 +815,7 @@ bool install_client_side(void) {
         if (!isempty(arg_root))
                 return true;
 
-        if (arg_scope == UNIT_FILE_GLOBAL)
+        if (arg_scope == LOOKUP_SCOPE_GLOBAL)
                 return true;
 
         /* Unsupported environment variable, mostly for debugging purposes */
@@ -860,7 +856,7 @@ UnitFileFlags unit_file_flags_from_args(void) {
 
 int mangle_names(const char *operation, char **original_names, char ***ret_mangled_names) {
         _cleanup_strv_free_ char **l = NULL;
-        char **i, **name;
+        char **i;
         int r;
 
         assert(ret_mangled_names);

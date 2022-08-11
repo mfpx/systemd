@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include "bus-locator.h"
 #include "bus-unit-procs.h"
 #include "glyph-util.h"
 #include "hashmap.h"
@@ -199,7 +200,7 @@ static int dump_processes(
         }
 
         if (cg->children) {
-                struct CGroupInfo **children, *child;
+                struct CGroupInfo **children;
                 size_t n = 0, i;
 
                 /* Order subcgroups by their name */
@@ -217,9 +218,7 @@ static int dump_processes(
                         const char *name, *special;
                         bool more;
 
-                        child = children[i];
-
-                        name = strrchr(child->cgroup_path, '/');
+                        name = strrchr(children[i]->cgroup_path, '/');
                         if (!name)
                                 return -EINVAL;
                         name++;
@@ -238,7 +237,7 @@ static int dump_processes(
                         if (!pp)
                                 return -ENOMEM;
 
-                        r = dump_processes(cgroups, child->cgroup_path, pp, n_columns, flags);
+                        r = dump_processes(cgroups, children[i]->cgroup_path, pp, n_columns, flags);
                         if (r < 0)
                                 return r;
                 }
@@ -346,11 +345,9 @@ int unit_show_processes(
 
         prefix = strempty(prefix);
 
-        r = sd_bus_call_method(
+        r = bus_call_method(
                         bus,
-                        "org.freedesktop.systemd1",
-                        "/org/freedesktop/systemd1",
-                        "org.freedesktop.systemd1.Manager",
+                        bus_systemd_mgr,
                         "GetUnitProcesses",
                         error,
                         &reply,

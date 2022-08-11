@@ -7,7 +7,9 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 #include <linux/loop.h>
+#if WANT_LINUX_FS_H
 #include <linux/fs.h>
+#endif
 
 #include "alloc-util.h"
 #include "chase-symlinks.h"
@@ -17,6 +19,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "glyph-util.h"
 #include "hashmap.h"
 #include "label.h"
 #include "libmount-util.h"
@@ -274,7 +277,6 @@ int bind_remount_recursive_with_mountinfo(
                          * we shall operate on. */
                         if (!path_equal(path, prefix)) {
                                 bool deny_listed = false;
-                                char **i;
 
                                 STRV_FOREACH(i, deny_list) {
                                         if (path_equal(*i, prefix))
@@ -532,7 +534,7 @@ int mode_to_inaccessible_node(
         if (!runtime_dir)
                 runtime_dir = "/run";
 
-        switch(mode & S_IFMT) {
+        switch (mode & S_IFMT) {
                 case S_IFREG:
                         node = "/systemd/inaccessible/reg";
                         break;
@@ -673,8 +675,8 @@ int mount_verbose_full(
                 log_debug("Bind-mounting %s on %s (%s \"%s\")...",
                           what, where, strnull(fl), strempty(o));
         else if (f & MS_MOVE)
-                log_debug("Moving mount %s → %s (%s \"%s\")...",
-                          what, where, strnull(fl), strempty(o));
+                log_debug("Moving mount %s %s %s (%s \"%s\")...",
+                          what, special_glyph(SPECIAL_GLYPH_ARROW_RIGHT), where, strnull(fl), strempty(o));
         else
                 log_debug("Mounting %s (%s) on %s (%s \"%s\")...",
                           strna(what), strna(type), where, strnull(fl), strempty(o));
@@ -790,6 +792,7 @@ static int mount_in_namespace(
         bool mount_slave_created = false, mount_slave_mounted = false,
                 mount_tmp_created = false, mount_tmp_mounted = false,
                 mount_outside_created = false, mount_outside_mounted = false;
+        _cleanup_free_ char *chased_src_path = NULL;
         struct stat st, self_mntns_st;
         pid_t child;
         int r;
@@ -827,9 +830,10 @@ static int mount_in_namespace(
         if (r < 0)
                 return log_debug_errno(r == -ENOENT ? SYNTHETIC_ERRNO(EOPNOTSUPP) : r, "Target does not allow propagation of mount points");
 
-        r = chase_symlinks(src, NULL, CHASE_TRAIL_SLASH, NULL, &chased_src_fd);
+        r = chase_symlinks(src, NULL, 0, &chased_src_path, &chased_src_fd);
         if (r < 0)
                 return log_debug_errno(r, "Failed to resolve source path of %s: %m", src);
+        log_debug("Chased source path of %s to %s", src, chased_src_path);
 
         if (fstat(chased_src_fd, &st) < 0)
                 return log_debug_errno(errno, "Failed to stat() resolved source path %s: %m", src);
@@ -874,7 +878,7 @@ static int mount_in_namespace(
         mount_tmp_created = true;
 
         if (is_image)
-                r = verity_dissect_and_mount(FORMAT_PROC_FD_PATH(chased_src_fd), mount_tmp, options, NULL, NULL, NULL, NULL);
+                r = verity_dissect_and_mount(chased_src_fd, chased_src_path, mount_tmp, options, NULL, NULL, NULL, NULL);
         else
                 r = mount_follow_verbose(LOG_DEBUG, FORMAT_PROC_FD_PATH(chased_src_fd), mount_tmp, NULL, MS_BIND, NULL);
         if (r < 0)

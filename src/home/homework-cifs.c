@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <sys/mount.h>
+#if WANT_LINUX_FS_H
+#include <linux/fs.h>
+#endif
+
 #include "dirent-util.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -20,7 +25,6 @@ int home_setup_cifs(
                 HomeSetup *setup) {
 
         _cleanup_free_ char *chost = NULL, *cservice = NULL, *cdir = NULL, *chost_and_service = NULL, *j = NULL;
-        char **pw;
         int r;
 
         assert(h);
@@ -208,7 +212,7 @@ int home_create_cifs(UserRecord *h, HomeSetup *setup, UserRecord **ret_home) {
         if (r < 0)
                 return r;
 
-        r = dir_is_empty_at(setup->root_fd, NULL);
+        r = dir_is_empty_at(setup->root_fd, NULL, /* ignore_hidden_or_backup= */ false);
         if (r < 0)
                 return log_error_errno(r, "Failed to detect if CIFS directory is empty: %m");
         if (r == 0)

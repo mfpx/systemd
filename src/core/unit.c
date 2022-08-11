@@ -583,8 +583,6 @@ static void unit_clear_dependencies(Unit *u) {
 }
 
 static void unit_remove_transient(Unit *u) {
-        char **i;
-
         assert(u);
 
         if (!u->transient)
@@ -686,8 +684,8 @@ Unit* unit_free(Unit *u) {
 
         unit_dequeue_rewatch_pids(u);
 
-        sd_bus_slot_unref(u->match_bus_slot);
-        sd_bus_track_unref(u->bus_track);
+        u->match_bus_slot = sd_bus_slot_unref(u->match_bus_slot);
+        u->bus_track = sd_bus_track_unref(u->bus_track);
         u->deserialized_refs = strv_free(u->deserialized_refs);
         u->pending_freezer_message = sd_bus_message_unref(u->pending_freezer_message);
 
@@ -805,6 +803,8 @@ Unit* unit_free(Unit *u) {
 
         free(u->job_timeout_reboot_arg);
         free(u->reboot_arg);
+
+        free(u->access_selinux_context);
 
         set_free_free(u->aliases);
         free(u->id);
@@ -1246,6 +1246,8 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
         assert(u);
         assert(c);
 
+        /* Unlike unit_add_dependency() or friends, this always returns 0 on success. */
+
         if (c->working_directory && !c->working_directory_missing_ok) {
                 r = unit_require_mounts_for(u, c->working_directory, UNIT_DEPENDENCY_FILE);
                 if (r < 0)
@@ -1504,6 +1506,7 @@ static int unit_add_slice_dependencies(Unit *u) {
 static int unit_add_mount_dependencies(Unit *u) {
         UnitDependencyInfo di;
         const char *path;
+        bool changed = false;
         int r;
 
         assert(u);
@@ -1516,7 +1519,7 @@ static int unit_add_mount_dependencies(Unit *u) {
                         Unit *m;
 
                         r = unit_name_from_path(prefix, ".mount", &p);
-                        if (IN_SET(r, -EINVAL, -ENAMETOOLONG))
+                        if (r == -EINVAL)
                                 continue; /* If the path cannot be converted to a mount unit name, then it's
                                            * not manageable as a unit by systemd, and hence we don't need a
                                            * dependency on it. Let's thus silently ignore the issue. */
@@ -1539,22 +1542,23 @@ static int unit_add_mount_dependencies(Unit *u) {
                         r = unit_add_dependency(u, UNIT_AFTER, m, true, di.origin_mask);
                         if (r < 0)
                                 return r;
+                        changed = changed || r > 0;
 
                         if (m->fragment_path) {
                                 r = unit_add_dependency(u, UNIT_REQUIRES, m, true, di.origin_mask);
                                 if (r < 0)
                                         return r;
+                                changed = changed || r > 0;
                         }
                 }
         }
 
-        return 0;
+        return changed;
 }
 
 static int unit_add_oomd_dependencies(Unit *u) {
         CGroupContext *c;
         bool wants_oomd;
-        int r;
 
         assert(u);
 
@@ -1569,11 +1573,7 @@ static int unit_add_oomd_dependencies(Unit *u) {
         if (!wants_oomd)
                 return 0;
 
-        r = unit_add_two_dependencies_by_name(u, UNIT_AFTER, UNIT_WANTS, "systemd-oomd.service", true, UNIT_DEPENDENCY_FILE);
-        if (r < 0)
-                return r;
-
-        return 0;
+        return unit_add_two_dependencies_by_name(u, UNIT_AFTER, UNIT_WANTS, "systemd-oomd.service", true, UNIT_DEPENDENCY_FILE);
 }
 
 static int unit_add_startup_units(Unit *u) {
@@ -1869,6 +1869,10 @@ int unit_start(Unit *u) {
         int r;
 
         assert(u);
+
+        /* Let's hold off running start jobs for mount units when /proc/self/mountinfo monitor is rate limited. */
+        if (u->type == UNIT_MOUNT && sd_event_source_is_ratelimited(u->manager->mount_event_source))
+                return -EAGAIN;
 
         /* If this is already started, then this will succeed. Note that this will even succeed if this unit
          * is not startable by the user. This is relied on to detect when we need to wait for units and when
@@ -3064,7 +3068,7 @@ int unit_add_dependency(
 
         /* Helper to know whether sending a notification is necessary or not: if the dependency is already
          * there, no need to notify! */
-        bool noop;
+        bool notify, notify_other = false;
 
         assert(u);
         assert(d >= 0 && d < _UNIT_DEPENDENCY_MAX);
@@ -3121,38 +3125,37 @@ int unit_add_dependency(
         r = unit_add_dependency_hashmap(&u->dependencies, d, other, mask, 0);
         if (r < 0)
                 return r;
-        noop = !r;
+        notify = r > 0;
 
         if (inverse_table[d] != _UNIT_DEPENDENCY_INVALID && inverse_table[d] != d) {
                 r = unit_add_dependency_hashmap(&other->dependencies, inverse_table[d], u, 0, mask);
                 if (r < 0)
                         return r;
-                if (r)
-                        noop = false;
+                notify_other = r > 0;
         }
 
         if (add_reference) {
                 r = unit_add_dependency_hashmap(&u->dependencies, UNIT_REFERENCES, other, mask, 0);
                 if (r < 0)
                         return r;
-                if (r)
-                        noop = false;
+                notify = notify || r > 0;
 
                 r = unit_add_dependency_hashmap(&other->dependencies, UNIT_REFERENCED_BY, u, 0, mask);
                 if (r < 0)
                         return r;
-                if (r)
-                        noop = false;
+                notify_other = notify_other || r > 0;
         }
 
-        if (!noop)
+        if (notify)
                 unit_add_to_dbus_queue(u);
+        if (notify_other)
+                unit_add_to_dbus_queue(other);
 
-        return 0;
+        return notify || notify_other;
 }
 
 int unit_add_two_dependencies(Unit *u, UnitDependency d, UnitDependency e, Unit *other, bool add_reference, UnitDependencyMask mask) {
-        int r;
+        int r, s;
 
         assert(u);
 
@@ -3160,7 +3163,11 @@ int unit_add_two_dependencies(Unit *u, UnitDependency d, UnitDependency e, Unit 
         if (r < 0)
                 return r;
 
-        return unit_add_dependency(u, e, other, add_reference, mask);
+        s = unit_add_dependency(u, e, other, add_reference, mask);
+        if (s < 0)
+                return s;
+
+        return r > 0 || s > 0;
 }
 
 static int resolve_template(Unit *u, const char *name, char **buf, const char **ret) {
@@ -3620,7 +3627,6 @@ int unit_add_blockdev_dependency(Unit *u, const char *what, UnitDependencyMask m
 
 int unit_coldplug(Unit *u) {
         int r = 0, q;
-        char **i;
 
         assert(u);
 
@@ -3693,7 +3699,6 @@ static bool fragment_mtime_newer(const char *path, usec_t mtime, bool path_maske
 
 bool unit_need_daemon_reload(Unit *u) {
         _cleanup_strv_free_ char **t = NULL;
-        char **path;
 
         assert(u);
 
@@ -3803,6 +3808,13 @@ int unit_kill(Unit *u, KillWho w, int signo, sd_bus_error *error) {
                 return -EOPNOTSUPP;
 
         return UNIT_VTABLE(u)->kill(u, w, signo, error);
+}
+
+void unit_notify_cgroup_oom(Unit *u, bool managed_oom) {
+        assert(u);
+
+        if (UNIT_VTABLE(u)->notify_cgroup_oom)
+                UNIT_VTABLE(u)->notify_cgroup_oom(u, managed_oom);
 }
 
 static Set *unit_pid_set(pid_t main_pid, pid_t control_pid) {
@@ -4128,9 +4140,8 @@ int unit_patch_contexts(Unit *u) {
                     cc->device_policy == CGROUP_DEVICE_POLICY_AUTO)
                         cc->device_policy = CGROUP_DEVICE_POLICY_CLOSED;
 
-                if ((ec->root_image || !LIST_IS_EMPTY(ec->mount_images)) &&
+                if ((ec->root_image || ec->mount_images) &&
                     (cc->device_policy != CGROUP_DEVICE_POLICY_AUTO || cc->device_allow)) {
-                        const char *p;
 
                         /* When RootImage= or MountImages= is specified, the following devices are touched. */
                         FOREACH_STRING(p, "/dev/loop-control", "/dev/mapper/control") {
@@ -4278,7 +4289,6 @@ char* unit_escape_setting(const char *s, UnitWriteFlags flags, char **buf) {
 char* unit_concat_strv(char **l, UnitWriteFlags flags) {
         _cleanup_free_ char *result = NULL;
         size_t n = 0;
-        char **i;
 
         /* Takes a list of strings, escapes them, and concatenates them. This may be used to format command lines in a
          * way suitable for ExecStart= stanzas */
@@ -4775,7 +4785,7 @@ void unit_warn_if_dir_nonempty(Unit *u, const char* where) {
         if (!unit_log_level_test(u, LOG_NOTICE))
                 return;
 
-        r = dir_is_empty(where);
+        r = dir_is_empty(where, /* ignore_hidden_or_backup= */ false);
         if (r > 0 || r == -ENOTDIR)
                 return;
         if (r < 0) {
@@ -5031,7 +5041,8 @@ int unit_set_exec_params(Unit *u, ExecParameters *p) {
         p->cgroup_path = u->cgroup_path;
         SET_FLAG(p->flags, EXEC_CGROUP_DELEGATE, unit_cgroup_delegate(u));
 
-        p->received_credentials = u->manager->received_credentials;
+        p->received_credentials_directory = u->manager->received_credentials_directory;
+        p->received_encrypted_credentials_directory = u->manager->received_encrypted_credentials_directory;
 
         return 0;
 }
@@ -5079,7 +5090,6 @@ int unit_fork_and_watch_rm_rf(Unit *u, char **paths, pid_t *ret_pid) {
                 return r;
         if (r == 0) {
                 int ret = EXIT_SUCCESS;
-                char **i;
 
                 STRV_FOREACH(i, paths) {
                         r = rm_rf(*i, REMOVE_ROOT|REMOVE_PHYSICAL|REMOVE_MISSING_OK);
@@ -5156,6 +5166,9 @@ void unit_remove_dependencies(Unit *u, UnitDependencyMask mask) {
                                 }
 
                                 unit_add_to_gc_queue(other);
+
+                                /* The unit 'other' may not be wanted by the unit 'u'. */
+                                unit_submit_to_stop_when_unneeded_queue(other);
 
                                 done = false;
                                 break;
@@ -5542,34 +5555,6 @@ bool unit_needs_console(Unit *u) {
         return exec_context_may_touch_console(ec);
 }
 
-const char *unit_label_path(const Unit *u) {
-        const char *p;
-
-        assert(u);
-
-        /* Returns the file system path to use for MAC access decisions, i.e. the file to read the SELinux label off
-         * when validating access checks. */
-
-        if (IN_SET(u->load_state, UNIT_MASKED, UNIT_NOT_FOUND, UNIT_MERGED))
-                return NULL; /* Shortcut things if we know there is no real, relevant unit file around */
-
-        p = u->source_path ?: u->fragment_path;
-        if (!p)
-                return NULL;
-
-        if (IN_SET(u->load_state, UNIT_LOADED, UNIT_BAD_SETTING, UNIT_ERROR))
-                return p; /* Shortcut things, if we successfully loaded at least some stuff from the unit file */
-
-        /* Not loaded yet, we need to go to disk */
-        assert(u->load_state == UNIT_STUB);
-
-        /* If a unit is masked, then don't read the SELinux label of /dev/null, as that really makes no sense */
-        if (null_or_empty_path(p) > 0)
-                return NULL;
-
-        return p;
-}
-
 int unit_pid_attachable(Unit *u, pid_t pid, sd_bus_error *error) {
         int r;
 
@@ -5848,6 +5833,8 @@ static int unit_freezer_action(Unit *u, FreezerAction action) {
         if (r <= 0)
                 return r;
 
+        assert(IN_SET(u->freezer_state, FREEZER_FREEZING, FREEZER_THAWING));
+
         return 1;
 }
 
@@ -5869,7 +5856,7 @@ int unit_thaw_vtable_common(Unit *u) {
 }
 
 Condition *unit_find_failed_condition(Unit *u) {
-        Condition *c, *failed_trigger = NULL;
+        Condition *failed_trigger = NULL;
         bool has_succeeded_trigger = false;
 
         if (u->condition_result)

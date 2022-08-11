@@ -525,7 +525,6 @@ static int decode_link(sd_netlink_message *m, LinkInfo *info, char **patterns, b
                 if (!strv_fnmatch_full(patterns, str, 0, &pos) &&
                     !strv_fnmatch_full(patterns, name, 0, &pos)) {
                         bool match = false;
-                        char **p;
 
                         STRV_FOREACH(p, altnames)
                                 if (strv_fnmatch_full(patterns, *p, 0, &pos)) {
@@ -693,7 +692,7 @@ static void acquire_wlan_link_info(LinkInfo *link) {
                 return;
         }
 
-        (void) sd_netlink_inc_rcvbuf(genl, RCVBUF_SIZE);
+        (void) sd_netlink_increase_rxbuf(genl, RCVBUF_SIZE);
 
         r = wifi_get_interface(genl, link->ifindex, &link->wlan_iftype, &link->ssid);
         if (r < 0)
@@ -1041,24 +1040,18 @@ static int dump_gateways(
                 return n;
 
         for (int i = 0; i < n; i++) {
-                _cleanup_free_ char *gateway = NULL, *description = NULL;
-
-                r = in_addr_to_string(local[i].family, &local[i].address, &gateway);
-                if (r < 0)
-                        return log_oom();
+                _cleanup_free_ char *description = NULL;
 
                 r = get_gateway_description(rtnl, hwdb, local[i].ifindex, local[i].family, &local[i].address, &description);
                 if (r < 0)
                         log_debug_errno(r, "Could not get description of gateway, ignoring: %m");
 
-                if (description) {
-                        if (!strextend(&gateway, " (", description, ")"))
-                                return log_oom();
-                }
-
                 /* Show interface name for the entry if we show entries for all interfaces */
-                r = strv_extendf(&buf, "%s%s%s",
-                                 gateway,
+                r = strv_extendf(&buf, "%s%s%s%s%s%s",
+                                 IN_ADDR_TO_STRING(local[i].family, &local[i].address),
+                                 description ? " (" : "",
+                                 strempty(description),
+                                 description ? ")" : "",
                                  ifindex <= 0 ? " on " : "",
                                  ifindex <= 0 ? FORMAT_IFNAME_FULL(local[i].ifindex, FORMAT_IFNAME_IFINDEX_WITH_PERCENT) : "");
                 if (r < 0)
@@ -1090,29 +1083,17 @@ static int dump_addresses(
                 (void) sd_dhcp_lease_get_address(lease, &dhcp4_address);
 
         for (int i = 0; i < n; i++) {
-                _cleanup_free_ char *pretty = NULL;
+                struct in_addr server_address;
+                bool dhcp4 = false;
 
-                r = in_addr_to_string(local[i].family, &local[i].address, &pretty);
-                if (r < 0)
-                        return r;
+                if (local[i].family == AF_INET && in4_addr_equal(&local[i].address.in, &dhcp4_address))
+                        dhcp4 = sd_dhcp_lease_get_server_identifier(lease, &server_address) >= 0;
 
-                if (local[i].family == AF_INET && in4_addr_equal(&local[i].address.in, &dhcp4_address)) {
-                        struct in_addr server_address;
-                        char *p, s[INET_ADDRSTRLEN];
-
-                        r = sd_dhcp_lease_get_server_identifier(lease, &server_address);
-                        if (r >= 0 && inet_ntop(AF_INET, &server_address, s, sizeof(s)))
-                                p = strjoin(pretty, " (DHCP4 via ", s, ")");
-                        else
-                                p = strjoin(pretty, " (DHCP4)");
-                        if (!p)
-                                return log_oom();
-
-                        free_and_replace(pretty, p);
-                }
-
-                r = strv_extendf(&buf, "%s%s%s",
-                                 pretty,
+                r = strv_extendf(&buf, "%s%s%s%s%s%s",
+                                 IN_ADDR_TO_STRING(local[i].family, &local[i].address),
+                                 dhcp4 ? " (DHCP4 via " : "",
+                                 dhcp4 ? IN4_ADDR_TO_STRING(&server_address) : "",
+                                 dhcp4 ? ")" : "",
                                  ifindex <= 0 ? " on " : "",
                                  ifindex <= 0 ? FORMAT_IFNAME_FULL(local[i].ifindex, FORMAT_IFNAME_IFINDEX_WITH_PERCENT) : "");
                 if (r < 0)
@@ -1161,8 +1142,7 @@ static int dump_address_labels(sd_netlink *rtnl) {
         (void) table_set_align_percent(table, cell, 100);
 
         for (sd_netlink_message *m = reply; m; m = sd_netlink_message_next(m)) {
-                _cleanup_free_ char *pretty = NULL;
-                union in_addr_union prefix = IN_ADDR_NULL;
+                struct in6_addr prefix;
                 uint8_t prefixlen;
                 uint32_t label;
 
@@ -1178,11 +1158,7 @@ static int dump_address_labels(sd_netlink *rtnl) {
                         continue;
                 }
 
-                r = sd_netlink_message_read_in6_addr(m, IFAL_ADDRESS, &prefix.in6);
-                if (r < 0)
-                        continue;
-
-                r = in_addr_to_string(AF_INET6, &prefix, &pretty);
+                r = sd_netlink_message_read_in6_addr(m, IFAL_ADDRESS, &prefix);
                 if (r < 0)
                         continue;
 
@@ -1194,7 +1170,7 @@ static int dump_address_labels(sd_netlink *rtnl) {
                 if (r < 0)
                         return table_log_add_error(r);
 
-                r = table_add_cell_stringf(table, NULL, "%s/%u", pretty, prefixlen);
+                r = table_add_cell_stringf(table, NULL, "%s/%u", IN6_ADDR_TO_STRING(&prefix), prefixlen);
                 if (r < 0)
                         return table_log_add_error(r);
         }
@@ -1815,13 +1791,13 @@ static int link_status_one(
                                    TABLE_STRING, bond_mode_to_string(info->mode),
                                    TABLE_EMPTY,
                                    TABLE_STRING, "Miimon:",
-                                   TABLE_TIMESPAN_MSEC, jiffies_to_usec(info->miimon),
+                                   TABLE_TIMESPAN_MSEC, info->miimon * USEC_PER_MSEC,
                                    TABLE_EMPTY,
                                    TABLE_STRING, "Updelay:",
-                                   TABLE_TIMESPAN_MSEC, jiffies_to_usec(info->updelay),
+                                   TABLE_TIMESPAN_MSEC, info->updelay * USEC_PER_MSEC,
                                    TABLE_EMPTY,
                                    TABLE_STRING, "Downdelay:",
-                                   TABLE_TIMESPAN_MSEC, jiffies_to_usec(info->downdelay));
+                                   TABLE_TIMESPAN_MSEC, info->downdelay * USEC_PER_MSEC);
                 if (r < 0)
                         return table_log_add_error(r);
 
@@ -2134,7 +2110,7 @@ static int link_status_one(
         if (info->has_tx_queues || info->has_rx_queues) {
                 r = table_add_many(table,
                                    TABLE_EMPTY,
-                                   TABLE_STRING, "Queue Length (Tx/Rx):");
+                                   TABLE_STRING, "Number of Queues (Tx/Rx):");
                 if (r < 0)
                         return table_log_add_error(r);
                 r = table_add_cell_stringf(table, NULL, "%" PRIu32 "/%" PRIu32, info->tx_queues, info->rx_queues);
@@ -2492,11 +2468,11 @@ static int link_lldp_status(int argc, char *argv[], void *userdata) {
         pager_open(arg_pager_flags);
 
         table = table_new("link",
-                          "chassis id",
-                          "system name",
+                          "chassis-id",
+                          "system-name",
                           "caps",
-                          "port id",
-                          "port description");
+                          "port-id",
+                          "port-description");
         if (!table)
                 return log_oom();
 
@@ -2505,23 +2481,8 @@ static int link_lldp_status(int argc, char *argv[], void *userdata) {
 
         table_set_header(table, arg_legend);
 
-        assert_se(cell = table_get_cell(table, 0, 0));
-        table_set_minimum_width(table, cell, 16);
-
-        assert_se(cell = table_get_cell(table, 0, 1));
-        table_set_minimum_width(table, cell, 17);
-
-        assert_se(cell = table_get_cell(table, 0, 2));
-        table_set_minimum_width(table, cell, 16);
-
         assert_se(cell = table_get_cell(table, 0, 3));
         table_set_minimum_width(table, cell, 11);
-
-        assert_se(cell = table_get_cell(table, 0, 4));
-        table_set_minimum_width(table, cell, 17);
-
-        assert_se(cell = table_get_cell(table, 0, 5));
-        table_set_minimum_width(table, cell, 16);
 
         for (int i = 0; i < c; i++) {
                 _cleanup_fclose_ FILE *f = NULL;
@@ -2535,9 +2496,9 @@ static int link_lldp_status(int argc, char *argv[], void *userdata) {
                 }
 
                 for (;;) {
-                        _cleanup_free_ char *cid = NULL, *pid = NULL, *sname = NULL, *pdesc = NULL, *capabilities = NULL;
                         const char *chassis_id = NULL, *port_id = NULL, *system_name = NULL, *port_description = NULL;
                         _cleanup_(sd_lldp_neighbor_unrefp) sd_lldp_neighbor *n = NULL;
+                        _cleanup_free_ char *capabilities = NULL;
                         uint16_t cc;
 
                         r = next_lldp_neighbor(f, &n);
@@ -2552,30 +2513,6 @@ static int link_lldp_status(int argc, char *argv[], void *userdata) {
                         (void) sd_lldp_neighbor_get_port_id_as_string(n, &port_id);
                         (void) sd_lldp_neighbor_get_system_name(n, &system_name);
                         (void) sd_lldp_neighbor_get_port_description(n, &port_description);
-
-                        if (chassis_id) {
-                                cid = ellipsize(chassis_id, 17, 100);
-                                if (cid)
-                                        chassis_id = cid;
-                        }
-
-                        if (port_id) {
-                                pid = ellipsize(port_id, 17, 100);
-                                if (pid)
-                                        port_id = pid;
-                        }
-
-                        if (system_name) {
-                                sname = ellipsize(system_name, 16, 100);
-                                if (sname)
-                                        system_name = sname;
-                        }
-
-                        if (port_description) {
-                                pdesc = ellipsize(port_description, 16, 100);
-                                if (pdesc)
-                                        port_description = pdesc;
-                        }
 
                         if (sd_lldp_neighbor_get_enabled_capabilities(n, &cc) >= 0) {
                                 capabilities = lldp_capabilities_to_string(cc);
@@ -2786,7 +2723,7 @@ static int verb_reload(int argc, char *argv[], void *userdata) {
 
         r = bus_call_method(bus, bus_network_mgr, "Reload", &error, NULL, NULL);
         if (r < 0)
-                return log_error_errno(r, "Failed to reload network settings: %m");
+                return log_error_errno(r, "Failed to reload network settings: %s", bus_error_message(&error, r));
 
         return 0;
 }
@@ -2817,8 +2754,9 @@ static int verb_reconfigure(int argc, char *argv[], void *userdata) {
                 index = PTR_TO_INT(p);
                 r = bus_call_method(bus, bus_network_mgr, "ReconfigureLink", &error, NULL, "i", index);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to reconfigure network interface %s: %m",
-                                               FORMAT_IFNAME_FULL(index, FORMAT_IFNAME_IFINDEX));
+                        return log_error_errno(r, "Failed to reconfigure network interface %s: %s",
+                                               FORMAT_IFNAME_FULL(index, FORMAT_IFNAME_IFINDEX),
+                                               bus_error_message(&error, r));
         }
 
         return 0;

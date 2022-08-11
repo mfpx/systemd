@@ -75,6 +75,10 @@
     from earliest boot on, and hence must be located on the root file
     system.</para>
 
+    <para><filename>os-release</filename> must not contain repeating keys. Nevertheless, readers should pick
+    the entries later in the file in case of repeats, similarly to how a shell sourcing the file would. A
+    reader may warn about repeating entries.</para>
+
     <para>For a longer rationale for <filename>os-release</filename>
     please refer to the <ulink
     url="http://0pointer.de/blog/projects/os-release">Announcement of <filename>/etc/os-release</filename></ulink>.</para>
@@ -83,7 +87,7 @@
       <title><filename>/etc/initrd-release</filename></title>
 
       <para>In the <ulink
-      url="https://www.kernel.org/doc/html/latest/admin-guide/initrd.html">initrd</ulink>,
+      url="https://docs.kernel.org/admin-guide/initrd.html">initrd</ulink>,
       <filename>/etc/initrd-release</filename> plays the same role as <filename>os-release</filename> in the
       main system. Additionally, the presence of that file means that the system is in the initrd phase.
       <filename>/etc/os-release</filename> should be symlinked to <filename>/etc/initrd-release</filename>
@@ -113,7 +117,7 @@
       change between the build and the deployment phases, it is possible to relax this check: if exactly one
       file whose name matches <literal><filename>extension-release.*</filename></literal> is present in this
       directory, and the file is tagged with a <varname>user.extension-release.strict</varname>
-      <citerefentry><refentrytitle>xattr</refentrytitle><manvolnum>7</manvolnum></citerefentry> set to the
+      <citerefentry project='man-pages'><refentrytitle>xattr</refentrytitle><manvolnum>7</manvolnum></citerefentry> set to the
       string <literal>0</literal>, it will be used instead.</para>
 
       <para>The rest of this document that talks about <filename>os-release</filename> should be understood
@@ -347,10 +351,23 @@
         </varlistentry>
 
         <varlistentry>
+          <term><varname>SUPPORT_END=</varname></term>
+
+          <listitem><para>The date at which support for this version of the OS ends. (What exactly "lack of
+          support" means varies between vendors, but generally users should assume that updates, including
+          security fixes, will not be provided.) The value is a date in the ISO 8601 format
+          <literal>YYYY-MM-DD</literal>, and specifies the first day on which support <emphasis>is
+          not</emphasis> provided.</para>
+
+          <para>For example, <literal>SUPPORT_END=2001-01-01</literal> means that the system was supported
+          until the end of the last day of the previous millennium.</para></listitem>
+        </varlistentry>
+
+        <varlistentry>
           <term><varname>LOGO=</varname></term>
 
           <listitem><para>A string, specifying the name of an icon as defined by <ulink
-          url="http://standards.freedesktop.org/icon-theme-spec/latest">freedesktop.org Icon Theme
+          url="https://standards.freedesktop.org/icon-theme-spec/latest">freedesktop.org Icon Theme
           Specification</ulink>. This can be used by graphical applications to display an operating system's
           or distributor's logo. This field is optional and may not necessarily be implemented on all
           systems.</para>
@@ -400,7 +417,7 @@
           <listitem><para>A lower-case string (mostly numeric, no spaces or other characters outside of 0–9,
           a–z, ".", "_" and "-") identifying the operating system extensions support level, to indicate which
           extension images are supported. See <filename>/usr/lib/extension-release.d/extension-release.<replaceable>IMAGE</replaceable></filename>,
-          <ulink url="https://www.kernel.org/doc/html/latest/admin-guide/initrd.html">initrd</ulink> and
+          <ulink url="https://docs.kernel.org/admin-guide/initrd.html">initrd</ulink> and
           <citerefentry><refentrytitle>systemd-sysext</refentrytitle><manvolnum>8</manvolnum></citerefentry>)
           for more information.</para>
 
@@ -425,7 +442,7 @@
           <listitem><para>Takes a space-separated list of one or more valid prefix match strings for the
           <ulink url="https://systemd.io/PORTABLE_SERVICES">Portable Services</ulink> logic. This field
           serves two purposes: it is informational, identifying portable service images as such (and thus
-          allowing them to be distinguished from other OS images, such as bootable system images). In is also
+          allowing them to be distinguished from other OS images, such as bootable system images). It is also
           used when a portable service image is attached: the specified or implied portable service prefix is
           checked against the list specified here, to enforce restrictions how images may be attached to a
           system.</para></listitem>
@@ -495,14 +512,14 @@ VERSION_ID=32</programlisting>
 
     <example>
       <title>Reading <filename>os-release</filename> in
-      <citerefentry><refentrytitle>sh</refentrytitle><manvolnum>1</manvolnum></citerefentry></title>
+      <citerefentry project='man-pages'><refentrytitle>sh</refentrytitle><manvolnum>1</manvolnum></citerefentry></title>
 
       <programlisting><xi:include href="check-os-release.sh" parse="text" /></programlisting>
     </example>
 
     <example>
       <title>Reading <filename>os-release</filename> in
-      <citerefentry><refentrytitle>python</refentrytitle><manvolnum>1</manvolnum></citerefentry> (versions &gt;= 3.10)</title>
+      <citerefentry project='die-net'><refentrytitle>python</refentrytitle><manvolnum>1</manvolnum></citerefentry> (versions &gt;= 3.10)</title>
 
       <programlisting><xi:include href="check-os-release-simple.py" parse="text" /></programlisting>
 
@@ -513,7 +530,7 @@ VERSION_ID=32</programlisting>
 
     <example>
       <title>Reading <filename>os-release</filename> in
-      <citerefentry><refentrytitle>python</refentrytitle><manvolnum>1</manvolnum></citerefentry> (any version)</title>
+      <citerefentry project='die-net'><refentrytitle>python</refentrytitle><manvolnum>1</manvolnum></citerefentry> (any version)</title>
 
       <programlisting><xi:include href="check-os-release.py" parse="text" /></programlisting>
 

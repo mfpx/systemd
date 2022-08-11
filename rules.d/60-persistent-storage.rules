@@ -99,6 +99,9 @@ ENV{DEVTYPE}=="partition", ENV{ID_PATH_ATA_COMPAT}=="?*", SYMLINK+="disk/by-path
 KERNEL=="vd*[!0-9]", ENV{ID_PATH}=="pci-*", SYMLINK+="disk/by-path/virtio-$env{ID_PATH}"
 KERNEL=="vd*[0-9]", ENV{ID_PATH}=="pci-*", SYMLINK+="disk/by-path/virtio-$env{ID_PATH}-part%n"
 
+# allow admin to disable probing the filesystem for slow devices like floppy disk drives
+ENV{UDEV_DISABLE_PERSISTENT_STORAGE_BLKID_FLAG}=="1", GOTO="persistent_storage_blkid_probe_end"
+
 # probe filesystem metadata of optical drives which have a media inserted
 KERNEL=="sr*", ENV{DISK_EJECT_REQUEST}!="?*", ENV{ID_CDROM_MEDIA_TRACK_COUNT_DATA}=="?*", ENV{ID_CDROM_MEDIA_SESSION_LAST_OFFSET}=="?*", \
   IMPORT{builtin}="blkid --hint=session_offset=$env{ID_CDROM_MEDIA_SESSION_LAST_OFFSET}"
@@ -108,6 +111,8 @@ KERNEL=="sr*", ENV{DISK_EJECT_REQUEST}!="?*", ENV{ID_CDROM_MEDIA_TRACK_COUNT_DAT
 
 # probe filesystem metadata of disks
 KERNEL!="sr*|mmcblk[0-9]boot[0-9]", IMPORT{builtin}="blkid"
+
+LABEL="persistent_storage_blkid_probe_end"
 
 # by-label/by-uuid links (filesystem metadata)
 ENV{ID_FS_USAGE}=="filesystem|other|crypto", ENV{ID_FS_UUID_ENC}=="?*", SYMLINK+="disk/by-uuid/$env{ID_FS_UUID_ENC}"
@@ -120,5 +125,10 @@ ENV{DEVTYPE}=="partition", ENV{ID_WWN_WITH_EXTENSION}=="?*", SYMLINK+="disk/by-i
 # by-partlabel/by-partuuid links (partition metadata)
 ENV{ID_PART_ENTRY_UUID}=="?*", SYMLINK+="disk/by-partuuid/$env{ID_PART_ENTRY_UUID}"
 ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_NAME}=="?*", SYMLINK+="disk/by-partlabel/$env{ID_PART_ENTRY_NAME}"
+
+# by-diskseq link (if an app is told to open a path like this, they may parse
+# the diskseq number from the path, then issue BLKGETDISKSEQ to verify they really got
+# the right device, to access specific disks in a race-free fashion)
+ENV{DISKSEQ}=="?*", ENV{DEVTYPE}!="partition", ENV{DISKSEQ}=="?*", ENV{ID_IGNORE_DISKSEQ}!="1", SYMLINK+="disk/by-diskseq/$env{DISKSEQ}"
 
 LABEL="persistent_storage_end"

@@ -3,6 +3,8 @@
 conf.set10('ENABLE_EFI', get_option('efi'))
 conf.set10('HAVE_GNU_EFI', false)
 
+efi_config_h_dir = meson.current_build_dir()
+
 if not get_option('efi') or get_option('gnu-efi') == 'false'
         if get_option('gnu-efi') == 'true'
                 error('gnu-efi support requested, but general efi support is disabled')
@@ -10,6 +12,12 @@ if not get_option('efi') or get_option('gnu-efi') == 'false'
         subdir_done()
 endif
 
+efi_arch = host_machine.cpu_family()
+if efi_arch == 'x86' and '-m64' in get_option('efi-cflags')
+        efi_arch = 'x86_64'
+elif efi_arch == 'x86_64' and '-m32' in get_option('efi-cflags')
+        efi_arch = 'x86'
+endif
 efi_arch = {
         # host_cc_arch: [efi_arch (see Table 3-2 in UEFI spec), gnu_efi_inc_arch]
         'x86':     ['ia32', 'ia32'],
@@ -17,10 +25,13 @@ efi_arch = {
         'arm':     ['arm', 'arm'],
         'aarch64': ['aa64', 'aarch64'],
         'riscv64': ['riscv64', 'riscv64'],
-}.get(host_machine.cpu_family(), [])
+}.get(efi_arch, [])
 
 efi_incdir = get_option('efi-includedir')
-if efi_arch.length() > 0 and not cc.has_header('@0@/@1@/efibind.h'.format(efi_incdir, efi_arch[1]))
+if efi_arch.length() > 0 and not cc.has_header(
+                '@0@/@1@/efibind.h'.format(efi_incdir, efi_arch[1]),
+                args: get_option('efi-cflags'))
+
         efi_arch = []
 endif
 
@@ -33,7 +44,7 @@ if efi_arch.length() == 0
 endif
 
 if not cc.has_header_symbol('efi.h', 'EFI_IMAGE_MACHINE_X64',
-                args: ['-nostdlib', '-ffreestanding', '-fshort-wchar'],
+                args: ['-nostdlib', '-ffreestanding', '-fshort-wchar'] + get_option('efi-cflags'),
                 include_directories: include_directories(efi_incdir, efi_incdir / efi_arch[1]))
 
         if get_option('gnu-efi') == 'true'
@@ -54,14 +65,19 @@ if efi_ld == 'auto'
         endif
 endif
 
+efi_multilib = run_command(
+        cc.cmd_array(), '-print-multi-os-directory', get_option('efi-cflags'),
+        check: false
+).stdout().strip()
+efi_multilib = run_command(
+        'realpath', '-e', '/usr/lib' / efi_multilib,
+        check: false
+).stdout().strip()
+
 efi_libdir = ''
 foreach dir : [get_option('efi-libdir'),
                '/usr/lib/gnuefi' / efi_arch[0],
-               run_command(
-                        'realpath', '-e',
-                        '/usr/lib' / run_command(cc.cmd_array(), '-print-multi-os-directory', check: false).stdout().strip(),
-                        check: false
-               ).stdout().strip()]
+               efi_multilib]
         if dir != '' and fs.is_dir(dir)
                 efi_libdir = dir
                 break
@@ -158,31 +174,36 @@ efi_config_h = configure_file(
         output : 'efi_config.h',
         configuration : efi_conf)
 
-efi_cflags = cc.get_supported_arguments(
+efi_cflags = [
+        '-DGNU_EFI_USE_MS_ABI',
+        '-DSD_BOOT',
+        '-ffreestanding',
+        '-fshort-wchar',
+        '-fvisibility=hidden',
+        '-I', fundamental_path,
+        '-I', meson.current_source_dir(),
+        '-include', efi_config_h,
+        '-include', version_h,
+        '-isystem', efi_incdir / efi_arch[1],
+        '-isystem', efi_incdir,
+        '-std=gnu11',
+        '-Wall',
+        '-Wextra',
+] + cc.get_supported_arguments(
         basic_disabled_warnings +
         possible_common_cc_flags + [
                 '-fno-stack-protector',
                 '-fno-strict-aliasing',
                 '-fpic',
                 '-fwide-exec-charset=UCS2',
-                '-Wall',
-                '-Wextra',
-                '-Wsign-compare',
         ]
-) + [
-        '-nostdlib',
-        '-std=gnu99',
-        '-ffreestanding',
-        '-fshort-wchar',
-        '-fvisibility=hidden',
-        '-isystem', efi_incdir,
-        '-isystem', efi_incdir / efi_arch[1],
-        '-I', fundamental_path,
-        '-DSD_BOOT',
-        '-DGNU_EFI_USE_MS_ABI',
-        '-include', efi_config_h,
-        '-include', version_h,
-]
+)
+
+# On some distros, sd-boot/-stub may trigger some bug somewhere that will cause
+# kernel execution to fail. The cause seems to be purely based on code size and
+# always compiling with at least -O1 will work around that.
+# https://github.com/systemd/systemd/issues/24202
+efi_cflags += '-O1'
 
 efi_cflags += cc.get_supported_arguments({
         'ia32':   ['-mno-sse', '-mno-mmx'],
@@ -207,7 +228,7 @@ if get_option('b_ndebug') == 'true' or (
         efi_cflags += ['-DNDEBUG']
 endif
 if get_option('b_lto')
-        efi_cflags += ['-flto']
+        efi_cflags += cc.has_argument('-flto=auto') ? ['-flto=auto'] : ['-flto']
 endif
 
 foreach arg : get_option('c_args')
@@ -229,6 +250,8 @@ foreach arg : get_option('c_args')
         endif
 endforeach
 
+efi_cflags += get_option('efi-cflags')
+
 efi_ldflags = [
         '-fuse-ld=' + efi_ld,
         '-L', efi_libdir,
@@ -242,6 +265,21 @@ efi_ldflags = [
         '-z', 'nocombreloc',
         efi_crt0,
 ]
+
+foreach arg : ['-Wl,--no-warn-execstack',
+               '-Wl,--no-warn-rwx-segments']
+        # We need to check the correct linker for supported args. This is what
+        # cc.has_multi_link_arguments() is for, but it helpfully overrides our
+        # choice of linker by putting its own -fuse-ld= arg after ours.
+        if run_command('bash', '-c',
+                       'exec "$@" -x c -o/dev/null <(echo "int main(void){return 0;}")' +
+                       ' -fuse-ld=' + efi_ld + ' -Wl,--fatal-warnings ' + arg,
+                       'bash', cc.cmd_array(),
+                       check : false).returncode() == 0
+                efi_ldflags += arg
+        endif
+endforeach
+
 if efi_arch[1] in ['aarch64', 'arm', 'riscv64']
         efi_ldflags += ['-shared']
         # Aarch64, ARM32 and 64bit RISC-V don't have an EFI capable objcopy.
@@ -313,6 +351,7 @@ efi_headers = files(
         'devicetree.h',
         'disk.h',
         'drivers.h',
+        'efi-string.h',
         'graphics.h',
         'initrd.h',
         'linux.h',
@@ -330,9 +369,12 @@ efi_headers = files(
 
 common_sources = files(
         'assert.c',
+        'console.c',
         'devicetree.c',
         'disk.c',
+        'efi-string.c',
         'graphics.c',
+        'initrd.c',
         'measure.c',
         'pe.c',
         'secure-boot.c',
@@ -342,7 +384,6 @@ common_sources = files(
 
 systemd_boot_sources = files(
         'boot.c',
-        'console.c',
         'drivers.c',
         'random-seed.c',
         'shim.c',
@@ -351,7 +392,6 @@ systemd_boot_sources = files(
 
 stub_sources = files(
         'cpio.c',
-        'initrd.c',
         'splash.c',
         'stub.c',
 )
@@ -362,18 +402,22 @@ else
         stub_sources += files('linux.c')
 endif
 
+tests += [
+        [files('test-efi-string.c', 'efi-string.c')],
+]
+
 # BCD parser only makes sense on arches that Windows supports.
 if efi_arch[1] in ['ia32', 'x86_64', 'arm', 'aarch64']
         systemd_boot_sources += files('bcd.c')
         tests += [
-                [files('test-bcd.c'),
+                [files('test-bcd.c', 'efi-string.c'),
                  [],
                  [libzstd],
                  [],
                  'HAVE_ZSTD'],
         ]
         fuzzers += [
-                [files('fuzz-bcd.c')],
+                [files('fuzz-bcd.c', 'efi-string.c')],
         ]
 endif
 
@@ -394,8 +438,8 @@ foreach file : fundamental_source_paths + common_sources + systemd_boot_sources 
         endif
 endforeach
 
-foreach tuple : [['systemd-boot@0@.@1@', systemd_boot_objects, false],
-                 ['linux@0@.@1@.stub', stub_objects, true]]
+foreach tuple : [['systemd-boot@0@.@1@', systemd_boot_objects, false, 'systemd-boot'],
+                 ['linux@0@.@1@.stub', stub_objects, true, 'systemd-stub']]
         elf = custom_target(
                 tuple[0].format(efi_arch[0], 'elf'),
                 input : tuple[1],
@@ -409,9 +453,10 @@ foreach tuple : [['systemd-boot@0@.@1@', systemd_boot_objects, false],
                            '-lgnuefi',
                            '-lgcc'],
                 install : tuple[2],
+                install_tag: tuple[3],
                 install_dir : bootlibdir)
 
-        custom_target(
+        efi = custom_target(
                 tuple[0].format(efi_arch[0], 'efi'),
                 input : elf,
                 output : tuple[0].format(efi_arch[0], 'efi'),
@@ -430,5 +475,8 @@ foreach tuple : [['systemd-boot@0@.@1@', systemd_boot_objects, false],
                            efi_format,
                            '@INPUT@', '@OUTPUT@'],
                 install : true,
+                install_tag: tuple[3],
                 install_dir : bootlibdir)
+
+        alias_target(tuple[3], efi)
 endforeach

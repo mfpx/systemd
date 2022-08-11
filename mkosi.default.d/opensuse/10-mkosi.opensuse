@@ -7,7 +7,7 @@
 Distribution=opensuse
 Release=tumbleweed
 
-[Packages]
+[Content]
 BuildPackages=
         docbook-xsl-stylesheets
         fdupes
@@ -39,6 +39,7 @@ BuildPackages=
         python3-Jinja2
         python3-lxml
         qrencode-devel
+        shadow
         system-user-nobody
         systemd-sysvinit
         zlib-devel
@@ -72,3 +73,7 @@ Packages=
         nano
         strace
         util-linux
+        # xxd is provided by the vim package
+        vim
+        # Provides libasan/libubsan
+        gcc

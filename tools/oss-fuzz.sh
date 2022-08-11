@@ -34,8 +34,12 @@ else
 
     apt-get update
     apt-get install -y gperf m4 gettext python3-pip \
-        libcap-dev libmount-dev libkmod-dev \
+        libcap-dev libmount-dev \
         pkg-config wget python3-jinja2 zipmerge
+
+    if [[ "$ARCHITECTURE" == i386 ]]; then
+        apt-get install -y pkg-config:i386 libcap-dev:i386 libmount-dev:i386
+    fi
 
     # gnu-efi is installed here to enable -Dgnu-efi behind which fuzz-bcd
     # is hidden. It isn't linked against efi. It doesn't
@@ -54,6 +58,18 @@ else
         UBSAN_FLAGS="-fsanitize=$additional_ubsan_checks -fno-sanitize-recover=$additional_ubsan_checks"
         CFLAGS="$CFLAGS $UBSAN_FLAGS"
         CXXFLAGS="$CXXFLAGS $UBSAN_FLAGS"
+    fi
+
+    if [[ "$SANITIZER" == introspector ]]; then
+        # fuzz-introspector passes -fuse-ld=gold and -flto using CFLAGS/LDFLAGS and due to
+        # https://github.com/mesonbuild/meson/issues/6377#issuecomment-575977919 and
+        # https://github.com/mesonbuild/meson/issues/6377 it doesn't mix well with meson.
+        # It's possible to build systemd with duct tape there using something like
+        # https://github.com/google/oss-fuzz/pull/7583#issuecomment-1104011067 but
+        # apparently even with gold and lto some parts of systemd are missing from
+        # reports (presumably due to https://github.com/google/oss-fuzz/issues/7598).
+        # Let's just fail here for now to make it clear that fuzz-introspector isn't supported.
+        exit 1
     fi
 fi
 
@@ -92,6 +108,22 @@ zip -jqr "$OUT/fuzz-dns-packet_seed_corpus.zip" "$df/packet"
 install -Dt "$OUT/src/shared/" \
         "$build"/src/shared/libsystemd-shared-*.so \
         "$build"/src/core/libsystemd-core-*.so
+
+# Most i386 libraries have to be brought to the runtime environment somehow. Ideally they
+# should be linked statically but since it isn't possible another way to keep them close
+# to the fuzz targets is used here. The dependencies are copied to "$OUT/src/shared" and
+# then `rpath` is tweaked to make it possible for the linker to find them there. "$OUT/src/shared"
+# is chosen because the runtime search path of all the fuzz targets already points to it
+# to load "libsystemd-shared" and "libsystemd-core". Stuff like that should be avoided on
+# x86_64 because it tends to break coverage reports, fuzz-introspector, CIFuzz and so on.
+if [[ "$ARCHITECTURE" == i386 ]]; then
+    for lib_path in $(ldd "$OUT"/src/shared/libsystemd-shared-*.so | perl -lne 'print $1 if m{=>\s+(/lib\S+)}'); do
+        lib_name=$(basename "$lib_path")
+        cp "$lib_path" "$OUT/src/shared"
+        patchelf --set-rpath \$ORIGIN "$OUT/src/shared/$lib_name"
+    done
+    patchelf --set-rpath \$ORIGIN "$OUT"/src/shared/libsystemd-shared-*.so
+fi
 
 wget -O "$OUT/fuzz-json.dict" https://raw.githubusercontent.com/rc0r/afl-fuzz/master/dictionaries/json.dict
 

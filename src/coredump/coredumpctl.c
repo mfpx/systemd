@@ -12,6 +12,7 @@
 
 #include "alloc-util.h"
 #include "bus-error.h"
+#include "bus-locator.h"
 #include "bus-util.h"
 #include "compress.h"
 #include "def.h"
@@ -91,7 +92,6 @@ static int add_match(sd_journal *j, const char *match) {
 }
 
 static int add_matches(sd_journal *j, char **matches) {
-        char **match;
         int r;
 
         r = sd_journal_add_match(j, "MESSAGE_ID=" SD_MESSAGE_COREDUMP_STR, 0);
@@ -234,7 +234,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argv);
 
         while ((c = getopt_long(argc, argv, "hA:o:F:1D:rS:U:qn:", options, NULL)) >= 0)
-                switch(c) {
+                switch (c) {
                 case 'h':
                         return verb_help(0, NULL, NULL);
 
@@ -1197,13 +1197,7 @@ static int check_units_active(void) {
         if (r < 0)
                 return log_error_errno(r, "Failed to acquire bus: %m");
 
-        r = sd_bus_message_new_method_call(
-                        bus,
-                        &m,
-                        "org.freedesktop.systemd1",
-                        "/org/freedesktop/systemd1",
-                        "org.freedesktop.systemd1.Manager",
-                        "ListUnitsByPatterns");
+        r = bus_message_new_method_call(bus, &m, bus_systemd_mgr, "ListUnitsByPatterns");
         if (r < 0)
                 return bus_log_create_error(r);
 

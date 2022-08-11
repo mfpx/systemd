@@ -1,15 +1,19 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include "analyze.h"
 #include "analyze-critical-chain.h"
 #include "analyze-time-data.h"
-#include "strv.h"
+#include "analyze.h"
+#include "bus-error.h"
 #include "copy.h"
 #include "path-util.h"
-#include "terminal-util.h"
 #include "sort-util.h"
 #include "special.h"
-#include "bus-error.h"
+#include "static-destruct.h"
+#include "strv.h"
+#include "terminal-util.h"
+
+static Hashmap *unit_times_hashmap = NULL;
+STATIC_DESTRUCTOR_REGISTER(unit_times_hashmap, hashmap_freep);
 
 static int list_dependencies_print(
                 const char *name,
@@ -54,8 +58,6 @@ static int list_dependencies_get_dependencies(sd_bus *bus, const char *name, cha
         return bus_get_unit_property_strv(bus, path, "After", deps);
 }
 
-static Hashmap *unit_times_hashmap;
-
 static int list_dependencies_compare(char *const *a, char *const *b) {
         usec_t usa = 0, usb = 0;
         UnitTimes *times;
@@ -76,7 +78,6 @@ static bool times_in_range(const UnitTimes *times, const BootTimes *boot) {
 
 static int list_dependencies_one(sd_bus *bus, const char *name, unsigned level, char ***units, unsigned branches) {
         _cleanup_strv_free_ char **deps = NULL;
-        char **c;
         int r;
         usec_t service_longest = 0;
         int to_print = 0;
@@ -198,7 +199,6 @@ static int list_dependencies(sd_bus *bus, const char *name) {
 int verb_critical_chain(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         _cleanup_(unit_times_free_arrayp) UnitTimes *times = NULL;
-        Hashmap *h;
         int n, r;
 
         r = acquire_bus(&bus, NULL);
@@ -209,29 +209,22 @@ int verb_critical_chain(int argc, char *argv[], void *userdata) {
         if (n <= 0)
                 return n;
 
-        h = hashmap_new(&string_hash_ops);
-        if (!h)
-                return log_oom();
-
         for (UnitTimes *u = times; u->has_data; u++) {
-                r = hashmap_put(h, u->name, u);
+                r = hashmap_ensure_put(&unit_times_hashmap, &string_hash_ops, u->name, u);
                 if (r < 0)
                         return log_error_errno(r, "Failed to add entry to hashmap: %m");
         }
-        unit_times_hashmap = h;
 
         pager_open(arg_pager_flags);
 
         puts("The time when unit became active or started is printed after the \"@\" character.\n"
              "The time the unit took to start is printed after the \"+\" character.\n");
 
-        if (argc > 1) {
-                char **name;
+        if (argc > 1)
                 STRV_FOREACH(name, strv_skip(argv, 1))
                         list_dependencies(bus, *name);
-        } else
+        else
                 list_dependencies(bus, SPECIAL_DEFAULT_TARGET);
 
-        h = hashmap_free(h);
-        return 0;
+        return EXIT_SUCCESS;
 }

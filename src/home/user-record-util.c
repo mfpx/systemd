@@ -445,7 +445,7 @@ int user_record_test_home_directory(UserRecord *h) {
         }
 
         /* Otherwise it's not OK */
-        r = dir_is_empty(hd);
+        r = dir_is_empty(hd, /* ignore_hidden_or_backup= */ false);
         if (r < 0)
                 return r;
         if (r == 0)
@@ -563,7 +563,6 @@ int user_record_test_image_path_and_warn(UserRecord *h) {
 }
 
 int user_record_test_password(UserRecord *h, UserRecord *secret) {
-        char **i;
         int r;
 
         assert(h);
@@ -585,7 +584,6 @@ int user_record_test_password(UserRecord *h, UserRecord *secret) {
 }
 
 int user_record_test_recovery_key(UserRecord *h, UserRecord *secret) {
-        char **i;
         int r;
 
         assert(h);
@@ -779,7 +777,6 @@ int user_record_update_last_changed(UserRecord *h, bool with_password) {
 int user_record_make_hashed_password(UserRecord *h, char **secret, bool extend) {
         _cleanup_(json_variant_unrefp) JsonVariant *priv = NULL;
         _cleanup_strv_free_ char **np = NULL;
-        char **i;
         int r;
 
         assert(h);

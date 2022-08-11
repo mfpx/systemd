@@ -204,7 +204,6 @@ static void test_strv_unquote_one(const char *quoted, char **list) {
         _cleanup_strv_free_ char **s;
         _cleanup_free_ char *j;
         unsigned i = 0;
-        char **t;
         int r;
 
         log_info("/* %s */", __func__);
@@ -318,6 +317,21 @@ TEST(strv_split) {
 
         assert_se(strv_split_full(&l, "\\", NULL, EXTRACT_UNQUOTE | EXTRACT_RELAX | EXTRACT_UNESCAPE_RELAX) == 1);
         assert_se(strv_equal(l, STRV_MAKE("\\")));
+
+        l = strv_free_erase(l);
+
+        assert_se(l = strv_split("\\", NULL));
+        assert_se(strv_equal(l, STRV_MAKE("\\")));
+
+        l = strv_free_erase(l);
+
+        assert_se(l = strv_split("aa\\ bb\\", NULL));
+        assert_se(strv_equal(l, STRV_MAKE("aa\\", "bb\\")));
+
+        l = strv_free_erase(l);
+
+        assert_se(l = strv_split("aa\" bb'", NULL));
+        assert_se(strv_equal(l, STRV_MAKE("aa\"", "bb'")));
 }
 
 TEST(strv_split_empty) {
@@ -446,7 +460,6 @@ TEST(strv_split_colon_pairs) {
 
 TEST(strv_split_newlines) {
         unsigned i = 0;
-        char **s;
         _cleanup_strv_free_ char **l = NULL;
         const char str[] = "one\ntwo\nthree";
 
@@ -588,6 +601,25 @@ TEST(strv_extend_strv) {
         assert_se(strv_length(n) == 4);
 }
 
+TEST(strv_extend_with_size) {
+        _cleanup_strv_free_ char **a = NULL;
+        size_t n = SIZE_MAX;
+
+        a = strv_new("test", "test1");
+        assert_se(a);
+
+        assert_se(strv_extend_with_size(&a, &n, "test2") >= 0);
+        assert_se(n == 3);
+        assert_se(strv_extend_with_size(&a, &n, "test3") >= 0);
+        assert_se(n == 4);
+
+        assert_se(streq(a[0], "test"));
+        assert_se(streq(a[1], "test1"));
+        assert_se(streq(a[2], "test2"));
+        assert_se(streq(a[3], "test3"));
+        assert_se(a[4] == NULL);
+}
+
 TEST(strv_extend) {
         _cleanup_strv_free_ char **a = NULL, **b = NULL;
 
@@ -619,7 +651,6 @@ TEST(strv_extendf) {
 TEST(strv_foreach) {
         _cleanup_strv_free_ char **a;
         unsigned i = 0;
-        char **check;
 
         a = strv_new("one", "two", "three");
         assert_se(a);
@@ -631,7 +662,6 @@ TEST(strv_foreach) {
 TEST(strv_foreach_backwards) {
         _cleanup_strv_free_ char **a;
         unsigned i = 2;
-        char **check;
 
         a = strv_new("one", "two", "three");
 
@@ -643,13 +673,17 @@ TEST(strv_foreach_backwards) {
         STRV_FOREACH_BACKWARDS(check, (char**) NULL)
                 assert_not_reached();
 
-        STRV_FOREACH_BACKWARDS(check, (char**) { NULL })
+        STRV_FOREACH_BACKWARDS(check, STRV_MAKE_EMPTY)
                 assert_not_reached();
+
+        unsigned count = 0;
+        STRV_FOREACH_BACKWARDS(check, STRV_MAKE("ONE"))
+                count++;
+        assert_se(count == 1);
 }
 
 TEST(strv_foreach_pair) {
         _cleanup_strv_free_ char **a = NULL;
-        char **x, **y;
 
         a = strv_new("pair_one",   "pair_one",
                      "pair_two",   "pair_two",
@@ -729,6 +763,30 @@ TEST(strv_push_prepend) {
         assert_se(streq(a[3], "bar"));
         assert_se(streq(a[4], "three"));
         assert_se(!a[5]);
+}
+
+TEST(strv_push_with_size) {
+        _cleanup_strv_free_ char **a = NULL;
+        size_t n = 0;
+        char *i, *j;
+
+        assert_se(i = strdup("foo"));
+        assert_se(strv_push_with_size(&a, &n, i) >= 0);
+        assert_se(n == 1);
+
+        assert_se(i = strdup("a"));
+        assert_se(j = strdup("b"));
+        assert_se(strv_push_with_size(&a, &n, i) >= 0);
+        assert_se(n == 2);
+        assert_se(strv_push_with_size(&a, &n, j) >= 0);
+        assert_se(n == 3);
+
+        assert_se(streq_ptr(a[0], "foo"));
+        assert_se(streq_ptr(a[1], "a"));
+        assert_se(streq_ptr(a[2], "b"));
+        assert_se(streq_ptr(a[3], NULL));
+
+        assert_se(n = strv_length(a));
 }
 
 TEST(strv_push) {
@@ -924,12 +982,10 @@ TEST(foreach_string) {
                 "waldo",
                 NULL
         };
-        const char *x;
-        unsigned i = 0;
 
+        unsigned i = 0;
         FOREACH_STRING(x, "foo", "bar", "waldo")
                 assert_se(streq_ptr(t[i++], x));
-
         assert_se(i == 3);
 
         FOREACH_STRING(x, "zzz")

@@ -50,7 +50,8 @@ _public_ int sd_bus_message_dump(sd_bus_message *m, FILE *f, uint64_t flags) {
         unsigned level = 1;
         int r;
 
-        assert(m);
+        assert_return(m, -EINVAL);
+        assert_return((flags & ~_SD_BUS_MESSAGE_DUMP_KNOWN_FLAGS) == 0, -EINVAL);
 
         if (!f)
                 f = stdout;
@@ -79,7 +80,7 @@ _public_ int sd_bus_message_dump(sd_bus_message *m, FILE *f, uint64_t flags) {
 
                 /* Display synthetic message serial number in a more readable
                  * format than UINT32_MAX */
-                if (BUS_MESSAGE_COOKIE(m) == 0xFFFFFFFFULL)
+                if (BUS_MESSAGE_COOKIE(m) == UINT32_MAX)
                         fprintf(f, " Cookie=-1");
                 else
                         fprintf(f, " Cookie=%" PRIu64, BUS_MESSAGE_COOKIE(m));
@@ -413,8 +414,6 @@ int bus_creds_dump(sd_bus_creds *c, FILE *f, bool terse) {
 
         r = sd_bus_creds_get_cmdline(c, &cmdline);
         if (r >= 0) {
-                char **i;
-
                 fprintf(f, "%sCommandLine=%s", prefix, color);
                 STRV_FOREACH(i, cmdline) {
                         if (i != cmdline)
@@ -479,8 +478,6 @@ int bus_creds_dump(sd_bus_creds *c, FILE *f, bool terse) {
                 fprintf(f, "%sUniqueName=%s%s%s", prefix, color, c->unique_name, suffix);
 
         if (sd_bus_creds_get_well_known_names(c, &well_known) >= 0) {
-                char **i;
-
                 fprintf(f, "%sWellKnownNames=%s", prefix, color);
                 STRV_FOREACH(i, well_known) {
                         if (i != well_known)

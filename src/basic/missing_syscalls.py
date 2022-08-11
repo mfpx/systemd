@@ -74,6 +74,8 @@ DEF_TEMPLATE_B = '''\
 #    else
 #      error "Unknown MIPS ABI"
 #    endif
+#  elif defined(__hppa__)
+#    define systemd_NR_{syscall} {nr_parisc}
 #  elif defined(__powerpc__)
 #    define systemd_NR_{syscall} {nr_powerpc}
 #  elif defined(__riscv)
@@ -142,6 +144,7 @@ def print_syscall_defs(syscalls, tables, out):
  * Use 'ninja -C build update-syscall-tables' to download new syscall tables,
  * and 'ninja -C build update-syscall-header' to regenerate this file.
  */
+#pragma once
 ''',
           file=out)
     print(ARCH_CHECK, file=out)

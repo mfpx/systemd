@@ -20,6 +20,7 @@
 #include "cgroup-util.h"
 #include "device-util.h"
 #include "dirent-util.h"
+#include "efi-api.h"
 #include "efi-loader.h"
 #include "efivars.h"
 #include "env-file.h"
@@ -1514,32 +1515,20 @@ static int have_multiple_sessions(
 static int bus_manager_log_shutdown(
                 Manager *m,
                 const HandleActionData *a) {
-
-        const char *message, *log_message;
-
         assert(m);
         assert(a);
 
-        message = a->message;
-        log_message = a->log_message;
-
-        if (message)
-                message = strjoina("MESSAGE=", message);
-        else
-                message = "MESSAGE=System is shutting down";
-
-        if (isempty(m->wall_message))
-                message = strjoina(message, ".");
-        else
-                message = strjoina(message, " (", m->wall_message, ").");
-
-        if (log_message)
-                log_message = strjoina("SHUTDOWN=", log_message);
+        const char *message = a->message ?: "System is shutting down";
+        const char *log_verb = a->log_verb ? strjoina("SHUTDOWN=", a->log_verb) : NULL;
 
         return log_struct(LOG_NOTICE,
-                        "MESSAGE_ID=%s", a->message_id ? a->message_id : SD_MESSAGE_SHUTDOWN_STR,
-                        message,
-                        log_message);
+                          "MESSAGE_ID=%s", a->message_id ?: SD_MESSAGE_SHUTDOWN_STR,
+                          LOG_MESSAGE("%s%s%s%s.",
+                                      message,
+                                      m->wall_message ? " (" : "",
+                                      strempty(m->wall_message),
+                                      m->wall_message ? ")" : ""),
+                          log_verb);
 }
 
 static int lid_switch_ignore_handler(sd_event_source *e, uint64_t usec, void *userdata) {
@@ -1899,9 +1888,11 @@ static int method_do_shutdown_or_sleep(
                 if (r < 0)
                         return r;
                 if ((flags & ~SD_LOGIND_SHUTDOWN_AND_SLEEP_FLAGS_PUBLIC) != 0)
-                        return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid flags parameter");
+                        return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS,
+                                                "Invalid flags parameter");
                 if (a->handle != HANDLE_REBOOT && (flags & SD_LOGIND_REBOOT_VIA_KEXEC))
-                        return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS, "Reboot via kexec is only applicable with reboot operations");
+                        return sd_bus_error_set(error, SD_BUS_ERROR_INVALID_ARGS,
+                                                "Reboot via kexec is only applicable with reboot operations");
         } else {
                 /* Old style method: no flags parameter, but interactive bool passed as boolean in
                  * payload. Let's convert this argument to the new-style flags parameter for our internal
@@ -1930,7 +1921,8 @@ static int method_do_shutdown_or_sleep(
                                                 "Not enough swap space for hibernation");
                 if (r == 0)
                         return sd_bus_error_setf(error, BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED,
-                                                 "Sleep verb \"%s\" not supported", sleep_operation_to_string(a->sleep_operation));
+                                                 "Sleep verb \"%s\" not supported",
+                                                 sleep_operation_to_string(a->sleep_operation));
                 if (r < 0)
                         return r;
         }
@@ -2353,11 +2345,8 @@ static int method_cancel_scheduled_shutdown(sd_bus_message *message, void *userd
         if (r == 0)
                 return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
 
-        reset_scheduled_shutdown(m);
-
         if (m->enable_wall_messages) {
                 _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
-                _cleanup_free_ char *username = NULL;
                 const char *tty = NULL;
                 uid_t uid = 0;
 
@@ -2367,10 +2356,19 @@ static int method_cancel_scheduled_shutdown(sd_bus_message *message, void *userd
                         (void) sd_bus_creds_get_tty(creds, &tty);
                 }
 
-                username = uid_to_name(uid);
-                utmp_wall("The system shutdown has been cancelled",
+                _cleanup_free_ char *username = uid_to_name(uid);
+
+                log_struct(LOG_INFO,
+                           LOG_MESSAGE("System shutdown has been cancelled"),
+                           "ACTION=%s", handle_action_to_string(a->handle),
+                           "MESSAGE_ID=" SD_MESSAGE_LOGIND_SHUTDOWN_CANCELED_STR,
+                           username ? "OPERATOR=%s" : NULL, username);
+
+                utmp_wall("System shutdown has been cancelled",
                           username, tty, logind_wall_tty_filter, m);
         }
+
+        reset_scheduled_shutdown(m);
 
         return sd_bus_reply_method_return(message, "b", true);
 }
@@ -2793,7 +2791,7 @@ static int property_get_reboot_to_boot_loader_menu(
 
         r = getenv_bool("SYSTEMD_REBOOT_TO_BOOT_LOADER_MENU");
         if (r == -ENXIO) {
-                /* EFI case: returns the current value of LoaderConfigTimeoutOneShot. Three cases are distuingished:
+                /* EFI case: returns the current value of LoaderConfigTimeoutOneShot. Three cases are distinguished:
                  *
                  *     1. Variable not set, boot into boot loader menu is not enabled (we return UINT64_MAX to the user)
                  *     2. Variable set to "0", boot into boot loader menu is enabled with no timeout (we return 0 to the user)
@@ -3001,19 +2999,19 @@ static int property_get_reboot_to_boot_loader_entry(
 }
 
 static int boot_loader_entry_exists(Manager *m, const char *id) {
-        _cleanup_(boot_config_free) BootConfig config = {};
+        _cleanup_(boot_config_free) BootConfig config = BOOT_CONFIG_NULL;
         int r;
 
         assert(m);
         assert(id);
 
-        r = boot_entries_load_config_auto(NULL, NULL, &config);
+        r = boot_config_load_auto(&config, NULL, NULL);
         if (r < 0 && r != -ENOKEY) /* don't complain if no GPT is found, hence skip ENOKEY */
                 return r;
 
         r = manager_read_efi_boot_loader_entries(m);
         if (r >= 0)
-                (void) boot_entries_augment_from_loader(&config, m->efi_boot_loader_entries, /* auto_only= */ true);
+                (void) boot_config_augment_from_loader(&config, m->efi_boot_loader_entries, /* auto_only= */ true);
 
         return !!boot_config_find_entry(&config, id);
 }
@@ -3156,7 +3154,7 @@ static int property_get_boot_loader_entries(
                 void *userdata,
                 sd_bus_error *error) {
 
-        _cleanup_(boot_config_free) BootConfig config = {};
+        _cleanup_(boot_config_free) BootConfig config = BOOT_CONFIG_NULL;
         Manager *m = userdata;
         size_t i;
         int r;
@@ -3165,13 +3163,13 @@ static int property_get_boot_loader_entries(
         assert(reply);
         assert(m);
 
-        r = boot_entries_load_config_auto(NULL, NULL, &config);
+        r = boot_config_load_auto(&config, NULL, NULL);
         if (r < 0 && r != -ENOKEY) /* don't complain if there's no GPT found */
                 return r;
 
         r = manager_read_efi_boot_loader_entries(m);
         if (r >= 0)
-                (void) boot_entries_augment_from_loader(&config, m->efi_boot_loader_entries, /* auto_only= */ true);
+                (void) boot_config_augment_from_loader(&config, m->efi_boot_loader_entries, /* auto_only= */ true);
 
         r = sd_bus_message_open_container(reply, 'a', "s");
         if (r < 0)
@@ -3377,8 +3375,13 @@ static const sd_bus_vtable manager_vtable[] = {
         SD_BUS_PROPERTY("InhibitDelayMaxUSec", "t", NULL, offsetof(Manager, inhibit_delay_max), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("UserStopDelayUSec", "t", NULL, offsetof(Manager, user_stop_delay), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HandlePowerKey", "s", property_get_handle_action, offsetof(Manager, handle_power_key), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("HandlePowerKeyLongPress", "s", property_get_handle_action, offsetof(Manager, handle_power_key_long_press), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("HandleRebootKey", "s", property_get_handle_action, offsetof(Manager, handle_reboot_key), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("HandleRebootKeyLongPress", "s", property_get_handle_action, offsetof(Manager, handle_reboot_key_long_press), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HandleSuspendKey", "s", property_get_handle_action, offsetof(Manager, handle_suspend_key), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("HandleSuspendKeyLongPress", "s", property_get_handle_action, offsetof(Manager, handle_suspend_key_long_press), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HandleHibernateKey", "s", property_get_handle_action, offsetof(Manager, handle_hibernate_key), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("HandleHibernateKeyLongPress", "s", property_get_handle_action, offsetof(Manager, handle_hibernate_key_long_press), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HandleLidSwitch", "s", property_get_handle_action, offsetof(Manager, handle_lid_switch), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HandleLidSwitchExternalPower", "s", property_get_handle_action, offsetof(Manager, handle_lid_switch_ep), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("HandleLidSwitchDocked", "s", property_get_handle_action, offsetof(Manager, handle_lid_switch_docked), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -3813,8 +3816,8 @@ int match_job_removed(sd_bus_message *message, void *userdata, sd_bus_error *err
                 if (streq_ptr(path, user->service_job)) {
                         user->service_job = mfree(user->service_job);
 
-                        LIST_FOREACH(sessions_by_user, session, user->sessions)
-                                (void) session_jobs_reply(session, id, unit, NULL /* don't propagate user service failures to the client */);
+                        LIST_FOREACH(sessions_by_user, s, user->sessions)
+                                (void) session_jobs_reply(s, id, unit, NULL /* don't propagate user service failures to the client */);
 
                         user_save(user);
                 }
@@ -3957,7 +3960,6 @@ int manager_start_scope(
                 char **job) {
 
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
-        char **i;
         int r;
 
         assert(manager);

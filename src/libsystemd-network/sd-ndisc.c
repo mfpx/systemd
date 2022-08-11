@@ -203,7 +203,6 @@ static int ndisc_recv(sd_event_source *s, int fd, uint32_t revents, void *userda
         sd_ndisc *nd = userdata;
         ssize_t buflen;
         int r;
-        _cleanup_free_ char *addr = NULL;
 
         assert(s);
         assert(nd);
@@ -229,8 +228,8 @@ static int ndisc_recv(sd_event_source *s, int fd, uint32_t revents, void *userda
 
                 switch (r) {
                 case -EADDRNOTAVAIL:
-                        (void) in_addr_to_string(AF_INET6, (const union in_addr_union*) &rt->address, &addr);
-                        log_ndisc(nd, "Received RA from non-link-local address %s. Ignoring", addr);
+                        log_ndisc(nd, "Received RA from non-link-local address %s. Ignoring.",
+                                  IN6_ADDR_TO_STRING(&rt->address));
                         break;
 
                 case -EMULTIHOP:
@@ -269,7 +268,7 @@ static int ndisc_timeout(sd_event_source *s, uint64_t usec, void *userdata) {
         assert(nd);
         assert(nd->event);
 
-        assert_se(sd_event_now(nd->event, clock_boottime_or_monotonic(), &time_now) >= 0);
+        assert_se(sd_event_now(nd->event, CLOCK_BOOTTIME, &time_now) >= 0);
 
         if (!nd->retransmit_time)
                 nd->retransmit_time = ndisc_timeout_compute_random(NDISC_ROUTER_SOLICITATION_INTERVAL);
@@ -281,7 +280,7 @@ static int ndisc_timeout(sd_event_source *s, uint64_t usec, void *userdata) {
         }
 
         r = event_reset_time(nd->event, &nd->timeout_event_source,
-                             clock_boottime_or_monotonic(),
+                             CLOCK_BOOTTIME,
                              time_now + nd->retransmit_time, 10 * USEC_PER_MSEC,
                              ndisc_timeout, nd,
                              nd->event_priority, "ndisc-timeout-no-ra", true);
@@ -344,7 +343,7 @@ int sd_ndisc_start(sd_ndisc *nd) {
 
         assert(!nd->recv_event_source);
 
-        r = sd_event_now(nd->event, clock_boottime_or_monotonic(), &time_now);
+        r = sd_event_now(nd->event, CLOCK_BOOTTIME, &time_now);
         if (r < 0)
                 goto fail;
 
@@ -363,7 +362,7 @@ int sd_ndisc_start(sd_ndisc *nd) {
         (void) sd_event_source_set_description(nd->recv_event_source, "ndisc-receive-message");
 
         r = event_reset_time(nd->event, &nd->timeout_event_source,
-                             clock_boottime_or_monotonic(),
+                             CLOCK_BOOTTIME,
                              time_now + USEC_PER_SEC / 2, 1 * USEC_PER_SEC, /* See RFC 8415 sec. 18.2.1 */
                              ndisc_timeout, nd,
                              nd->event_priority, "ndisc-timeout", true);
@@ -371,7 +370,7 @@ int sd_ndisc_start(sd_ndisc *nd) {
                 goto fail;
 
         r = event_reset_time(nd->event, &nd->timeout_no_ra,
-                             clock_boottime_or_monotonic(),
+                             CLOCK_BOOTTIME,
                              time_now + NDISC_TIMEOUT_NO_RA_USEC, 10 * USEC_PER_MSEC,
                              ndisc_timeout_no_ra, nd,
                              nd->event_priority, "ndisc-timeout-no-ra", true);

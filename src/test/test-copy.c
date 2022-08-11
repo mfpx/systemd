@@ -50,6 +50,75 @@ TEST(copy_file) {
         unlink(fn_copy);
 }
 
+static bool read_file_and_streq(const char* filepath, const char* expected_contents) {
+        _cleanup_free_ char *buf = NULL;
+
+        assert_se(read_full_file(filepath, &buf, NULL) == 0);
+        return streq(buf, expected_contents);
+}
+
+TEST(copy_tree_replace_file) {
+        _cleanup_free_ char *src = NULL, *dst = NULL;
+
+        assert_se(tempfn_random("/tmp/test-copy_file.XXXXXX", NULL, &src) >= 0);
+        assert_se(tempfn_random("/tmp/test-copy_file.XXXXXX", NULL, &dst) >= 0);
+
+        assert_se(write_string_file(src, "bar bar", WRITE_STRING_FILE_CREATE) == 0);
+        assert_se(write_string_file(dst, "foo foo foo", WRITE_STRING_FILE_CREATE) == 0);
+
+        /* The file exists- now overwrite original contents, and test the COPY_REPLACE flag. */
+
+        assert_se(copy_tree(src, dst, UID_INVALID, GID_INVALID, COPY_REFLINK) == -EEXIST);
+
+        assert_se(read_file_and_streq(dst, "foo foo foo\n"));
+
+        assert_se(copy_tree(src, dst, UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_REPLACE) == 0);
+
+        assert_se(read_file_and_streq(dst, "bar bar\n"));
+}
+
+TEST(copy_tree_replace_dirs) {
+        _cleanup_free_ char *src_path1 = NULL, *src_path2 = NULL, *dst_path1 = NULL, *dst_path2 = NULL;
+        _cleanup_(rm_rf_physical_and_freep) char *src_directory = NULL, *dst_directory = NULL;
+        const char *file1 = "foo_file", *file2 = "bar_file";
+
+        /* Create the random source/destination directories */
+        assert_se(mkdtemp_malloc("/tmp/dirXXXXXX", &src_directory) >= 0);
+        assert_se(mkdtemp_malloc("/tmp/dirXXXXXX", &dst_directory) >= 0);
+
+        /* Construct the source/destination filepaths (should have different dir name, but same file names within) */
+        assert_se(src_path1 = path_join(src_directory, file1));
+        assert_se(src_path2 = path_join(src_directory, file2));
+        assert_se(dst_path1 = path_join(dst_directory, file1));
+        assert_se(dst_path2 = path_join(dst_directory, file2));
+
+        /* Populate some data to differentiate the files. */
+        assert_se(write_string_file(src_path1, "src file 1", WRITE_STRING_FILE_CREATE) == 0);
+        assert_se(write_string_file(src_path2, "src file 2", WRITE_STRING_FILE_CREATE) == 0);
+
+        assert_se(write_string_file(dst_path1, "dest file 1", WRITE_STRING_FILE_CREATE) == 0);
+        assert_se(write_string_file(dst_path2, "dest file 2", WRITE_STRING_FILE_CREATE) == 0);
+
+        /* Copying without COPY_REPLACE should fail because the destination file already exists. */
+        assert_se(copy_tree(src_directory, dst_directory, UID_INVALID, GID_INVALID, COPY_REFLINK) == -EEXIST);
+
+        {
+                assert_se(read_file_and_streq(src_path1,  "src file 1\n"));
+                assert_se(read_file_and_streq(src_path2,  "src file 2\n"));
+                assert_se(read_file_and_streq(dst_path1,  "dest file 1\n"));
+                assert_se(read_file_and_streq(dst_path2,  "dest file 2\n"));
+        }
+
+        assert_se(copy_tree(src_directory, dst_directory, UID_INVALID, GID_INVALID, COPY_REFLINK|COPY_REPLACE|COPY_MERGE) == 0);
+
+        {
+                assert_se(read_file_and_streq(src_path1,  "src file 1\n"));
+                assert_se(read_file_and_streq(src_path2,  "src file 2\n"));
+                assert_se(read_file_and_streq(dst_path1,  "src file 1\n"));
+                assert_se(read_file_and_streq(dst_path2,  "src file 2\n"));
+        }
+}
+
 TEST(copy_file_fd) {
         char in_fn[] = "/tmp/test-copy-file-fd-XXXXXX";
         char out_fn[] = "/tmp/test-copy-file-fd-XXXXXX";
@@ -83,7 +152,6 @@ TEST(copy_tree) {
         char **hardlinks = STRV_MAKE("hlink", "file",
                                      "hlink2", "dir1/file");
         const char *unixsockp;
-        char **p, **ll;
         struct stat st;
         int xattr_worked = -1; /* xattr support is optional in temporary directories, hence use it if we can,
                                 * but don't fail if we can't */
@@ -344,7 +412,8 @@ TEST_RET(copy_holes) {
 
         assert_se(fstat(fd, &stat) >= 0);
         blksz = stat.st_blksize;
-        buf = alloca0(blksz);
+        buf = alloca_safe(blksz);
+        memset(buf, 1, blksz);
 
         /* We need to make sure to create hole in multiples of the block size, otherwise filesystems (btrfs)
          * might silently truncate/extend the holes. */

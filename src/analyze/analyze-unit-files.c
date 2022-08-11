@@ -6,8 +6,6 @@
 #include "strv.h"
 
 static bool strv_fnmatch_strv_or_empty(char* const* patterns, char **strv, int flags) {
-        char **s;
-
         STRV_FOREACH(s, strv)
                 if (strv_fnmatch_or_empty(patterns, *s, flags))
                         return true;
@@ -23,9 +21,9 @@ int verb_unit_files(int argc, char *argv[], void *userdata) {
         char **v;
         int r;
 
-        r = lookup_paths_init(&lp, arg_scope, 0, NULL);
+        r = lookup_paths_init_or_warn(&lp, arg_scope, 0, NULL);
         if (r < 0)
-                return log_error_errno(r, "lookup_paths_init() failed: %m");
+                return r;
 
         r = unit_file_build_name_map(&lp, NULL, &unit_ids, &unit_names, NULL);
         if (r < 0)
@@ -48,5 +46,5 @@ int verb_unit_files(int argc, char *argv[], void *userdata) {
                 printf("aliases: %s ← %s\n", k, j);
         }
 
-        return 0;
+        return EXIT_SUCCESS;
 }

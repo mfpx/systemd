@@ -5,6 +5,8 @@
 
 #include "alloc-util.h"
 #include "bootspec.h"
+#include "devnum-util.h"
+#include "efi-api.h"
 #include "efi-loader.h"
 #include "efivars.h"
 #include "fd-util.h"
@@ -15,7 +17,6 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "pretty-print.h"
-#include "stat-util.h"
 #include "sync-util.h"
 #include "terminal-util.h"
 #include "util.h"
@@ -107,11 +108,11 @@ static int acquire_path(void) {
         if (!strv_isempty(arg_path))
                 return 0;
 
-        r = find_esp_and_warn(NULL, /* unprivileged_mode= */ false, &esp_path, NULL, NULL, NULL, NULL, &esp_devid);
+        r = find_esp_and_warn(NULL, NULL, /* unprivileged_mode= */ false, &esp_path, NULL, NULL, NULL, NULL, &esp_devid);
         if (r < 0 && r != -ENOKEY) /* ENOKEY means not found, and is the only error the function won't log about on its own */
                 return r;
 
-        r = find_xbootldr_and_warn(NULL, /* unprivileged_mode= */ false, &xbootldr_path, NULL, &xbootldr_devid);
+        r = find_xbootldr_and_warn(NULL, NULL, /* unprivileged_mode= */ false, &xbootldr_path, NULL, &xbootldr_devid);
         if (r < 0 && r != -ENOKEY)
                 return r;
 
@@ -120,7 +121,7 @@ static int acquire_path(void) {
                                        "Couldn't find $BOOT partition. It is recommended to mount it to /boot.\n"
                                        "Alternatively, use --path= to specify path to mount point.");
 
-        if (esp_path && xbootldr_path && !devid_set_and_equal(esp_devid, xbootldr_devid)) /* in case the two paths refer to the same inode, suppress one */
+        if (esp_path && xbootldr_path && !devnum_set_and_equal(esp_devid, xbootldr_devid)) /* in case the two paths refer to the same inode, suppress one */
                 a = strv_new(esp_path, xbootldr_path);
         else if (esp_path)
                 a = strv_new(esp_path);
@@ -325,7 +326,6 @@ static const char *skip_slash(const char *path) {
 static int verb_status(int argc, char *argv[], void *userdata) {
         _cleanup_free_ char *path = NULL, *prefix = NULL, *suffix = NULL, *good = NULL, *bad = NULL;
         uint64_t left, done;
-        char **p;
         int r;
 
         r = acquire_boot_count_path(&path, &prefix, &left, &done, &suffix);
@@ -402,7 +402,6 @@ static int verb_set(int argc, char *argv[], void *userdata) {
         _cleanup_free_ char *path = NULL, *prefix = NULL, *suffix = NULL, *good = NULL, *bad = NULL, *parent = NULL;
         const char *target, *source1, *source2;
         uint64_t done;
-        char **p;
         int r;
 
         r = acquire_boot_count_path(&path, &prefix, NULL, &done, &suffix);

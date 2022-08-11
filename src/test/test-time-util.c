@@ -238,6 +238,11 @@ TEST(format_timespan) {
         test_format_timespan_accuracy(1);
         test_format_timespan_accuracy(USEC_PER_MSEC);
         test_format_timespan_accuracy(USEC_PER_SEC);
+
+        /* See issue #23928. */
+        _cleanup_free_ char *buf;
+        assert_se(buf = new(char, 5));
+        assert_se(buf == format_timespan(buf, 5, 100005, 1000));
 }
 
 TEST(verify_timezone) {
@@ -258,7 +263,6 @@ TEST(timezone_is_valid) {
 TEST(get_timezones) {
         _cleanup_strv_free_ char **zones = NULL;
         int r;
-        char **zone;
 
         r = get_timezones(&zones);
         assert_se(r == 0);
@@ -315,7 +319,7 @@ TEST(usec_sub_signed) {
 
 TEST(format_timestamp) {
         for (unsigned i = 0; i < 100; i++) {
-                char buf[MAX(FORMAT_TIMESTAMP_MAX, FORMAT_TIMESPAN_MAX)];
+                char buf[CONST_MAX(FORMAT_TIMESTAMP_MAX, FORMAT_TIMESPAN_MAX)];
                 usec_t x, y;
 
                 x = random_u64_range(2147483600 * USEC_PER_SEC) + 1;
@@ -375,7 +379,7 @@ TEST(FORMAT_TIMESTAMP) {
 }
 
 TEST(format_timestamp_relative) {
-        char buf[MAX(FORMAT_TIMESTAMP_MAX, FORMAT_TIMESPAN_MAX)];
+        char buf[CONST_MAX(FORMAT_TIMESTAMP_MAX, FORMAT_TIMESPAN_MAX)];
         usec_t x;
 
         /* Only testing timestamps in the past so we don't need to add some delta to account for time passing
@@ -523,25 +527,25 @@ TEST(usec_shift_clock) {
 
         rt = now(CLOCK_REALTIME);
         mn = now(CLOCK_MONOTONIC);
-        bt = now(clock_boottime_or_monotonic());
+        bt = now(CLOCK_BOOTTIME);
 
         assert_se(usec_shift_clock(USEC_INFINITY, CLOCK_REALTIME, CLOCK_MONOTONIC) == USEC_INFINITY);
 
         assert_similar(usec_shift_clock(rt + USEC_PER_HOUR, CLOCK_REALTIME, CLOCK_MONOTONIC), mn + USEC_PER_HOUR);
-        assert_similar(usec_shift_clock(rt + 2*USEC_PER_HOUR, CLOCK_REALTIME, clock_boottime_or_monotonic()), bt + 2*USEC_PER_HOUR);
+        assert_similar(usec_shift_clock(rt + 2*USEC_PER_HOUR, CLOCK_REALTIME, CLOCK_BOOTTIME), bt + 2*USEC_PER_HOUR);
         assert_se(usec_shift_clock(rt + 3*USEC_PER_HOUR, CLOCK_REALTIME, CLOCK_REALTIME_ALARM) == rt + 3*USEC_PER_HOUR);
 
         assert_similar(usec_shift_clock(mn + 4*USEC_PER_HOUR, CLOCK_MONOTONIC, CLOCK_REALTIME_ALARM), rt + 4*USEC_PER_HOUR);
-        assert_similar(usec_shift_clock(mn + 5*USEC_PER_HOUR, CLOCK_MONOTONIC, clock_boottime_or_monotonic()), bt + 5*USEC_PER_HOUR);
+        assert_similar(usec_shift_clock(mn + 5*USEC_PER_HOUR, CLOCK_MONOTONIC, CLOCK_BOOTTIME), bt + 5*USEC_PER_HOUR);
         assert_se(usec_shift_clock(mn + 6*USEC_PER_HOUR, CLOCK_MONOTONIC, CLOCK_MONOTONIC) == mn + 6*USEC_PER_HOUR);
 
-        assert_similar(usec_shift_clock(bt + 7*USEC_PER_HOUR, clock_boottime_or_monotonic(), CLOCK_MONOTONIC), mn + 7*USEC_PER_HOUR);
-        assert_similar(usec_shift_clock(bt + 8*USEC_PER_HOUR, clock_boottime_or_monotonic(), CLOCK_REALTIME_ALARM), rt + 8*USEC_PER_HOUR);
-        assert_se(usec_shift_clock(bt + 9*USEC_PER_HOUR, clock_boottime_or_monotonic(), clock_boottime_or_monotonic()) == bt + 9*USEC_PER_HOUR);
+        assert_similar(usec_shift_clock(bt + 7*USEC_PER_HOUR, CLOCK_BOOTTIME, CLOCK_MONOTONIC), mn + 7*USEC_PER_HOUR);
+        assert_similar(usec_shift_clock(bt + 8*USEC_PER_HOUR, CLOCK_BOOTTIME, CLOCK_REALTIME_ALARM), rt + 8*USEC_PER_HOUR);
+        assert_se(usec_shift_clock(bt + 9*USEC_PER_HOUR, CLOCK_BOOTTIME, CLOCK_BOOTTIME) == bt + 9*USEC_PER_HOUR);
 
         if (mn > USEC_PER_MINUTE) {
                 assert_similar(usec_shift_clock(rt - 30 * USEC_PER_SEC, CLOCK_REALTIME_ALARM, CLOCK_MONOTONIC), mn - 30 * USEC_PER_SEC);
-                assert_similar(usec_shift_clock(rt - 50 * USEC_PER_SEC, CLOCK_REALTIME, clock_boottime_or_monotonic()), bt - 50 * USEC_PER_SEC);
+                assert_similar(usec_shift_clock(rt - 50 * USEC_PER_SEC, CLOCK_REALTIME, CLOCK_BOOTTIME), bt - 50 * USEC_PER_SEC);
         }
 }
 
@@ -599,7 +603,7 @@ static int intro(void) {
                  "boottime=" USEC_FMT "\n",
                  now(CLOCK_REALTIME),
                  now(CLOCK_MONOTONIC),
-                 now(clock_boottime_or_monotonic()));
+                 now(CLOCK_BOOTTIME));
 
         /* Ensure time_t is signed */
         assert_cc((time_t) -1 < (time_t) 1);

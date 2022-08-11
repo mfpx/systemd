@@ -6,6 +6,10 @@
 #define RENAME_NOREPLACE (1 << 0)
 #endif
 
+#ifndef BLKGETDISKSEQ
+#define BLKGETDISKSEQ _IOR(0x12,128,__u64)
+#endif
+
 /* linux/fs.h or sys/mount.h */
 #ifndef MS_MOVE
 #define MS_MOVE 8192
@@ -59,4 +63,9 @@
 
 #ifndef FS_PROJINHERIT_FL
 #define FS_PROJINHERIT_FL 0x20000000
+#endif
+
+/* linux/fscrypt.h */
+#ifndef FS_KEY_DESCRIPTOR_SIZE
+#define FS_KEY_DESCRIPTOR_SIZE 8
 #endif

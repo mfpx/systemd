@@ -508,7 +508,7 @@ int device_monitor_receive_device(sd_device_monitor *m, sd_device **ret) {
                                                "sd-device-monitor: Invalid message header");
         }
 
-        r = device_new_from_nulstr(&device, (uint8_t*) &buf.raw[bufpos], buflen - bufpos);
+        r = device_new_from_nulstr(&device, &buf.raw[bufpos], buflen - bufpos);
         if (r < 0)
                 return log_debug_errno(r, "sd-device-monitor: Failed to create device from received message: %m");
 
@@ -574,7 +574,7 @@ int device_monitor_send_device(
         assert(m);
         assert(device);
 
-        r = device_get_properties_nulstr(device, (const uint8_t **) &buf, &blen);
+        r = device_get_properties_nulstr(device, &buf, &blen);
         if (r < 0)
                 return log_device_debug_errno(device, r, "sd-device-monitor: Failed to get device properties: %m");
         if (blen < 32)
@@ -787,7 +787,7 @@ _public_ int sd_device_monitor_filter_add_match_sysattr(sd_device_monitor *m, co
                 hashmap = &m->nomatch_sysattr_filter;
 
         /* TODO: unset m->filter_uptodate on success when we support this filter on BPF. */
-        return hashmap_put_strdup_full(hashmap, &trivial_hash_ops_free_free, sysattr, value);
+        return update_match_strv(hashmap, sysattr, value, /* clear_on_null = */ true);
 }
 
 _public_ int sd_device_monitor_filter_add_match_parent(sd_device_monitor *m, sd_device *device, int match) {

@@ -7,6 +7,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "generator.h"
+#include "glyph-util.h"
 #include "mkdir.h"
 #include "proc-cmdline.h"
 #include "special.h"
@@ -55,7 +56,6 @@ static int parse(const char *key, const char *value, void *data) {
 static int generate(void) {
         _cleanup_fclose_ FILE *f = NULL;
         const char *p;
-        char **c;
         int r;
 
         if (strv_isempty(arg_commands) && !arg_success_action)
@@ -117,7 +117,8 @@ static int generate(void) {
         /* And now redirect default.target to our new target */
         p = strjoina(arg_dest, "/" SPECIAL_DEFAULT_TARGET);
         if (symlink("kernel-command-line.target", p) < 0)
-                return log_error_errno(errno, "Failed to link unit file kernel-command-line.target → %s: %m", p);
+                return log_error_errno(errno, "Failed to link unit file kernel-command-line.target %s %s: %m",
+                                       special_glyph(SPECIAL_GLYPH_ARROW_RIGHT), p);
 
         return 0;
 }

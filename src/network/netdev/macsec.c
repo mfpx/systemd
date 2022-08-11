@@ -14,7 +14,7 @@
 #include "memory-util.h"
 #include "netlink-util.h"
 #include "networkd-manager.h"
-#include "path-util.h"
+#include "parse-helpers.h"
 #include "socket-util.h"
 #include "string-table.h"
 #include "string-util.h"
@@ -969,8 +969,6 @@ static int macsec_read_key_file(NetDev *netdev, SecurityAssociation *sa) {
 
         if (!sa->key_file)
                 return 0;
-
-        (void) warn_file_is_world_accessible(sa->key_file, NULL, NULL, 0);
 
         r = read_full_file_full(
                         AT_FDCWD, sa->key_file, UINT64_MAX, SIZE_MAX,

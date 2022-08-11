@@ -29,10 +29,10 @@
 
 static clockid_t map_clock_id(clockid_t c) {
 
-        /* Some more exotic archs (s390, ppc, …) lack the "ALARM" flavour of the clocks. Thus, clock_gettime() will
-         * fail for them. Since they are essentially the same as their non-ALARM pendants (their only difference is
-         * when timers are set on them), let's just map them accordingly. This way, we can get the correct time even on
-         * those archs. */
+        /* Some more exotic archs (s390, ppc, …) lack the "ALARM" flavour of the clocks. Thus,
+         * clock_gettime() will fail for them. Since they are essentially the same as their non-ALARM
+         * pendants (their only difference is when timers are set on them), let's just map them
+         * accordingly. This way, we can get the correct time even on those archs. */
 
         switch (c) {
 
@@ -77,7 +77,7 @@ triple_timestamp* triple_timestamp_get(triple_timestamp *ts) {
 
         ts->realtime = now(CLOCK_REALTIME);
         ts->monotonic = now(CLOCK_MONOTONIC);
-        ts->boottime = clock_boottime_supported() ? now(CLOCK_BOOTTIME) : USEC_INFINITY;
+        ts->boottime = now(CLOCK_BOOTTIME);
 
         return ts;
 }
@@ -150,9 +150,7 @@ triple_timestamp* triple_timestamp_from_realtime(triple_timestamp *ts, usec_t u)
 
         ts->realtime = u;
         ts->monotonic = map_clock_usec_internal(u, nowr, now(CLOCK_MONOTONIC));
-        ts->boottime = clock_boottime_supported() ?
-                map_clock_usec_internal(u, nowr, now(CLOCK_BOOTTIME)) :
-                USEC_INFINITY;
+        ts->boottime = map_clock_usec_internal(u, nowr, now(CLOCK_BOOTTIME));
 
         return ts;
 }
@@ -170,8 +168,7 @@ dual_timestamp* dual_timestamp_from_monotonic(dual_timestamp *ts, usec_t u) {
         return ts;
 }
 
-dual_timestamp* dual_timestamp_from_boottime_or_monotonic(dual_timestamp *ts, usec_t u) {
-        clockid_t cid;
+dual_timestamp* dual_timestamp_from_boottime(dual_timestamp *ts, usec_t u) {
         usec_t nowm;
 
         if (u == USEC_INFINITY) {
@@ -179,14 +176,8 @@ dual_timestamp* dual_timestamp_from_boottime_or_monotonic(dual_timestamp *ts, us
                 return ts;
         }
 
-        cid = clock_boottime_or_monotonic();
-        nowm = now(cid);
-
-        if (cid == CLOCK_MONOTONIC)
-                ts->monotonic = u;
-        else
-                ts->monotonic = map_clock_usec_internal(u, nowm, now(CLOCK_MONOTONIC));
-
+        nowm = now(CLOCK_BOOTTIME);
+        ts->monotonic = map_clock_usec_internal(u, nowm, now(CLOCK_MONOTONIC));
         ts->realtime = map_clock_usec_internal(u, nowm, now(CLOCK_REALTIME));
         return ts;
 }
@@ -304,8 +295,8 @@ char *format_timestamp_style(
                 usec_t t,
                 TimestampStyle style) {
 
-        /* The weekdays in non-localized (English) form. We use this instead of the localized form, so that our
-         * generated timestamps may be parsed with parse_timestamp(), and always read the same. */
+        /* The weekdays in non-localized (English) form. We use this instead of the localized form, so that
+         * our generated timestamps may be parsed with parse_timestamp(), and always read the same. */
         static const char * const weekdays[] = {
                 [0] = "Sun",
                 [1] = "Mon",
@@ -392,8 +383,8 @@ char *format_timestamp_style(
         /* Append the timezone */
         n = strlen(buf);
         if (utc) {
-                /* If this is UTC then let's explicitly use the "UTC" string here, because gmtime_r() normally uses the
-                 * obsolete "GMT" instead. */
+                /* If this is UTC then let's explicitly use the "UTC" string here, because gmtime_r()
+                 * normally uses the obsolete "GMT" instead. */
                 if (n + 5 > l)
                         return NULL; /* "UTC" doesn't fit. */
 
@@ -408,12 +399,14 @@ char *format_timestamp_style(
                         /* The full time zone does not fit in. Yuck. */
 
                         if (n + 1 + _POSIX_TZNAME_MAX + 1 > l)
-                                return NULL; /* Not even enough space for the POSIX minimum (of 6)? In that case, complain that it doesn't fit */
+                                return NULL; /* Not even enough space for the POSIX minimum (of 6)? In that
+                                              * case, complain that it doesn't fit. */
 
-                        /* So the time zone doesn't fit in fully, but the caller passed enough space for the POSIX
-                         * minimum time zone length. In this case suppress the timezone entirely, in order not to dump
-                         * an overly long, hard to read string on the user. This should be safe, because the user will
-                         * assume the local timezone anyway if none is shown. And so does parse_timestamp(). */
+                        /* So the time zone doesn't fit in fully, but the caller passed enough space for the
+                         * POSIX minimum time zone length. In this case suppress the timezone entirely, in
+                         * order not to dump an overly long, hard to read string on the user. This should be
+                         * safe, because the user will assume the local timezone anyway if none is shown. And
+                         * so does parse_timestamp(). */
                 } else {
                         buf[n++] = ' ';
                         strcpy(buf + n, tm.tm_zone);
@@ -598,7 +591,7 @@ char *format_timespan(char *buf, size_t l, usec_t t, usec_t accuracy) {
                         t = b;
                 }
 
-                n = MIN((size_t) k, l);
+                n = MIN((size_t) k, l-1);
 
                 l -= n;
                 p += n;
@@ -709,10 +702,11 @@ static int parse_timestamp_impl(const char *t, usec_t *usec, bool with_tz) {
 
                         tzset();
 
-                        /* See if the timestamp is suffixed by either the DST or non-DST local timezone. Note that we only
-                         * support the local timezones here, nothing else. Not because we wouldn't want to, but simply because
-                         * there are no nice APIs available to cover this. By accepting the local time zone strings, we make
-                         * sure that all timestamps written by format_timestamp() can be parsed correctly, even though we don't
+                        /* See if the timestamp is suffixed by either the DST or non-DST local timezone. Note
+                         * that we only support the local timezones here, nothing else. Not because we
+                         * wouldn't want to, but simply because there are no nice APIs available to cover
+                         * this. By accepting the local time zone strings, we make sure that all timestamps
+                         * written by format_timestamp() can be parsed correctly, even though we don't
                          * support arbitrary timezone specifications. */
 
                         for (j = 0; j <= 1; j++) {
@@ -1417,9 +1411,8 @@ int verify_timezone(const char *name, int log_level) {
                 return -EINVAL;
 
         for (p = name; *p; p++) {
-                if (!(*p >= '0' && *p <= '9') &&
-                    !(*p >= 'a' && *p <= 'z') &&
-                    !(*p >= 'A' && *p <= 'Z') &&
+                if (!ascii_isdigit(*p) &&
+                    !ascii_isalpha(*p) &&
                     !IN_SET(*p, '-', '_', '+', '/'))
                         return -EINVAL;
 
@@ -1461,33 +1454,6 @@ int verify_timezone(const char *name, int log_level) {
         return 0;
 }
 
-bool clock_boottime_supported(void) {
-        static int supported = -1;
-
-        /* Note that this checks whether CLOCK_BOOTTIME is available in general as well as available for timerfds()! */
-
-        if (supported < 0) {
-                int fd;
-
-                fd = timerfd_create(CLOCK_BOOTTIME, TFD_NONBLOCK|TFD_CLOEXEC);
-                if (fd < 0)
-                        supported = false;
-                else {
-                        safe_close(fd);
-                        supported = true;
-                }
-        }
-
-        return supported;
-}
-
-clockid_t clock_boottime_or_monotonic(void) {
-        if (clock_boottime_supported())
-                return CLOCK_BOOTTIME;
-        else
-                return CLOCK_MONOTONIC;
-}
-
 bool clock_supported(clockid_t clock) {
         struct timespec ts;
 
@@ -1495,16 +1461,10 @@ bool clock_supported(clockid_t clock) {
 
         case CLOCK_MONOTONIC:
         case CLOCK_REALTIME:
+        case CLOCK_BOOTTIME:
+                /* These three are always available in our baseline, and work in timerfd, as of kernel 3.15 */
                 return true;
 
-        case CLOCK_BOOTTIME:
-                return clock_boottime_supported();
-
-        case CLOCK_BOOTTIME_ALARM:
-                if (!clock_boottime_supported())
-                        return false;
-
-                _fallthrough_;
         default:
                 /* For everything else, check properly */
                 return clock_gettime(clock, &ts) >= 0;

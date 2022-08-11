@@ -22,7 +22,8 @@
 #include "cgroup-util.h"
 #include "condition.h"
 #include "cpu-set-util.h"
-#include "efi-loader.h"
+#include "creds-util.h"
+#include "efi-api.h"
 #include "env-file.h"
 #include "env-util.h"
 #include "extract-word.h"
@@ -50,6 +51,7 @@
 #include "string-table.h"
 #include "string-util.h"
 #include "tomoyo-util.h"
+#include "tpm2-util.h"
 #include "udev-util.h"
 #include "uid-alloc-range.h"
 #include "user-util.h"
@@ -89,9 +91,7 @@ Condition* condition_free(Condition *c) {
 }
 
 Condition* condition_free_list_type(Condition *head, ConditionType type) {
-        Condition *c, *n;
-
-        LIST_FOREACH_SAFE(conditions, c, n, head)
+        LIST_FOREACH(conditions, c, head)
                 if (type < 0 || c->type == type) {
                         LIST_REMOVE(conditions, head, c);
                         condition_free(c);
@@ -103,8 +103,6 @@ Condition* condition_free_list_type(Condition *head, ConditionType type) {
 
 static int condition_test_kernel_command_line(Condition *c, char **env) {
         _cleanup_free_ char *line = NULL;
-        const char *p;
-        bool equal;
         int r;
 
         assert(c);
@@ -115,9 +113,9 @@ static int condition_test_kernel_command_line(Condition *c, char **env) {
         if (r < 0)
                 return r;
 
-        equal = strchr(c->parameter, '=');
+        bool equal = strchr(c->parameter, '=');
 
-        for (p = line;;) {
+        for (const char *p = line;;) {
                 _cleanup_free_ char *word = NULL;
                 bool found;
 
@@ -143,6 +141,46 @@ static int condition_test_kernel_command_line(Condition *c, char **env) {
         return false;
 }
 
+static int condition_test_credential(Condition *c, char **env) {
+        int (*gd)(const char **ret);
+        int r;
+
+        assert(c);
+        assert(c->parameter);
+        assert(c->type == CONDITION_CREDENTIAL);
+
+        /* For now we'll do a very simple existence check and are happy with either a regular or an encrypted
+         * credential. Given that we check the syntax of the argument we have the option to later maybe allow
+         * contents checks too without breaking compatibility, but for now let's be minimalistic. */
+
+        if (!credential_name_valid(c->parameter)) /* credentials with invalid names do not exist */
+                return false;
+
+        FOREACH_POINTER(gd, get_credentials_dir, get_encrypted_credentials_dir) {
+                _cleanup_free_ char *j = NULL;
+                const char *cd;
+
+                r = gd(&cd);
+                if (r == -ENXIO) /* no env var set */
+                        continue;
+                if (r < 0)
+                        return r;
+
+                j = path_join(cd, c->parameter);
+                if (!j)
+                        return -ENOMEM;
+
+                if (laccess(j, F_OK) >= 0)
+                        return true; /* yay! */
+                if (errno != ENOENT)
+                        return -errno;
+
+                /* not found in this dir */
+        }
+
+        return false;
+}
+
 typedef enum {
         /* Listed in order of checking. Note that some comparators are prefixes of others, hence the longest
          * should be listed first. */
@@ -157,7 +195,6 @@ typedef enum {
 } OrderOperator;
 
 static OrderOperator parse_order(const char **s) {
-
         static const char *const prefix[_ORDER_MAX] = {
                 [ORDER_LOWER_OR_EQUAL] = "<=",
                 [ORDER_GREATER_OR_EQUAL] = ">=",
@@ -167,9 +204,7 @@ static OrderOperator parse_order(const char **s) {
                 [ORDER_UNEQUAL] = "!=",
         };
 
-        OrderOperator i;
-
-        for (i = 0; i < _ORDER_MAX; i++) {
+        for (OrderOperator i = 0; i < _ORDER_MAX; i++) {
                 const char *e;
 
                 e = startswith(*s, prefix[i]);
@@ -213,7 +248,6 @@ static bool test_order(int k, OrderOperator p) {
 static int condition_test_kernel_version(Condition *c, char **env) {
         OrderOperator order;
         struct utsname u;
-        const char *p;
         bool first = true;
 
         assert(c);
@@ -222,9 +256,7 @@ static int condition_test_kernel_version(Condition *c, char **env) {
 
         assert_se(uname(&u) >= 0);
 
-        p = c->parameter;
-
-        for (;;) {
+        for (const char *p = c->parameter;;) {
                 _cleanup_free_ char *word = NULL;
                 const char *s;
                 int r;
@@ -269,14 +301,12 @@ static int condition_test_kernel_version(Condition *c, char **env) {
 }
 
 static int condition_test_osrelease(Condition *c, char **env) {
-        const char *parameter = c->parameter;
         int r;
 
         assert(c);
-        assert(c->parameter);
         assert(c->type == CONDITION_OS_RELEASE);
 
-        for (;;) {
+        for (const char *parameter = ASSERT_PTR(c->parameter);;) {
                 _cleanup_free_ char *key = NULL, *condition = NULL, *actual_value = NULL;
                 OrderOperator order;
                 const char *word;
@@ -340,9 +370,9 @@ static int condition_test_memory(Condition *c, char **env) {
         if (order < 0)
                 order = ORDER_GREATER_OR_EQUAL; /* default to >= check, if nothing is specified. */
 
-        r = safe_atou64(p, &k);
+        r = parse_size(p, 1024, &k);
         if (r < 0)
-                return log_debug_errno(r, "Failed to parse size: %m");
+                return log_debug_errno(r, "Failed to parse size '%s': %m", p);
 
         return test_order(CMP(m, k), order);
 }
@@ -461,7 +491,8 @@ static int condition_test_group(Condition *c, char **env) {
 }
 
 static int condition_test_virtualization(Condition *c, char **env) {
-        int b, v;
+        Virtualization v;
+        int b;
 
         assert(c);
         assert(c->parameter);
@@ -477,7 +508,7 @@ static int condition_test_virtualization(Condition *c, char **env) {
         /* First, compare with yes/no */
         b = parse_boolean(c->parameter);
         if (b >= 0)
-                return b == !!v;
+                return b == (v != VIRTUALIZATION_NONE);
 
         /* Then, compare categorization */
         if (streq(c->parameter, "vm"))
@@ -491,7 +522,7 @@ static int condition_test_virtualization(Condition *c, char **env) {
 }
 
 static int condition_test_architecture(Condition *c, char **env) {
-        int a, b;
+        Architecture a, b;
 
         assert(c);
         assert(c->parameter);
@@ -624,29 +655,14 @@ static int condition_test_ac_power(Condition *c, char **env) {
 }
 
 static int has_tpm2(void) {
-        int r;
-
         /* Checks whether the system has at least one TPM2 resource manager device, i.e. at least one "tpmrm"
-         * class device */
+         * class device. Alternatively, we are also happy if the firmware reports support (this is to cover
+         * for cases where we simply haven't loaded the driver for it yet, i.e. during early boot where we
+         * very likely want to use this condition check).
+         *
+         * Note that we don't check if we ourselves are built with TPM2 support here! */
 
-        r = dir_is_empty("/sys/class/tpmrm");
-        if (r == 0)
-                return true; /* nice! we have a device */
-
-        /* Hmm, so Linux doesn't know of the TPM2 device (or we couldn't check for it), most likely because
-         * the driver wasn't loaded yet. Let's see if the firmware knows about a TPM2 device, in this
-         * case. This way we can answer the TPM2 question already during early boot (where we most likely
-         * need it) */
-        if (efi_has_tpm2())
-                return true;
-
-        /* OK, this didn't work either, in this case propagate the original errors */
-        if (r == -ENOENT)
-                return false;
-        if (r < 0)
-                return log_debug_errno(r, "Failed to determine whether system has TPM2 support: %m");
-
-        return !r;
+        return (tpm2_support() & (TPM2_SUPPORT_DRIVER|TPM2_SUPPORT_FIRMWARE)) != 0;
 }
 
 static int condition_test_security(Condition *c, char **env) {
@@ -697,7 +713,6 @@ static int condition_test_capability(Condition *c, char **env) {
 
         for (;;) {
                 _cleanup_free_ char *line = NULL;
-                const char *p;
 
                 r = read_line(f, LONG_LINE_MAX, &line);
                 if (r < 0)
@@ -705,9 +720,9 @@ static int condition_test_capability(Condition *c, char **env) {
                 if (r == 0)
                         break;
 
-                p = startswith(line, "CapBnd:");
+                const char *p = startswith(line, "CapBnd:");
                 if (p) {
-                        if (sscanf(line+7, "%llx", &capabilities) != 1)
+                        if (sscanf(p, "%llx", &capabilities) != 1)
                                 return -EIO;
 
                         break;
@@ -787,7 +802,8 @@ static int condition_test_needs_update(Condition *c, char **env) {
         if (r < 0) {
                 log_debug_errno(r, "Failed to parse timestamp file '%s', using mtime: %m", p);
                 return true;
-        } else if (r == 0) {
+        }
+        if (isempty(timestamp_str)) {
                 log_debug("No data in timestamp file '%s', using mtime.", p);
                 return true;
         }
@@ -829,7 +845,6 @@ static int condition_test_first_boot(Condition *c, char **env) {
 
 static int condition_test_environment(Condition *c, char **env) {
         bool equal;
-        char **i;
 
         assert(c);
         assert(c->parameter);
@@ -937,7 +952,7 @@ static int condition_test_directory_not_empty(Condition *c, char **env) {
         assert(c->parameter);
         assert(c->type == CONDITION_DIRECTORY_NOT_EMPTY);
 
-        r = dir_is_empty(c->parameter);
+        r = dir_is_empty(c->parameter, /* ignore_hidden_or_backup= */ true);
         return r <= 0 && !IN_SET(r, -ENOENT, -ENOTDIR);
 }
 
@@ -1125,6 +1140,7 @@ int condition_test(Condition *c, char **env) {
                 [CONDITION_FILE_IS_EXECUTABLE]       = condition_test_file_is_executable,
                 [CONDITION_KERNEL_COMMAND_LINE]      = condition_test_kernel_command_line,
                 [CONDITION_KERNEL_VERSION]           = condition_test_kernel_version,
+                [CONDITION_CREDENTIAL]               = condition_test_credential,
                 [CONDITION_VIRTUALIZATION]           = condition_test_virtualization,
                 [CONDITION_SECURITY]                 = condition_test_security,
                 [CONDITION_CAPABILITY]               = condition_test_capability,
@@ -1171,7 +1187,6 @@ bool condition_test_list(
                 condition_test_logger_t logger,
                 void *userdata) {
 
-        Condition *c;
         int triggered = -1;
 
         assert(!!logger == !!to_string);
@@ -1234,8 +1249,6 @@ void condition_dump(Condition *c, FILE *f, const char *prefix, condition_to_stri
 }
 
 void condition_dump_list(Condition *first, FILE *f, const char *prefix, condition_to_string_t to_string) {
-        Condition *c;
-
         LIST_FOREACH(conditions, c, first)
                 condition_dump(c, f, prefix, to_string);
 }
@@ -1247,6 +1260,7 @@ static const char* const condition_type_table[_CONDITION_TYPE_MAX] = {
         [CONDITION_HOST] = "ConditionHost",
         [CONDITION_KERNEL_COMMAND_LINE] = "ConditionKernelCommandLine",
         [CONDITION_KERNEL_VERSION] = "ConditionKernelVersion",
+        [CONDITION_CREDENTIAL] = "ConditionCredential",
         [CONDITION_SECURITY] = "ConditionSecurity",
         [CONDITION_CAPABILITY] = "ConditionCapability",
         [CONDITION_AC_POWER] = "ConditionACPower",
@@ -1284,6 +1298,7 @@ static const char* const assert_type_table[_CONDITION_TYPE_MAX] = {
         [CONDITION_HOST] = "AssertHost",
         [CONDITION_KERNEL_COMMAND_LINE] = "AssertKernelCommandLine",
         [CONDITION_KERNEL_VERSION] = "AssertKernelVersion",
+        [CONDITION_CREDENTIAL] = "AssertCredential",
         [CONDITION_SECURITY] = "AssertSecurity",
         [CONDITION_CAPABILITY] = "AssertCapability",
         [CONDITION_AC_POWER] = "AssertACPower",

@@ -30,6 +30,8 @@ void test_setup_logging(int level);
 int log_tests_skipped(const char *message);
 int log_tests_skipped_errno(int r, const char *message);
 
+int write_tmpfile(char *pattern, const char *contents);
+
 bool have_namespaces(void);
 
 /* We use the small but non-trivial limit here */
@@ -86,7 +88,7 @@ static inline int run_test_table(void) {
         if (!__start_SYSTEMD_TEST_TABLE)
                 return r;
 
-        const TestFunc *t = ALIGN_TO_PTR(__start_SYSTEMD_TEST_TABLE, sizeof(TestFunc*));
+        const TestFunc *t = ALIGN_PTR(__start_SYSTEMD_TEST_TABLE);
         while (t < __stop_SYSTEMD_TEST_TABLE) {
 
                 if (t->sd_booted && sd_booted() <= 0) {
@@ -104,7 +106,7 @@ static inline int run_test_table(void) {
                                 t->f.void_func();
                 }
 
-                t = ALIGN_TO_PTR(t + 1, sizeof(TestFunc*));
+                t = ALIGN_PTR(t + 1);
         }
 
         return r;

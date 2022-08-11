@@ -49,7 +49,7 @@
 #include "missing_ioprio.h"
 #include "mountpoint-util.h"
 #include "nulstr-util.h"
-#include "parse-socket-bind-item.h"
+#include "parse-helpers.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "percent-util.h"
@@ -58,6 +58,7 @@
 #include "seccomp-util.h"
 #endif
 #include "securebits-util.h"
+#include "selinux-util.h"
 #include "signal-util.h"
 #include "socket-netlink.h"
 #include "specifier.h"
@@ -146,6 +147,7 @@ DEFINE_CONFIG_PARSE_ENUM(config_parse_managed_oom_preference, managed_oom_prefer
 DEFINE_CONFIG_PARSE_ENUM_WITH_DEFAULT(config_parse_ip_tos, ip_tos, int, -1, "Failed to parse IP TOS value");
 DEFINE_CONFIG_PARSE_PTR(config_parse_blockio_weight, cg_blkio_weight_parse, uint64_t, "Invalid block IO weight");
 DEFINE_CONFIG_PARSE_PTR(config_parse_cg_weight, cg_weight_parse, uint64_t, "Invalid weight");
+DEFINE_CONFIG_PARSE_PTR(config_parse_cg_cpu_weight, cg_cpu_weight_parse, uint64_t, "Invalid CPU weight");
 DEFINE_CONFIG_PARSE_PTR(config_parse_cpu_shares, cg_cpu_shares_parse, uint64_t, "Invalid CPU shares");
 DEFINE_CONFIG_PARSE_PTR(config_parse_exec_mount_flags, mount_propagation_flags_from_string, unsigned long, "Failed to parse mount flag");
 DEFINE_CONFIG_PARSE_ENUM_WITH_DEFAULT(config_parse_numa_policy, mpol, int, -1, "Invalid NUMA policy type");
@@ -644,7 +646,7 @@ int config_parse_socket_listen(
                         p->address.type = SOCK_SEQPACKET;
                 }
 
-                if (socket_address_family(&p->address) != AF_LOCAL && p->address.type == SOCK_SEQPACKET) {
+                if (socket_address_family(&p->address) != AF_UNIX && p->address.type == SOCK_SEQPACKET) {
                         log_syntax(unit, LOG_WARNING, filename, line, 0, "Address family not supported, ignoring: %s", rvalue);
                         return 0;
                 }
@@ -1000,7 +1002,7 @@ int config_parse_exec(
                         if (r < 0)
                                 return ignore ? 0 : -ENOEXEC;
 
-                        r = unit_path_printf(u, word, &resolved);
+                        r = unit_full_printf(u, word, &resolved);
                         if (r < 0) {
                                 log_syntax(unit, ignore ? LOG_WARNING : LOG_ERR, filename, line, r,
                                            "Failed to resolve unit specifiers in %s%s: %m",
@@ -1634,7 +1636,6 @@ int config_parse_root_image_options(
 
         _cleanup_(mount_options_free_allp) MountOptions *options = NULL;
         _cleanup_strv_free_ char **l = NULL;
-        char **first = NULL, **second = NULL;
         ExecContext *c = data;
         const Unit *u = userdata;
         int r;
@@ -1692,11 +1693,11 @@ int config_parse_root_image_options(
                 LIST_APPEND(mount_options, options, TAKE_PTR(o));
         }
 
-        /* empty spaces/separators only */
-        if (LIST_IS_EMPTY(options))
-                c->root_image_options = mount_options_free_all(c->root_image_options);
-        else
+        if (options)
                 LIST_JOIN(mount_options, c->root_image_options, options);
+        else
+                /* empty spaces/separators only */
+                c->root_image_options = mount_options_free_all(c->root_image_options);
 
         return 0;
 }
@@ -4212,9 +4213,14 @@ int config_parse_io_device_weight(
         r = extract_first_word(&p, &path, NULL, EXTRACT_UNQUOTE);
         if (r == -ENOMEM)
                 return log_oom();
-        if (r <= 0 || isempty(p)) {
+        if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to extract device path and weight from '%s', ignoring.", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid device path or weight specified in '%s', ignoring.", rvalue);
                 return 0;
         }
 
@@ -4281,9 +4287,14 @@ int config_parse_io_device_latency(
         r = extract_first_word(&p, &path, NULL, EXTRACT_UNQUOTE);
         if (r == -ENOMEM)
                 return log_oom();
-        if (r <= 0 || isempty(p)) {
+        if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to extract device path and latency from '%s', ignoring.", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid device path or latency specified in '%s', ignoring.", rvalue);
                 return 0;
         }
 
@@ -4328,7 +4339,7 @@ int config_parse_io_limit(
                 void *userdata) {
 
         _cleanup_free_ char *path = NULL, *resolved = NULL;
-        CGroupIODeviceLimit *l = NULL, *t;
+        CGroupIODeviceLimit *l = NULL;
         CGroupContext *c = data;
         CGroupIOLimitType type;
         const char *p = rvalue;
@@ -4343,17 +4354,22 @@ int config_parse_io_limit(
         assert(type >= 0);
 
         if (isempty(rvalue)) {
-                LIST_FOREACH(device_limits, l, c->io_device_limits)
-                        l->limits[type] = cgroup_io_limit_defaults[type];
+                LIST_FOREACH(device_limits, t, c->io_device_limits)
+                        t->limits[type] = cgroup_io_limit_defaults[type];
                 return 0;
         }
 
         r = extract_first_word(&p, &path, NULL, EXTRACT_UNQUOTE);
         if (r == -ENOMEM)
                 return log_oom();
-        if (r <= 0 || isempty(p)) {
+        if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to extract device node and bandwidth from '%s', ignoring.", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid device node or bandwidth specified in '%s', ignoring.", rvalue);
                 return 0;
         }
 
@@ -4378,12 +4394,11 @@ int config_parse_io_limit(
                 }
         }
 
-        LIST_FOREACH(device_limits, t, c->io_device_limits) {
+        LIST_FOREACH(device_limits, t, c->io_device_limits)
                 if (path_equal(resolved, t->path)) {
                         l = t;
                         break;
                 }
-        }
 
         if (!l) {
                 CGroupIOLimitType ttype;
@@ -4437,9 +4452,14 @@ int config_parse_blockio_device_weight(
         r = extract_first_word(&p, &path, NULL, EXTRACT_UNQUOTE);
         if (r == -ENOMEM)
                 return log_oom();
-        if (r <= 0 || isempty(p)) {
+        if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to extract device node and weight from '%s', ignoring.", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid device node or weight specified in '%s', ignoring.", rvalue);
                 return 0;
         }
 
@@ -4486,7 +4506,7 @@ int config_parse_blockio_bandwidth(
                 void *userdata) {
 
         _cleanup_free_ char *path = NULL, *resolved = NULL;
-        CGroupBlockIODeviceBandwidth *b = NULL, *t;
+        CGroupBlockIODeviceBandwidth *b = NULL;
         CGroupContext *c = data;
         const char *p = rvalue;
         uint64_t bytes;
@@ -4500,9 +4520,9 @@ int config_parse_blockio_bandwidth(
         read = streq("BlockIOReadBandwidth", lvalue);
 
         if (isempty(rvalue)) {
-                LIST_FOREACH(device_bandwidths, b, c->blockio_device_bandwidths) {
-                        b->rbps = CGROUP_LIMIT_MAX;
-                        b->wbps = CGROUP_LIMIT_MAX;
+                LIST_FOREACH(device_bandwidths, t, c->blockio_device_bandwidths) {
+                        t->rbps = CGROUP_LIMIT_MAX;
+                        t->wbps = CGROUP_LIMIT_MAX;
                 }
                 return 0;
         }
@@ -4510,9 +4530,14 @@ int config_parse_blockio_bandwidth(
         r = extract_first_word(&p, &path, NULL, EXTRACT_UNQUOTE);
         if (r == -ENOMEM)
                 return log_oom();
-        if (r <= 0 || isempty(p)) {
+        if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to extract device node and bandwidth from '%s', ignoring.", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Invalid device node or bandwidth specified in '%s', ignoring.", rvalue);
                 return 0;
         }
 
@@ -4533,14 +4558,13 @@ int config_parse_blockio_bandwidth(
                 return 0;
         }
 
-        LIST_FOREACH(device_bandwidths, t, c->blockio_device_bandwidths) {
+        LIST_FOREACH(device_bandwidths, t, c->blockio_device_bandwidths)
                 if (path_equal(resolved, t->path)) {
                         b = t;
                         break;
                 }
-        }
 
-        if (!t) {
+        if (!b) {
                 b = new0(CGroupBlockIODeviceBandwidth, 1);
                 if (!b)
                         return log_oom();
@@ -4731,8 +4755,12 @@ int config_parse_set_credential(
         r = extract_first_word(&p, &word, ":", EXTRACT_DONT_COALESCE_SEPARATORS);
         if (r == -ENOMEM)
                 return log_oom();
-        if (r <= 0 || !p) {
-                log_syntax(unit, LOG_WARNING, filename, line, r, "Invalid syntax, ignoring: %s", rvalue);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to extract credential name, ignoring: %s", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0, "Invalid syntax, ignoring: %s", rvalue);
                 return 0;
         }
 
@@ -4852,7 +4880,7 @@ int config_parse_load_credential(
         }
 
         if (isempty(p)) {
-                /* If only one field field is specified take it as shortcut for inheriting a credential named
+                /* If only one field is specified take it as shortcut for inheriting a credential named
                  * the same way from our parent */
                 q = strdup(k);
                 if (!q)
@@ -5211,7 +5239,7 @@ int config_parse_bind_paths(
                                 if (r == -ENOMEM)
                                         return log_oom();
                                 if (r < 0) {
-                                        log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse %s: %s", lvalue, rvalue);
+                                        log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse %s=, ignoring: %s", lvalue, rvalue);
                                         return 0;
                                 }
 
@@ -5861,6 +5889,7 @@ int config_parse_bpf_foreign_program(
                 void *userdata) {
         _cleanup_free_ char *resolved = NULL, *word = NULL;
         CGroupContext *c = data;
+        const char *p = rvalue;
         Unit *u = userdata;
         int attach_type, r;
 
@@ -5875,11 +5904,15 @@ int config_parse_bpf_foreign_program(
                 return 0;
         }
 
-        r = extract_first_word(&rvalue, &word, ":", 0);
+        r = extract_first_word(&p, &word, ":", 0);
         if (r == -ENOMEM)
                 return log_oom();
-        if (r <= 0 || isempty(rvalue)) {
+        if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse foreign BPF program, ignoring: %s", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0, "Invalid syntax in %s=, ignoring: %s", lvalue, rvalue);
                 return 0;
         }
 
@@ -5889,9 +5922,9 @@ int config_parse_bpf_foreign_program(
                 return 0;
         }
 
-        r = unit_path_printf(u, rvalue, &resolved);
+        r = unit_path_printf(u, p, &resolved);
         if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to resolve unit specifiers in '%s', ignoring: %m", rvalue);
+                log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to resolve unit specifiers in '%s', ignoring: %s", p, rvalue);
                 return 0;
         }
 
@@ -6065,6 +6098,7 @@ int unit_load_fragment(Unit *u) {
         assert(u->id);
 
         if (u->transient) {
+                u->access_selinux_context = mfree(u->access_selinux_context);
                 u->load_state = UNIT_LOADED;
                 return 0;
         }
@@ -6110,7 +6144,24 @@ int unit_load_fragment(Unit *u) {
 
                         u->load_state = u->perpetual ? UNIT_LOADED : UNIT_MASKED; /* don't allow perpetual units to ever be masked */
                         u->fragment_mtime = 0;
+                        u->access_selinux_context = mfree(u->access_selinux_context);
                 } else {
+#if HAVE_SELINUX
+                        if (mac_selinux_use()) {
+                                _cleanup_freecon_ char *selcon = NULL;
+
+                                /* Cache the SELinux context of the unit file here. We'll make use of when checking access permissions to loaded units */
+                                r = fgetfilecon_raw(fileno(f), &selcon);
+                                if (r < 0)
+                                        log_unit_warning_errno(u, r, "Failed to read SELinux context of '%s', ignoring: %m", fragment);
+
+                                r = free_and_strdup(&u->access_selinux_context, selcon);
+                                if (r < 0)
+                                        return r;
+                        } else
+#endif
+                                u->access_selinux_context = mfree(u->access_selinux_context);
+
                         u->load_state = UNIT_LOADED;
                         u->fragment_mtime = timespec_load(&st.st_mtim);
 
@@ -6236,6 +6287,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_restrict_filesystems,  "FILESYSTEMS"  },
                 { config_parse_cpu_shares,            "SHARES" },
                 { config_parse_cg_weight,             "WEIGHT" },
+                { config_parse_cg_cpu_weight,         "CPUWEIGHT" },
                 { config_parse_memory_limit,          "LIMIT" },
                 { config_parse_device_allow,          "DEVICE" },
                 { config_parse_device_policy,         "POLICY" },

@@ -97,15 +97,15 @@ TEST(client_basic) {
         assert_se(sd_dhcp6_client_set_fqdn(client, "~host.domain") == -EINVAL);
 
         assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_CLIENTID) == -EINVAL);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DNS_SERVERS) == -EEXIST);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NTP_SERVER) == -EEXIST);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_SNTP_SERVERS) == -EEXIST);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DOMAIN_LIST) == -EEXIST);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DNS_SERVER) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NTP_SERVER) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_SNTP_SERVER) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DOMAIN) >= 0);
         assert_se(sd_dhcp6_client_set_request_option(client, 10) == -EINVAL);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NIS_SERVERS) == 0);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NISP_SERVERS) == 0);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NIS_SERVERS) == -EEXIST);
-        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NISP_SERVERS) == -EEXIST);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NIS_SERVER) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NISP_SERVER) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NIS_SERVER) == -EEXIST);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NISP_SERVER) == -EEXIST);
 
         assert_se(sd_dhcp6_client_set_information_request(client, 1) >= 0);
         v = 0;
@@ -403,7 +403,7 @@ TEST(client_parse_message_issue_22099) {
                 0x00, SD_DHCP6_OPTION_PREFERENCE, 0x00, 0x01,
                 0x00,
                 /* DNS servers */
-                0x00, SD_DHCP6_OPTION_DNS_SERVERS, 0x00, 0x10,
+                0x00, SD_DHCP6_OPTION_DNS_SERVER, 0x00, 0x10,
                 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xde, 0x15, 0xc8, 0xff, 0xfe, 0xef, 0x1e, 0x4e,
                 /* v6 pcp server */
                 0x00, SD_DHCP6_OPTION_V6_PCP_SERVER, 0x00, 0x10,
@@ -443,6 +443,48 @@ TEST(client_parse_message_issue_22099) {
         assert_se(dhcp6_lease_new_from_message(client, (const DHCP6Message*) msg, sizeof(msg), NULL, NULL, &lease) >= 0);
 }
 
+TEST(client_parse_message_issue_24002) {
+        static const uint8_t msg[] = {
+                /* Message Type */
+                0x07,
+                /* Transaction ID */
+                0x0e, 0xa5, 0x7c,
+                /* Client ID */
+                0x00, SD_DHCP6_OPTION_CLIENTID, 0x00, 0x0e,
+                0x00, 0x02, /* DUID-EN */
+                0x00, 0x00, 0xab, 0x11, /* pen */
+                0x5c, 0x6b, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, /* id */
+                /* Server ID */
+                0x00, 0x02, 0x00, 0x1a,
+                0x00, 0x02, 0x00, 0x00, 0x05, 0x83, 0x30, 0x63, 0x3a, 0x38, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+                /* IA_PD */
+                0x00, 0x19, 0x00, 0x29,
+                0xaa, 0xbb, 0xcc, 0xdd, /* iaid */
+                0x00, 0x00, 0x03, 0x84, /* lifetime (T1) */
+                0x00, 0x00, 0x05, 0xa0, /* lifetime (T2) */
+                /* IA_PD (iaprefix suboption) */
+                0x00, 0x1a, 0x00, 0x19,
+                0x00, 0x00, 0x07, 0x08, /* preferred lifetime */
+                0x00, 0x00, 0x38, 0x40, /* valid lifetime */
+                0x38, /* prefixlen */
+                0x20, 0x03, 0x00, 0xff, 0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* prefix */
+                /* Rapid commit */
+                0x00, 0x0e, 0x00, 0x00,
+        };
+        static const uint8_t duid[] = {
+                0x00, 0x00, 0xab, 0x11, 0x5c, 0x6b, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        };
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
+        _cleanup_(sd_dhcp6_lease_unrefp) sd_dhcp6_lease *lease = NULL;
+
+        assert_se(sd_dhcp6_client_new(&client) >= 0);
+        assert_se(sd_dhcp6_client_set_iaid(client, 0xaabbccdd) >= 0);
+        assert_se(sd_dhcp6_client_set_duid(client, 2, duid, sizeof(duid)) >= 0);
+
+        assert_se(dhcp6_lease_new_from_message(client, (const DHCP6Message*) msg, sizeof(msg), NULL, NULL, &lease) >= 0);
+}
+
 static const uint8_t msg_information_request[] = {
         /* Message type */
         DHCP6_MESSAGE_INFORMATION_REQUEST,
@@ -450,11 +492,13 @@ static const uint8_t msg_information_request[] = {
         0x0f, 0xb4, 0xe5,
         /* MUD URL */
         /* ORO */
-        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x08,
-        0x00, SD_DHCP6_OPTION_DNS_SERVERS,
-        0x00, SD_DHCP6_OPTION_DOMAIN_LIST,
+        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x0c,
+        0x00, SD_DHCP6_OPTION_DNS_SERVER,
+        0x00, SD_DHCP6_OPTION_DOMAIN,
+        0x00, SD_DHCP6_OPTION_SNTP_SERVER,
+        0x00, SD_DHCP6_OPTION_INFORMATION_REFRESH_TIME,
         0x00, SD_DHCP6_OPTION_NTP_SERVER,
-        0x00, SD_DHCP6_OPTION_SNTP_SERVERS,
+        0x00, SD_DHCP6_OPTION_INF_MAX_RT,
         /* Client ID */
         0x00, SD_DHCP6_OPTION_CLIENTID, 0x00, 0x0e,
         CLIENT_ID_BYTES,
@@ -490,11 +534,12 @@ static const uint8_t msg_solicit[] = {
         /* Vendor Options */
         /* MUD URL */
         /* ORO */
-        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x08,
-        0x00, SD_DHCP6_OPTION_DNS_SERVERS,
-        0x00, SD_DHCP6_OPTION_DOMAIN_LIST,
+        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x0a,
+        0x00, SD_DHCP6_OPTION_DNS_SERVER,
+        0x00, SD_DHCP6_OPTION_DOMAIN,
+        0x00, SD_DHCP6_OPTION_SNTP_SERVER,
         0x00, SD_DHCP6_OPTION_NTP_SERVER,
-        0x00, SD_DHCP6_OPTION_SNTP_SERVERS,
+        0x00, SD_DHCP6_OPTION_SOL_MAX_RT,
         /* Client ID */
         0x00, SD_DHCP6_OPTION_CLIENTID, 0x00, 0x0e,
         CLIENT_ID_BYTES,
@@ -554,10 +599,10 @@ static const uint8_t msg_request[] = {
         /* MUD URL */
         /* ORO */
         0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x08,
-        0x00, SD_DHCP6_OPTION_DNS_SERVERS,
-        0x00, SD_DHCP6_OPTION_DOMAIN_LIST,
+        0x00, SD_DHCP6_OPTION_DNS_SERVER,
+        0x00, SD_DHCP6_OPTION_DOMAIN,
+        0x00, SD_DHCP6_OPTION_SNTP_SERVER,
         0x00, SD_DHCP6_OPTION_NTP_SERVER,
-        0x00, SD_DHCP6_OPTION_SNTP_SERVERS,
         /* Client ID */
         0x00, SD_DHCP6_OPTION_CLIENTID, 0x00, 0x0e,
         CLIENT_ID_BYTES,
@@ -619,11 +664,11 @@ static const uint8_t msg_reply[] = {
         0x40, /* prefixlen */
         IA_PD_PREFIX1_BYTES,
         /* DNS servers */
-        0x00, SD_DHCP6_OPTION_DNS_SERVERS, 0x00, 0x20,
+        0x00, SD_DHCP6_OPTION_DNS_SERVER, 0x00, 0x20,
         DNS1_BYTES,
         DNS2_BYTES,
         /* SNTP servers */
-        0x00, SD_DHCP6_OPTION_SNTP_SERVERS, 0x00, 0x20,
+        0x00, SD_DHCP6_OPTION_SNTP_SERVER, 0x00, 0x20,
         SNTP1_BYTES,
         SNTP2_BYTES,
         /* NTP servers */
@@ -638,7 +683,7 @@ static const uint8_t msg_reply[] = {
         0x00, DHCP6_NTP_SUBOPTION_SRV_FQDN, 0x00, 0x0b,
         0x03, 'n', 't', 'p', 0x05, 'i', 'n', 't', 'r', 'a', 0x00,
         /* Domain list */
-        0x00, SD_DHCP6_OPTION_DOMAIN_LIST, 0x00, 0x0b,
+        0x00, SD_DHCP6_OPTION_DOMAIN, 0x00, 0x0b,
         0x03, 'l', 'a', 'b', 0x05, 'i', 'n', 't', 'r', 'a', 0x00,
         /* Client FQDN */
         0x00, SD_DHCP6_OPTION_CLIENT_FQDN, 0x00, 0x12,
@@ -698,11 +743,11 @@ static const uint8_t msg_advertise[] = {
         0x40, /* prefixlen */
         IA_PD_PREFIX1_BYTES,
         /* DNS servers */
-        0x00, SD_DHCP6_OPTION_DNS_SERVERS, 0x00, 0x20,
+        0x00, SD_DHCP6_OPTION_DNS_SERVER, 0x00, 0x20,
         DNS1_BYTES,
         DNS2_BYTES,
         /* SNTP servers */
-        0x00, SD_DHCP6_OPTION_SNTP_SERVERS, 0x00, 0x20,
+        0x00, SD_DHCP6_OPTION_SNTP_SERVER, 0x00, 0x20,
         SNTP1_BYTES,
         SNTP2_BYTES,
         /* NTP servers */
@@ -717,7 +762,7 @@ static const uint8_t msg_advertise[] = {
         0x00, DHCP6_NTP_SUBOPTION_SRV_FQDN, 0x00, 0x0b,
         0x03, 'n', 't', 'p', 0x05, 'i', 'n', 't', 'r', 'a', 0x00,
         /* Domain list */
-        0x00, SD_DHCP6_OPTION_DOMAIN_LIST, 0x00, 0x0b,
+        0x00, SD_DHCP6_OPTION_DOMAIN, 0x00, 0x0b,
         0x03, 'l', 'a', 'b', 0x05, 'i', 'n', 't', 'r', 'a', 0x00,
         /* Client FQDN */
         0x00, SD_DHCP6_OPTION_CLIENT_FQDN, 0x00, 0x12,
@@ -965,7 +1010,7 @@ TEST(dhcp6_client) {
         _cleanup_(sd_event_unrefp) sd_event *e = NULL;
 
         assert_se(sd_event_new(&e) >= 0);
-        assert_se(sd_event_add_time_relative(e, NULL, clock_boottime_or_monotonic(),
+        assert_se(sd_event_add_time_relative(e, NULL, CLOCK_BOOTTIME,
                                              2 * USEC_PER_SEC, 0,
                                              NULL, INT_TO_PTR(-ETIMEDOUT)) >= 0);
 
@@ -976,6 +1021,11 @@ TEST(dhcp6_client) {
         assert_se(sd_dhcp6_client_set_fqdn(client, "host.lab.intra") >= 0);
         assert_se(sd_dhcp6_client_set_iaid(client, unaligned_read_be32((uint8_t[]) { IA_ID_BYTES })) >= 0);
         dhcp6_client_set_test_mode(client, true);
+
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DNS_SERVER) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DOMAIN) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_NTP_SERVER) >= 0);
+        assert_se(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_SNTP_SERVER) >= 0);
 
         assert_se(sd_dhcp6_client_set_information_request(client, true) >= 0);
         assert_se(sd_dhcp6_client_set_callback(client, test_client_callback, NULL) >= 0);

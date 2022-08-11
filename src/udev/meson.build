@@ -6,6 +6,7 @@ udevadm_sources = files(
         'udevadm-control.c',
         'udevadm-hwdb.c',
         'udevadm-info.c',
+        'udevadm-lock.c',
         'udevadm-monitor.c',
         'udevadm-settle.c',
         'udevadm-test.c',
@@ -13,6 +14,7 @@ udevadm_sources = files(
         'udevadm-trigger.c',
         'udevadm-util.c',
         'udevadm-util.h',
+        'udevadm-wait.c',
         'udevd.c',
 )
 
@@ -98,7 +100,7 @@ link_config_gperf_c = custom_target(
 
 if get_option('link-udev-shared')
         udev_link_with = [libshared]
-        udev_rpath = rootlibexecdir
+        udev_rpath = rootpkglibdir
 else
         udev_link_with = [libshared_static,
                           libsystemd_static]
@@ -164,7 +166,7 @@ custom_target(
         'udev.pc',
         input : 'udev.pc.in',
         output : 'udev.pc',
-        command : [meson_render_jinja2, config_h, '@INPUT@', '@OUTPUT@'],
+        command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
         install : pkgconfigdatadir != 'no',
         install_dir : pkgconfigdatadir)
 

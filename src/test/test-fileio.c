@@ -35,7 +35,6 @@ TEST(parse_env_file) {
                         *six = NULL, *seven = NULL, *eight = NULL, *nine = NULL, *ten = NULL,
                         *eleven = NULL, *twelve = NULL, *thirteen = NULL;
         _cleanup_strv_free_ char **a = NULL, **b = NULL;
-        char **i;
         unsigned k;
         int r;
 
@@ -110,8 +109,7 @@ TEST(parse_env_file) {
                        "eleven", &eleven,
                        "twelve", &twelve,
                        "thirteen", &thirteen);
-
-        assert_se(r >= 0);
+        assert_se(r == 0);
 
         log_info("one=[%s]", strna(one));
         log_info("two=[%s]", strna(two));
@@ -172,7 +170,6 @@ TEST(parse_multiline_env_file) {
                 p[] = "/tmp/test-fileio-out-XXXXXX";
         FILE *f;
         _cleanup_strv_free_ char **a = NULL, **b = NULL;
-        char **i;
         int r;
 
         assert_se(fmkostemp_safe(t, "w", &f) == 0);
@@ -222,7 +219,6 @@ TEST(merge_env_file) {
         _cleanup_(unlink_tempfilep) char t[] = "/tmp/test-fileio-XXXXXX";
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_strv_free_ char **a = NULL;
-        char **i;
         int r;
 
         assert_se(fmkostemp_safe(t, "w", &f) == 0);
@@ -286,7 +282,6 @@ TEST(merge_env_file_invalid) {
         _cleanup_(unlink_tempfilep) char t[] = "/tmp/test-fileio-XXXXXX";
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_strv_free_ char **a = NULL;
-        char **i;
         int r;
 
         assert_se(fmkostemp_safe(t, "w", &f) == 0);
@@ -487,7 +482,6 @@ TEST(load_env_file_pairs) {
         int fd, r;
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_strv_free_ char **l = NULL;
-        char **k, **v;
 
         fd = mkostemp_safe(fn);
         assert_se(fd >= 0);
@@ -887,7 +881,7 @@ TEST(read_full_file_socket) {
         _cleanup_close_ int listener = -1;
         _cleanup_free_ char *data = NULL, *clientname = NULL;
         union sockaddr_union sa;
-        const char *j;
+        const char *j, *jj;
         size_t size;
         pid_t pid;
         int r;
@@ -902,6 +896,11 @@ TEST(read_full_file_socket) {
 
         assert_se(bind(listener, &sa.sa, SOCKADDR_UN_LEN(sa.un)) >= 0);
         assert_se(listen(listener, 1) >= 0);
+
+        /* Make sure the socket doesn't fit into a struct sockaddr_un, but we can still access it */
+        jj = strjoina(z, "/a_very_long_patha_very_long_patha_very_long_patha_very_long_patha_very_long_patha_very_long_patha_very_long_patha_very_long_path");
+        assert_se(strlen(jj) > sizeof_field(struct sockaddr_un, sun_path));
+        assert_se(rename(j, jj) >= 0);
 
         /* Bind the *client* socket to some randomized name, to verify that this works correctly. */
         assert_se(asprintf(&clientname, "@%" PRIx64 "/test-bindname", random_u64()) >= 0);
@@ -930,8 +929,8 @@ TEST(read_full_file_socket) {
                 _exit(EXIT_SUCCESS);
         }
 
-        assert_se(read_full_file_full(AT_FDCWD, j, UINT64_MAX, SIZE_MAX, 0, NULL, &data, &size) == -ENXIO);
-        assert_se(read_full_file_full(AT_FDCWD, j, UINT64_MAX, SIZE_MAX, READ_FULL_FILE_CONNECT_SOCKET, clientname, &data, &size) >= 0);
+        assert_se(read_full_file_full(AT_FDCWD, jj, UINT64_MAX, SIZE_MAX, 0, NULL, &data, &size) == -ENXIO);
+        assert_se(read_full_file_full(AT_FDCWD, jj, UINT64_MAX, SIZE_MAX, READ_FULL_FILE_CONNECT_SOCKET, clientname, &data, &size) >= 0);
         assert_se(size == strlen(TEST_STR));
         assert_se(streq(data, TEST_STR));
 
@@ -1003,7 +1002,6 @@ TEST(read_full_file_offset_size) {
 }
 
 static void test_read_virtual_file_one(size_t max_size) {
-        const char *filename;
         int r;
 
         log_info("/* %s (max_size=%zu) */", __func__, max_size);

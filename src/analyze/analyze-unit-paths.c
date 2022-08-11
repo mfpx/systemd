@@ -8,14 +8,13 @@
 int verb_unit_paths(int argc, char *argv[], void *userdata) {
         _cleanup_(lookup_paths_free) LookupPaths paths = {};
         int r;
-        char **p;
 
-        r = lookup_paths_init(&paths, arg_scope, 0, NULL);
+        r = lookup_paths_init_or_warn(&paths, arg_scope, 0, NULL);
         if (r < 0)
-                return log_error_errno(r, "lookup_paths_init() failed: %m");
+                return r;
 
         STRV_FOREACH(p, paths.search_path)
                 puts(*p);
 
-        return 0;
+        return EXIT_SUCCESS;
 }

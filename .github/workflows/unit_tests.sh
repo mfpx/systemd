@@ -53,14 +53,23 @@ for phase in "${PHASES[@]}"; do
             apt-get -y install "${ADDITIONAL_DEPS[@]}"
             pip3 install -r .github/workflows/requirements.txt --require-hashes
             ;;
-        RUN|RUN_GCC|RUN_CLANG)
-            if [[ "$phase" = "RUN_CLANG" ]]; then
+        RUN|RUN_GCC|RUN_CLANG|RUN_CLANG_RELEASE)
+            if [[ "$phase" =~ ^RUN_CLANG ]]; then
                 export CC=clang
                 export CXX=clang++
-                # The docs build is slow and is not affected by compiler/flags, so do it just once
-                MESON_ARGS+=(-Dman=true)
+                if [[ "$phase" == RUN_CLANG ]]; then
+                    # The docs build is slow and is not affected by compiler/flags, so do it just once
+                    MESON_ARGS+=(-Dman=true)
+                else
+                    MESON_ARGS+=(-Dmode=release --optimization=2)
+                fi
             fi
-            run_meson --fatal-meson-warnings -Dnobody-group=nogroup --werror -Dtests=unsafe -Dslow-tests=true -Dfuzz-tests=true "${MESON_ARGS[@]}" build
+            # The install_tag feature introduced in 0.60 causes meson to fail with fatal-meson-warnings
+            # "Project targeting '>= 0.53.2' but tried to use feature introduced in '0.60.0': install_tag arg in custom_target"
+            # It can be safely removed from the CI since it isn't actually used anywhere to test anything.
+            find . -type f -name meson.build -exec sed -i '/install_tag/d' '{}' '+'
+            MESON_ARGS+=(--fatal-meson-warnings)
+            run_meson -Dnobody-group=nogroup --werror -Dtests=unsafe -Dslow-tests=true -Dfuzz-tests=true "${MESON_ARGS[@]}" build
             ninja -C build -v
             meson test -C build --print-errorlogs
             ;;
@@ -79,7 +88,12 @@ for phase in "${PHASES[@]}"; do
                     MESON_ARGS+=(-Dskip-deps=true)
                 fi
             fi
-            run_meson --fatal-meson-warnings -Dnobody-group=nogroup --werror -Dtests=unsafe -Db_sanitize=address,undefined "${MESON_ARGS[@]}" build
+            # The install_tag feature introduced in 0.60 causes meson to fail with fatal-meson-warnings
+            # "Project targeting '>= 0.53.2' but tried to use feature introduced in '0.60.0': install_tag arg in custom_target"
+            # It can be safely removed from the CI since it isn't actually used anywhere to test anything.
+            find . -type f -name meson.build -exec sed -i '/install_tag/d' '{}' '+'
+            MESON_ARGS+=(--fatal-meson-warnings)
+            run_meson -Dnobody-group=nogroup --werror -Dtests=unsafe -Db_sanitize=address,undefined "${MESON_ARGS[@]}" build
             ninja -C build -v
 
             export ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1

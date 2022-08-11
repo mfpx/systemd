@@ -6,6 +6,15 @@
 #include "macro.h"
 #include "tests.h"
 
+TEST(saturate_add) {
+        assert_se(saturate_add(1, 2, UINT8_MAX) == 3);
+        assert_se(saturate_add(1, UINT8_MAX-2, UINT8_MAX) == UINT8_MAX-1);
+        assert_se(saturate_add(1, UINT8_MAX-1, UINT8_MAX) == UINT8_MAX);
+        assert_se(saturate_add(1, UINT8_MAX, UINT8_MAX) == UINT8_MAX);
+        assert_se(saturate_add(2, UINT8_MAX, UINT8_MAX) == UINT8_MAX);
+        assert_se(saturate_add(60, 60, 50) == 50);
+}
+
 TEST(align_power2) {
         unsigned long i, p2;
 
@@ -431,6 +440,85 @@ TEST(DECIMAL_STR_MAX) {
         assert_se(DECIMAL_STR_MAX(uint16_t) == DECIMAL_STR_WIDTH(u16_longest)+1);
         assert_se(DECIMAL_STR_MAX(uint32_t) == DECIMAL_STR_WIDTH(u32_longest)+1);
         assert_se(DECIMAL_STR_MAX(uint64_t) == DECIMAL_STR_WIDTH(u64_longest)+1);
+}
+
+TEST(PTR_SUB1) {
+        static const uint64_t x[4] = { 2, 3, 4, 5 };
+        const uint64_t *p;
+
+        p = x + ELEMENTSOF(x)-1;
+        assert_se(*p == 5);
+
+        p = PTR_SUB1(p, x);
+        assert_se(*p == 4);
+
+        p = PTR_SUB1(p, x);
+        assert_se(*p == 3);
+
+        p = PTR_SUB1(p, x);
+        assert_se(*p == 2);
+
+        p = PTR_SUB1(p, x);
+        assert_se(!p);
+
+        p = PTR_SUB1(p, x);
+        assert_se(!p);
+}
+
+TEST(ISPOWEROF2) {
+        uint64_t u;
+        int64_t i;
+
+        /* First, test constant expressions */
+        assert_se(!ISPOWEROF2(-2));
+        assert_se(!ISPOWEROF2(-1));
+        assert_se(!ISPOWEROF2(0));
+        assert_se(ISPOWEROF2(1));
+        assert_se(ISPOWEROF2(2));
+        assert_se(!ISPOWEROF2(3));
+        assert_se(ISPOWEROF2(4));
+        assert_se(!ISPOWEROF2(5));
+        assert_se(!ISPOWEROF2(6));
+        assert_se(!ISPOWEROF2(7));
+        assert_se(ISPOWEROF2(8));
+        assert_se(!ISPOWEROF2(9));
+        assert_se(!ISPOWEROF2(1022));
+        assert_se(ISPOWEROF2(1024));
+        assert_se(!ISPOWEROF2(1025));
+        assert_se(!ISPOWEROF2(UINT64_C(0xffffffff)));
+        assert_se(ISPOWEROF2(UINT64_C(0x100000000)));
+        assert_se(!ISPOWEROF2(UINT64_C(0x100000001)));
+
+        /* Then, test dynamic expressions, and if they are side-effect free */
+        i = -2;
+        assert_se(!ISPOWEROF2(i++));
+        assert_se(i == -1);
+        assert_se(!ISPOWEROF2(i++));
+        assert_se(i == 0);
+        assert_se(!ISPOWEROF2(i++));
+        assert_se(i == 1);
+        assert_se(ISPOWEROF2(i++));
+        assert_se(i == 2);
+        assert_se(ISPOWEROF2(i++));
+        assert_se(i == 3);
+        assert_se(!ISPOWEROF2(i++));
+        assert_se(i == 4);
+        assert_se(ISPOWEROF2(i++));
+        assert_se(i == 5);
+        assert_se(!ISPOWEROF2(i));
+
+        u = 0;
+        assert_se(!ISPOWEROF2(u++));
+        assert_se(u == 1);
+        assert_se(ISPOWEROF2(u++));
+        assert_se(u == 2);
+        assert_se(ISPOWEROF2(u++));
+        assert_se(u == 3);
+        assert_se(!ISPOWEROF2(u++));
+        assert_se(u == 4);
+        assert_se(ISPOWEROF2(u++));
+        assert_se(u == 5);
+        assert_se(!ISPOWEROF2(u));
 }
 
 DEFINE_TEST_MAIN(LOG_INFO);

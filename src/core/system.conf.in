@@ -46,6 +46,7 @@
 #DefaultTimeoutStartSec=90s
 #DefaultTimeoutStopSec=90s
 #DefaultTimeoutAbortSec=
+#DefaultDeviceTimeoutSec=90s
 #DefaultRestartSec=100ms
 #DefaultStartLimitIntervalSec=10s
 #DefaultStartLimitBurst=5
@@ -66,7 +67,7 @@
 #DefaultLimitNOFILE=1024:{{HIGH_RLIMIT_NOFILE}}
 #DefaultLimitAS=
 #DefaultLimitNPROC=
-#DefaultLimitMEMLOCK=8M
+#DefaultLimitMEMLOCK=
 #DefaultLimitLOCKS=
 #DefaultLimitSIGPENDING=
 #DefaultLimitMSGQUEUE=
@@ -74,3 +75,4 @@
 #DefaultLimitRTPRIO=
 #DefaultLimitRTTIME=
 #DefaultOOMPolicy=stop
+#DefaultSmackProcessLabel=

@@ -60,9 +60,9 @@ typedef enum StatusType {
 } StatusType;
 
 typedef enum OOMPolicy {
-        OOM_CONTINUE,          /* The kernel kills the process it wants to kill, and that's it */
-        OOM_STOP,              /* The kernel kills the process it wants to kill, and we stop the unit */
-        OOM_KILL,              /* The kernel kills the process it wants to kill, and all others in the unit, and we stop the unit */
+        OOM_CONTINUE,          /* The kernel or systemd-oomd kills the process it wants to kill, and that's it */
+        OOM_STOP,              /* The kernel or systemd-oomd kills the process it wants to kill, and we stop the unit */
+        OOM_KILL,              /* The kernel or systemd-oomd kills the process it wants to kill, and all others in the unit, and we stop the unit */
         _OOM_POLICY_MAX,
         _OOM_POLICY_INVALID = -EINVAL,
 } OOMPolicy;
@@ -226,7 +226,6 @@ struct Manager {
 
         sd_event_source *sigchld_event_source;
 
-        int time_change_fd;
         sd_event_source *time_change_event_source;
 
         sd_event_source *timezone_change_event_source;
@@ -236,7 +235,7 @@ struct Manager {
         int user_lookup_fds[2];
         sd_event_source *user_lookup_event_source;
 
-        UnitFileScope unit_file_scope;
+        LookupScope unit_file_scope;
         LookupPaths lookup_paths;
         Hashmap *unit_id_map;
         Hashmap *unit_name_map;
@@ -357,6 +356,7 @@ struct Manager {
         ExecOutput default_std_output, default_std_error;
 
         usec_t default_restart_usec, default_timeout_start_usec, default_timeout_stop_usec;
+        usec_t default_device_timeout_usec;
         usec_t default_timeout_abort_usec;
         bool default_timeout_abort_set;
 
@@ -407,6 +407,9 @@ struct Manager {
         char *switch_root;
         char *switch_root_init;
 
+        /* This is true before and after switching root. */
+        bool switching_root;
+
         /* This maps all possible path prefixes to the units needing
          * them. It's a hashmap with a path string as key and a Set as
          * value where Unit objects are contained. */
@@ -439,14 +442,13 @@ struct Manager {
 
         /* Prefixes of e.g. RuntimeDirectory= */
         char *prefix[_EXEC_DIRECTORY_TYPE_MAX];
-        char *received_credentials;
+        char *received_credentials_directory;
+        char *received_encrypted_credentials_directory;
 
         /* Used in the SIGCHLD and sd_notify() message invocation logic to avoid that we dispatch the same event
          * multiple times on the same unit. */
         unsigned sigchldgen;
         unsigned notifygen;
-
-        bool honor_device_enumeration;
 
         VarlinkServer *varlink_server;
         /* When we're a system manager, this object manages the subscription from systemd-oomd to PID1 that's
@@ -457,6 +459,8 @@ struct Manager {
 
         /* Reference to RestrictFileSystems= BPF program */
         struct restrict_fs_bpf *restrict_fs;
+
+        char *default_smack_process_label;
 };
 
 static inline usec_t manager_default_timeout_abort_usec(Manager *m) {
@@ -464,8 +468,8 @@ static inline usec_t manager_default_timeout_abort_usec(Manager *m) {
         return m->default_timeout_abort_set ? m->default_timeout_abort_usec : m->default_timeout_stop_usec;
 }
 
-#define MANAGER_IS_SYSTEM(m) ((m)->unit_file_scope == UNIT_FILE_SYSTEM)
-#define MANAGER_IS_USER(m) ((m)->unit_file_scope != UNIT_FILE_SYSTEM)
+#define MANAGER_IS_SYSTEM(m) ((m)->unit_file_scope == LOOKUP_SCOPE_SYSTEM)
+#define MANAGER_IS_USER(m) ((m)->unit_file_scope != LOOKUP_SCOPE_SYSTEM)
 
 #define MANAGER_IS_RELOADING(m) ((m)->n_reloading > 0)
 
@@ -474,9 +478,11 @@ static inline usec_t manager_default_timeout_abort_usec(Manager *m) {
 /* The objective is set to OK as soon as we enter the main loop, and set otherwise as soon as we are done with it */
 #define MANAGER_IS_RUNNING(m) ((m)->objective == MANAGER_OK)
 
+#define MANAGER_IS_SWITCHING_ROOT(m) ((m)->switching_root)
+
 #define MANAGER_IS_TEST_RUN(m) ((m)->test_run_flags != 0)
 
-int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager **m);
+int manager_new(LookupScope scope, ManagerTestRunFlags test_run_flags, Manager **m);
 Manager* manager_free(Manager *m);
 DEFINE_TRIVIAL_CLEANUP_FUNC(Manager*, manager_free);
 
@@ -509,6 +515,8 @@ int manager_transient_environment_add(Manager *m, char **plus);
 int manager_client_environment_modify(Manager *m, char **minus, char **plus);
 int manager_get_effective_environment(Manager *m, char ***ret);
 
+int manager_set_default_smack_process_label(Manager *m, const char *label);
+
 int manager_set_default_rlimits(Manager *m, struct rlimit **default_rlimit);
 
 void manager_trigger_run_queue(Manager *m);
@@ -537,6 +545,7 @@ void manager_set_show_status(Manager *m, ShowStatus mode, const char *reason);
 void manager_override_show_status(Manager *m, ShowStatus mode, const char *reason);
 
 void manager_set_first_boot(Manager *m, bool b);
+void manager_set_switching_root(Manager *m, bool switching_root);
 
 void manager_status_printf(Manager *m, StatusType type, const char *status, const char *format, ...) _printf_(4,5);
 
@@ -552,7 +561,7 @@ int manager_ref_uid(Manager *m, uid_t uid, bool clean_ipc);
 void manager_unref_gid(Manager *m, gid_t gid, bool destroy_now);
 int manager_ref_gid(Manager *m, gid_t gid, bool clean_ipc);
 
-char *manager_taint_string(Manager *m);
+char* manager_taint_string(const Manager *m);
 
 void manager_ref_console(Manager *m);
 void manager_unref_console(Manager *m);

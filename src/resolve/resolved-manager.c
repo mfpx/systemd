@@ -13,6 +13,7 @@
 #include "bus-polkit.h"
 #include "dirent-util.h"
 #include "dns-domain.h"
+#include "event-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "hostname-util.h"
@@ -338,27 +339,15 @@ static int on_clock_change(sd_event_source *source, int fd, uint32_t revents, vo
 }
 
 static int manager_clock_change_listen(Manager *m) {
-        _cleanup_close_ int fd = -1;
         int r;
 
         assert(m);
 
         m->clock_change_event_source = sd_event_source_disable_unref(m->clock_change_event_source);
 
-        fd = time_change_fd();
-        if (fd < 0)
-                return log_error_errno(fd, "Failed to allocate clock change timer fd: %m");
-
-        r = sd_event_add_io(m->event, &m->clock_change_event_source, fd, EPOLLIN, on_clock_change, m);
+        r = event_add_time_change(m->event, &m->clock_change_event_source, on_clock_change, m);
         if (r < 0)
                 return log_error_errno(r, "Failed to create clock change event source: %m");
-
-        r = sd_event_source_set_io_fd_own(m->clock_change_event_source, true);
-        if (r < 0)
-                return log_error_errno(r, "Failed to pass ownership of clock fd to event source: %m");
-        TAKE_FD(fd);
-
-        (void) sd_event_source_set_description(m->clock_change_event_source, "clock-change");
 
         return 0;
 }
@@ -514,9 +503,7 @@ static int manager_sigusr1(sd_event_source *s, const struct signalfd_siginfo *si
         _cleanup_free_ char *buffer = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         Manager *m = userdata;
-        DnsServer *server;
         size_t size = 0;
-        DnsScope *scope;
         Link *l;
 
         assert(s);
@@ -816,7 +803,7 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
         } else
                 return -EAFNOSUPPORT;
 
-        p->timestamp = now(clock_boottime_or_monotonic());
+        p->timestamp = now(CLOCK_BOOTTIME);
 
         CMSG_FOREACH(cmsg, &mh) {
 
@@ -883,16 +870,10 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
                         p->ifindex = manager_find_ifindex(m, p->family, &p->destination);
         }
 
-        if (DEBUG_LOGGING) {
-                _cleanup_free_ char *sender_address = NULL, *destination_address = NULL;
-
-                (void) in_addr_to_string(p->family, &p->sender, &sender_address);
-                (void) in_addr_to_string(p->family, &p->destination, &destination_address);
-
-                log_debug("Received %s UDP packet of size %zu, ifindex=%i, ttl=%i, fragsize=%zu, sender=%s, destination=%s",
-                          dns_protocol_to_string(protocol), p->size, p->ifindex, p->ttl, p->fragsize,
-                          strna(sender_address), strna(destination_address));
-        }
+        log_debug("Received %s UDP packet of size %zu, ifindex=%i, ttl=%i, fragsize=%zu, sender=%s, destination=%s",
+                  dns_protocol_to_string(protocol), p->size, p->ifindex, p->ttl, p->fragsize,
+                  IN_ADDR_TO_STRING(p->family, &p->sender),
+                  IN_ADDR_TO_STRING(p->family, &p->destination));
 
         *ret = TAKE_PTR(p);
         return 1;
@@ -1182,7 +1163,7 @@ static int manager_next_random_name(const char *old, char **ret_new) {
         assert(p);
 
         while (p > old) {
-                if (!strchr(DIGITS, p[-1]))
+                if (!ascii_isdigit(p[-1]))
                         break;
 
                 p--;
@@ -1316,8 +1297,6 @@ DnsScope* manager_find_scope(Manager *m, DnsPacket *p) {
 }
 
 void manager_verify_all(Manager *m) {
-        DnsScope *s;
-
         assert(m);
 
         LIST_FOREACH(scopes, s, m->dns_scopes)
@@ -1349,7 +1328,6 @@ int manager_is_own_hostname(Manager *m, const char *name) {
 }
 
 int manager_compile_dns_servers(Manager *m, OrderedSet **dns) {
-        DnsServer *s;
         Link *l;
         int r;
 
@@ -1400,7 +1378,6 @@ int manager_compile_dns_servers(Manager *m, OrderedSet **dns) {
  *   > 0 or true: return only domains which are for routing only
  */
 int manager_compile_search_domains(Manager *m, OrderedSet **domains, int filter_route) {
-        DnsSearchDomain *d;
         Link *l;
         int r;
 
@@ -1512,8 +1489,6 @@ bool manager_routable(Manager *m) {
 }
 
 void manager_flush_caches(Manager *m, int log_level) {
-        DnsScope *scope;
-
         assert(m);
 
         LIST_FOREACH(scopes, scope, m->dns_scopes)

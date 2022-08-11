@@ -40,7 +40,7 @@ static ManagedJournalFile *test_open(const char *name) {
         m = mmap_cache_new();
         assert_se(m != NULL);
 
-        assert_ret(managed_journal_file_open(-1, name, O_RDWR|O_CREAT, 0644, true, UINT64_MAX, false, NULL, m, NULL, NULL, &f));
+        assert_ret(managed_journal_file_open(-1, name, O_RDWR|O_CREAT, JOURNAL_COMPRESS, 0644, UINT64_MAX, NULL, m, NULL, NULL, &f));
         return f;
 }
 
@@ -158,6 +158,7 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_head(j));
+        assert_ret(sd_journal_previous(j) == 0);
         assert_ret(sd_journal_next(j));
         test_check_numbers_down(j, 4);
         sd_journal_close(j);
@@ -166,6 +167,7 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_tail(j));
+        assert_ret(sd_journal_next(j) == 0);
         assert_ret(sd_journal_previous(j));
         test_check_numbers_up(j, 4);
         sd_journal_close(j);
@@ -174,6 +176,7 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_tail(j));
+        assert_ret(sd_journal_next(j) == 0);
         assert_ret(r = sd_journal_previous_skip(j, 4));
         assert_se(r == 4);
         test_check_numbers_down(j, 4);
@@ -183,6 +186,7 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_head(j));
+        assert_ret(sd_journal_previous(j) == 0);
         assert_ret(r = sd_journal_next_skip(j, 4));
         assert_se(r == 4);
         test_check_numbers_up(j, 4);
@@ -218,8 +222,8 @@ TEST(sequence_numbers) {
 
         mkdtemp_chdir_chattr(t);
 
-        assert_se(managed_journal_file_open(-1, "one.journal", O_RDWR|O_CREAT, 0644,
-                                     true, UINT64_MAX, false, NULL, m, NULL, NULL, &one) == 0);
+        assert_se(managed_journal_file_open(-1, "one.journal", O_RDWR|O_CREAT, JOURNAL_COMPRESS, 0644,
+                                            UINT64_MAX, NULL, m, NULL, NULL, &one) == 0);
 
         append_number(one, 1, &seqnum);
         printf("seqnum=%"PRIu64"\n", seqnum);
@@ -235,8 +239,8 @@ TEST(sequence_numbers) {
 
         memcpy(&seqnum_id, &one->file->header->seqnum_id, sizeof(sd_id128_t));
 
-        assert_se(managed_journal_file_open(-1, "two.journal", O_RDWR|O_CREAT, 0644,
-                                     true, UINT64_MAX, false, NULL, m, NULL, one, &two) == 0);
+        assert_se(managed_journal_file_open(-1, "two.journal", O_RDWR|O_CREAT, JOURNAL_COMPRESS, 0644,
+                                            UINT64_MAX, NULL, m, NULL, one, &two) == 0);
 
         assert_se(two->file->header->state == STATE_ONLINE);
         assert_se(!sd_id128_equal(two->file->header->file_id, one->file->header->file_id));
@@ -266,8 +270,8 @@ TEST(sequence_numbers) {
         /* restart server */
         seqnum = 0;
 
-        assert_se(managed_journal_file_open(-1, "two.journal", O_RDWR, 0,
-                                     true, UINT64_MAX, false, NULL, m, NULL, NULL, &two) == 0);
+        assert_se(managed_journal_file_open(-1, "two.journal", O_RDWR, JOURNAL_COMPRESS, 0,
+                                            UINT64_MAX, NULL, m, NULL, NULL, &two) == 0);
 
         assert_se(sd_id128_equal(two->file->header->seqnum_id, seqnum_id));
 

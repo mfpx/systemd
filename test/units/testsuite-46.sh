@@ -15,7 +15,7 @@ inspect() {
     # avoid unexpected fails. To see the full outputs of both homectl &
     # userdbctl (for debugging purposes) drop the fields just before the
     # comparison.
-    local USERNAME="${1:?missing argument}"
+    local USERNAME="${1:?}"
     homectl inspect "$USERNAME" | tee /tmp/a
     userdbctl user "$USERNAME" | tee /tmp/b
 
@@ -27,14 +27,13 @@ inspect() {
 }
 
 wait_for_state() {
-    for ((i=0;i<10;i++)) ; do
+    for ((i = 0; i < 10; i++)) ; do
         homectl inspect "$1" | grep -qF "State: $2" && break
         sleep .5
     done
 }
 
 systemd-analyze log-level debug
-systemd-analyze log-target console
 systemctl service-log-level systemd-homed debug
 
 # Create a tmpfs to use as backing store for the home dir. That way we can enforce a size limit nicely.

@@ -140,6 +140,8 @@ units = [
         ['systemd-reboot.service',              ''],
         ['systemd-rfkill.socket',               'ENABLE_RFKILL'],
         ['systemd-sysext.service',              'ENABLE_SYSEXT'],
+        ['systemd-sysupdate.timer',             'ENABLE_SYSUPDATE'],
+        ['systemd-sysupdate-reboot.timer',      'ENABLE_SYSUPDATE'],
         ['systemd-sysusers.service',            'ENABLE_SYSUSERS',
          'sysinit.target.wants/'],
         ['systemd-tmpfiles-clean.service',      'ENABLE_TMPFILES'],
@@ -236,6 +238,8 @@ in_units = [
         ['systemd-suspend.service',              ''],
         ['systemd-sysctl.service',               '',
          'sysinit.target.wants/'],
+        ['systemd-sysupdate.service',            'ENABLE_SYSUPDATE'],
+        ['systemd-sysupdate-reboot.service',     'ENABLE_SYSUPDATE'],
         ['systemd-timedated.service',            'ENABLE_TIMEDATED',
          'dbus-org.freedesktop.timedate1.service'],
         ['systemd-timesyncd.service',            'ENABLE_TIMESYNCD'],
@@ -272,7 +276,7 @@ foreach tuple : in_units
                 file,
                 input : file + '.in',
                 output : file,
-                command : [meson_render_jinja2, config_h, '@INPUT@', '@OUTPUT@'],
+                command : [jinja2_cmdline, '@INPUT@', '@OUTPUT@'],
                 install : install,
                 install_dir : systemunitdir)
 
@@ -307,6 +311,11 @@ meson.add_install_script('meson-add-wants.sh', add_wants)
 
 install_data('user-.slice.d/10-defaults.conf',
              install_dir : systemunitdir + '/user-.slice.d')
+
+install_data('user@.service.d/10-login-barrier.conf',
+             install_dir : systemunitdir + '/user@.service.d')
+install_data('user@0.service.d/10-login-barrier.conf',
+             install_dir : systemunitdir + '/user@0.service.d')
 
 ############################################################
 

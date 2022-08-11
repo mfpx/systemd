@@ -104,7 +104,7 @@ static Set *database_users = NULL, *database_groups = NULL;
 
 static uid_t search_uid = UID_INVALID;
 static UidRange *uid_range = NULL;
-static unsigned n_uid_range = 0;
+static size_t n_uid_range = 0;
 
 static UGIDAllocationRange login_defs = {};
 static bool login_defs_need_warning = false;
@@ -312,7 +312,6 @@ static int putgrent_with_members(const struct group *gr, FILE *group) {
         if (a) {
                 _cleanup_strv_free_ char **l = NULL;
                 bool added = false;
-                char **i;
 
                 l = strv_copy(gr->gr_mem);
                 if (!l)
@@ -357,7 +356,6 @@ static int putsgent_with_members(const struct sgrp *sg, FILE *gshadow) {
         if (a) {
                 _cleanup_strv_free_ char **l = NULL;
                 bool added = false;
-                char **i;
 
                 l = strv_copy(sg->sg_mem);
                 if (!l)
@@ -407,7 +405,7 @@ static int write_temporary_passwd(const char *passwd_path, FILE **tmpfile, char 
                 return 0;
 
         if (arg_dry_run) {
-                log_info("Would write /etc/passwd…");
+                log_info("Would write /etc/passwd%s", special_glyph(SPECIAL_GLYPH_ELLIPSIS));
                 return 0;
         }
 
@@ -531,7 +529,7 @@ static int write_temporary_shadow(const char *shadow_path, FILE **tmpfile, char 
                 return 0;
 
         if (arg_dry_run) {
-                log_info("Would write /etc/shadow…");
+                log_info("Would write /etc/shadow%s", special_glyph(SPECIAL_GLYPH_ELLIPSIS));
                 return 0;
         }
 
@@ -669,7 +667,7 @@ static int write_temporary_group(const char *group_path, FILE **tmpfile, char **
                 return 0;
 
         if (arg_dry_run) {
-                log_info("Would write /etc/group…");
+                log_info("Would write /etc/group%s", special_glyph(SPECIAL_GLYPH_ELLIPSIS));
                 return 0;
         }
 
@@ -775,7 +773,7 @@ static int write_temporary_gshadow(const char * gshadow_path, FILE **tmpfile, ch
                 return 0;
 
         if (arg_dry_run) {
-                log_info("Would write /etc/gshadow…");
+                log_info("Would write /etc/gshadow%s", special_glyph(SPECIAL_GLYPH_ELLIPSIS));
                 return 0;
         }
 
@@ -1171,7 +1169,7 @@ static int add_user(Item *i) {
         return 0;
 }
 
-static int gid_is_ok(gid_t gid) {
+static int gid_is_ok(gid_t gid, bool check_with_uid) {
         struct group *g;
         struct passwd *p;
 
@@ -1179,13 +1177,13 @@ static int gid_is_ok(gid_t gid) {
                 return 0;
 
         /* Avoid reusing gids that are already used by a different user */
-        if (ordered_hashmap_get(todo_uids, UID_TO_PTR(gid)))
+        if (check_with_uid && ordered_hashmap_get(todo_uids, UID_TO_PTR(gid)))
                 return 0;
 
         if (hashmap_contains(database_by_gid, GID_TO_PTR(gid)))
                 return 0;
 
-        if (hashmap_contains(database_by_uid, UID_TO_PTR(gid)))
+        if (check_with_uid && hashmap_contains(database_by_uid, UID_TO_PTR(gid)))
                 return 0;
 
         if (!arg_root) {
@@ -1196,12 +1194,14 @@ static int gid_is_ok(gid_t gid) {
                 if (!IN_SET(errno, 0, ENOENT))
                         return -errno;
 
-                errno = 0;
-                p = getpwuid((uid_t) gid);
-                if (p)
-                        return 0;
-                if (!IN_SET(errno, 0, ENOENT))
-                        return -errno;
+                if (check_with_uid) {
+                        errno = 0;
+                        p = getpwuid((uid_t) gid);
+                        if (p)
+                                return 0;
+                        if (!IN_SET(errno, 0, ENOENT))
+                                return -errno;
+                }
         }
 
         return 1;
@@ -1252,7 +1252,7 @@ static int add_group(Item *i) {
 
         /* Try to use the suggested numeric GID */
         if (i->gid_set) {
-                r = gid_is_ok(i->gid);
+                r = gid_is_ok(i->gid, false);
                 if (r < 0)
                         return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                 if (i->id_set_strict) {
@@ -1275,7 +1275,7 @@ static int add_group(Item *i) {
 
         /* Try to reuse the numeric uid, if there's one */
         if (!i->gid_set && i->uid_set) {
-                r = gid_is_ok((gid_t) i->uid);
+                r = gid_is_ok((gid_t) i->uid, true);
                 if (r < 0)
                         return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                 if (r > 0) {
@@ -1293,7 +1293,7 @@ static int add_group(Item *i) {
                         if (c <= 0 || !uid_range_contains(uid_range, n_uid_range, c))
                                 log_debug("Group ID " GID_FMT " of file not suitable for %s.", c, i->name);
                         else {
-                                r = gid_is_ok(c);
+                                r = gid_is_ok(c, true);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                                 else if (r > 0) {
@@ -1315,7 +1315,7 @@ static int add_group(Item *i) {
                         if (r < 0)
                                 return log_error_errno(r, "No free group ID available for %s.", i->name);
 
-                        r = gid_is_ok(search_uid);
+                        r = gid_is_ok(search_uid, true);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                         else if (r > 0)
@@ -1348,9 +1348,11 @@ static int process_item(Item *i) {
         switch (i->type) {
 
         case ADD_USER: {
-                Item *j;
+                Item *j = NULL;
 
-                j = ordered_hashmap_get(groups, i->group_name ?: i->name);
+                if (!i->gid_set)
+                        j = ordered_hashmap_get(groups, i->group_name ?: i->name);
+
                 if (j && j->todo_group) {
                         /* When a group with the target name is already in queue,
                          * use the information about the group and do not create
@@ -1406,8 +1408,6 @@ static int add_implicit(void) {
 
         /* Implicitly create additional users and groups, if they were listed in "m" lines */
         ORDERED_HASHMAP_FOREACH_KEY(l, g, members) {
-                char **m;
-
                 STRV_FOREACH(m, l)
                         if (!ordered_hashmap_get(users, *m)) {
                                 _cleanup_(item_freep) Item *j = NULL;
@@ -1977,7 +1977,6 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 static int parse_arguments(char **args) {
-        char **arg;
         unsigned pos = 1;
         int r;
 
@@ -1986,7 +1985,7 @@ static int parse_arguments(char **args) {
                         /* Use (argument):n, where n==1 for the first positional arg */
                         r = parse_line("(argument)", pos, *arg);
                 else
-                        r = read_config_file(*arg, false);
+                        r = read_config_file(*arg, /* ignore_enoent= */ false);
                 if (r < 0)
                         return r;
 
@@ -1999,7 +1998,6 @@ static int parse_arguments(char **args) {
 static int read_config_files(char **args) {
         _cleanup_strv_free_ char **files = NULL;
         _cleanup_free_ char *p = NULL;
-        char **f;
         int r;
 
         r = conf_files_list_with_replacement(arg_root, CONF_PATHS_STRV("sysusers.d"), arg_replace, &files, &p);
@@ -2008,18 +2006,37 @@ static int read_config_files(char **args) {
 
         STRV_FOREACH(f, files)
                 if (p && path_equal(*f, p)) {
-                        log_debug("Parsing arguments at position \"%s\"…", *f);
+                        log_debug("Parsing arguments at position \"%s\"%s", *f, special_glyph(SPECIAL_GLYPH_ELLIPSIS));
 
                         r = parse_arguments(args);
                         if (r < 0)
                                 return r;
                 } else {
-                        log_debug("Reading config file \"%s\"…", *f);
+                        log_debug("Reading config file \"%s\"%s", *f, special_glyph(SPECIAL_GLYPH_ELLIPSIS));
 
                         /* Just warn, ignore result otherwise */
-                        (void) read_config_file(*f, true);
+                        (void) read_config_file(*f, /* ignore_enoent= */ true);
                 }
 
+        return 0;
+}
+
+static int read_credential_lines(void) {
+        _cleanup_free_ char *j = NULL;
+        const char *d;
+        int r;
+
+        r = get_credentials_dir(&d);
+        if (r == -ENXIO)
+                return 0;
+        if (r < 0)
+                return log_error_errno(r, "Failed to get credentials directory: %m");
+
+        j = path_join(d, "sysusers.extra");
+        if (!j)
+                return log_oom();
+
+        (void) read_config_file(j, /* ignore_enoent= */ true);
         return 0;
 }
 
@@ -2074,12 +2091,10 @@ static int run(int argc, char *argv[]) {
         assert(!arg_image);
 #endif
 
-        /* If command line arguments are specified along with --replace, read all
-         * configuration files and insert the positional arguments at the specified
-         * place. Otherwise, if command line arguments are specified, execute just
-         * them, and finally, without --replace= or any positional arguments, just
-         * read configuration and execute it.
-         */
+        /* If command line arguments are specified along with --replace, read all configuration files and
+         * insert the positional arguments at the specified place. Otherwise, if command line arguments are
+         * specified, execute just them, and finally, without --replace= or any positional arguments, just
+         * read configuration and execute it. */
         if (arg_replace || optind >= argc)
                 r = read_config_files(argv + optind);
         else
@@ -2087,11 +2102,15 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 return r;
 
-        /* Let's tell nss-systemd not to synthesize the "root" and "nobody" entries for it, so that our detection
-         * whether the names or UID/GID area already used otherwise doesn't get confused. After all, even though
-         * nss-systemd synthesizes these users/groups, they should still appear in /etc/passwd and /etc/group, as the
-         * synthesizing logic is merely supposed to be fallback for cases where we run with a completely unpopulated
-         * /etc. */
+        r = read_credential_lines();
+        if (r < 0)
+                return r;
+
+        /* Let's tell nss-systemd not to synthesize the "root" and "nobody" entries for it, so that our
+         * detection whether the names or UID/GID area already used otherwise doesn't get confused. After
+         * all, even though nss-systemd synthesizes these users/groups, they should still appear in
+         * /etc/passwd and /etc/group, as the synthesizing logic is merely supposed to be fallback for cases
+         * where we run with a completely unpopulated /etc. */
         if (setenv("SYSTEMD_NSS_BYPASS_SYNTHETIC", "1", 1) < 0)
                 return log_error_errno(errno, "Failed to set SYSTEMD_NSS_BYPASS_SYNTHETIC environment variable: %m");
 

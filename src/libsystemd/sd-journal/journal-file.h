@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
+#include <fcntl.h>
 #include <inttypes.h>
 #include <sys/uio.h>
 
@@ -11,6 +12,7 @@
 #include "sd-event.h"
 #include "sd-id128.h"
 
+#include "compress.h"
 #include "hashmap.h"
 #include "journal-def.h"
 #include "mmap-cache.h"
@@ -18,7 +20,7 @@
 #include "time-util.h"
 
 typedef struct JournalMetrics {
-        /* For all these: -1 means "pick automatically", and 0 means "no limit enforced" */
+        /* For all these: UINT64_MAX means "pick automatically", and 0 means "no limit enforced" */
         uint64_t max_size;     /* how large journal files grow at max */
         uint64_t min_size;     /* how large journal files grow at least */
         uint64_t max_use;      /* how much disk space to use in total at max, keep_free permitting */
@@ -62,15 +64,9 @@ typedef struct JournalFile {
 
         mode_t mode;
 
-        int flags;
-        bool writable:1;
-        bool compress_xz:1;
-        bool compress_lz4:1;
-        bool compress_zstd:1;
-        bool seal:1;
+        int open_flags;
         bool close_fd:1;
         bool archive:1;
-        bool keyed_hash:1;
 
         direction_t last_direction;
         LocationType location_type;
@@ -126,14 +122,18 @@ typedef struct JournalFile {
 #endif
 } JournalFile;
 
+typedef enum JournalFileFlags {
+        JOURNAL_COMPRESS = 1 << 0,
+        JOURNAL_SEAL     = 1 << 1,
+} JournalFileFlags;
+
 int journal_file_open(
                 int fd,
                 const char *fname,
-                int flags,
+                int open_flags,
+                JournalFileFlags file_flags,
                 mode_t mode,
-                bool compress,
                 uint64_t compress_threshold_bytes,
-                bool seal,
                 JournalMetrics *metrics,
                 MMapCache *mmap_cache,
                 JournalFile *template,
@@ -241,7 +241,6 @@ void journal_file_post_change(JournalFile *f);
 int journal_file_enable_post_change_timer(JournalFile *f, sd_event *e, usec_t t);
 
 void journal_reset_metrics(JournalMetrics *m);
-void journal_default_metrics(JournalMetrics *m, int fd);
 
 int journal_file_get_cutoff_realtime_usec(JournalFile *f, usec_t *from, usec_t *to);
 int journal_file_get_cutoff_monotonic_usec(JournalFile *f, sd_id128_t boot, usec_t *from, usec_t *to);
@@ -253,7 +252,8 @@ int journal_file_map_field_hash_table(JournalFile *f);
 
 static inline bool JOURNAL_FILE_COMPRESS(JournalFile *f) {
         assert(f);
-        return f->compress_xz || f->compress_lz4 || f->compress_zstd;
+        return JOURNAL_HEADER_COMPRESSED_XZ(f->header) || JOURNAL_HEADER_COMPRESSED_LZ4(f->header) ||
+                        JOURNAL_HEADER_COMPRESSED_ZSTD(f->header);
 }
 
 uint64_t journal_file_hash_data(JournalFile *f, const void *data, size_t sz);
@@ -261,3 +261,51 @@ uint64_t journal_file_hash_data(JournalFile *f, const void *data, size_t sz);
 bool journal_field_valid(const char *p, size_t l, bool allow_protected);
 
 const char* journal_object_type_to_string(ObjectType type) _const_;
+
+static inline Compression COMPRESSION_FROM_OBJECT(const Object *o) {
+        assert(o);
+
+        switch (o->object.flags & _OBJECT_COMPRESSED_MASK) {
+        case 0:
+                return COMPRESSION_NONE;
+        case OBJECT_COMPRESSED_XZ:
+                return COMPRESSION_XZ;
+        case OBJECT_COMPRESSED_LZ4:
+                return COMPRESSION_LZ4;
+        case OBJECT_COMPRESSED_ZSTD:
+                return COMPRESSION_ZSTD;
+        default:
+                return _COMPRESSION_INVALID;
+        }
+}
+
+static inline uint8_t COMPRESSION_TO_OBJECT_FLAG(Compression c) {
+        switch (c) {
+        case COMPRESSION_XZ:
+                return OBJECT_COMPRESSED_XZ;
+        case COMPRESSION_LZ4:
+                return OBJECT_COMPRESSED_LZ4;
+        case COMPRESSION_ZSTD:
+                return OBJECT_COMPRESSED_ZSTD;
+        default:
+                return 0;
+        }
+}
+
+static inline uint32_t COMPRESSION_TO_HEADER_INCOMPATIBLE_FLAG(Compression c) {
+        switch (c) {
+        case COMPRESSION_XZ:
+                return HEADER_INCOMPATIBLE_COMPRESSED_XZ;
+        case COMPRESSION_LZ4:
+                return HEADER_INCOMPATIBLE_COMPRESSED_LZ4;
+        case COMPRESSION_ZSTD:
+                return HEADER_INCOMPATIBLE_COMPRESSED_ZSTD;
+        default:
+                return 0;
+        }
+}
+
+static inline bool journal_file_writable(JournalFile *f) {
+        assert(f);
+        return (f->open_flags & O_ACCMODE) != O_RDONLY;
+}

@@ -280,7 +280,7 @@ static int link_get_l2tp_local_address(Link *link, L2tpTunnel *t, union in_addr_
 static int l2tp_get_local_address(NetDev *netdev, union in_addr_union *ret) {
         Link *link = NULL;
         L2tpTunnel *t;
-        Address *a;
+        Address *a = NULL;
         int r;
 
         assert(netdev);
@@ -292,7 +292,7 @@ static int l2tp_get_local_address(NetDev *netdev, union in_addr_union *ret) {
                 if (r < 0)
                         return r;
 
-                if (!IN_SET(link->state, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED))
+                if (!link_is_ready_to_configure(link, /* allow_unmanaged = */ false))
                         return -EBUSY;
         }
 
@@ -346,7 +346,7 @@ static int l2tp_get_local_address(NetDev *netdev, union in_addr_union *ret) {
                 return link_get_l2tp_local_address(link, t, ret);
 
         HASHMAP_FOREACH(link, netdev->manager->links_by_index) {
-                if (!IN_SET(link->state, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED))
+                if (!link_is_ready_to_configure(link, /* allow_unmanaged = */ false))
                         continue;
 
                 if (link_get_l2tp_local_address(link, t, ret) >= 0)
@@ -445,12 +445,9 @@ static int l2tp_create_tunnel(NetDev *netdev) {
         if (r < 0)
                 return log_netdev_error_errno(netdev, r, "Could not find local address.");
 
-        if (t->local_address_type >= 0 && DEBUG_LOGGING) {
-                _cleanup_free_ char *str = NULL;
-
-                (void) in_addr_to_string(t->family, &local_address, &str);
-                log_netdev_debug(netdev, "Local address %s acquired.", strna(str));
-        }
+        if (t->local_address_type >= 0 && DEBUG_LOGGING)
+                log_netdev_debug(netdev, "Local address %s acquired.",
+                                 IN_ADDR_TO_STRING(t->family, &local_address));
 
         r = netdev_l2tp_create_message_tunnel(netdev, &local_address, &m);
         if (r < 0)
@@ -486,7 +483,8 @@ int config_parse_l2tp_tunnel_local_address(
         L2tpLocalAddressType type;
         L2tpTunnel *t = userdata;
         const char *p = rvalue;
-        int r;
+        union in_addr_union a;
+        int r, f;
 
         assert(filename);
         assert(lvalue);
@@ -539,16 +537,27 @@ int config_parse_l2tp_tunnel_local_address(
                 return 0;
         }
 
-        if (t->family == AF_UNSPEC)
-                r = in_addr_from_string_auto(rvalue, &t->family, &t->local);
-        else
-                r = in_addr_from_string(t->family, rvalue, &t->local);
+        r = in_addr_from_string_auto(rvalue, &f, &a);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Invalid L2TP Tunnel address specified in %s=, ignoring assignment: %s", lvalue, rvalue);
+                           "Invalid L2TP Tunnel local address specified, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
+        if (in_addr_is_null(f, &a)) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "L2TP Tunnel local address cannot be null, ignoring assignment: %s", rvalue);
+                return 0;
+        }
+
+        if (t->family != AF_UNSPEC && t->family != f) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Address family does not match the previous assignment, ignoring assignment: %s", rvalue);
+                return 0;
+        }
+
+        t->family = f;
+        t->local = a;
         free_and_replace(t->local_ifname, ifname);
         t->local_address_type = _NETDEV_L2TP_LOCAL_ADDRESS_INVALID;
         return 0;
@@ -567,7 +576,8 @@ int config_parse_l2tp_tunnel_remote_address(
                 void *userdata) {
 
         L2tpTunnel *t = userdata;
-        int r;
+        union in_addr_union a;
+        int r, f;
 
         assert(filename);
         assert(lvalue);
@@ -584,16 +594,27 @@ int config_parse_l2tp_tunnel_remote_address(
                 return 0;
         }
 
-        if (t->family == AF_UNSPEC)
-                r = in_addr_from_string_auto(rvalue, &t->family, &t->remote);
-        else
-                r = in_addr_from_string(t->family, rvalue, &t->remote);
+        r = in_addr_from_string_auto(rvalue, &f, &a);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Invalid L2TP Tunnel address specified in %s=, ignoring assignment: %s", lvalue, rvalue);
+                           "Invalid L2TP Tunnel remote address specified, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
+        if (in_addr_is_null(f, &a)) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "L2TP Tunnel remote address cannot be null, ignoring assignment: %s", rvalue);
+                return 0;
+        }
+
+        if (t->family != AF_UNSPEC && t->family != f) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Address family does not match the previous assignment, ignoring assignment: %s", rvalue);
+                return 0;
+        }
+
+        t->family = f;
+        t->remote = a;
         return 0;
 }
 

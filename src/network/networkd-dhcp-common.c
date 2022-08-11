@@ -52,6 +52,10 @@ bool link_dhcp_enabled(Link *link, int family) {
         assert(link);
         assert(IN_SET(family, AF_INET, AF_INET6));
 
+        /* Currently, sd-dhcp-client supports only ethernet and infiniband. */
+        if (family == AF_INET && !IN_SET(link->iftype, ARPHRD_ETHER, ARPHRD_INFINIBAND))
+                return false;
+
         if (family == AF_INET6 && !socket_ipv6_is_supported())
                 return false;
 
@@ -59,13 +63,6 @@ bool link_dhcp_enabled(Link *link, int family) {
                 return false;
 
         if (link->iftype == ARPHRD_CAN)
-                return false;
-
-        if (!IN_SET(link->hw_addr.length, ETH_ALEN, INFINIBAND_ALEN) &&
-            !streq_ptr(link->kind, "wwan"))
-                /* Currently, only interfaces whose MAC address length is ETH_ALEN or INFINIBAND_ALEN
-                 * are supported. Note, wwan interfaces may be assigned MAC address slightly later.
-                 * Hence, let's wait for a while.*/
                 return false;
 
         if (!link->network)
@@ -91,7 +88,7 @@ void network_adjust_dhcp(Network *network) {
 
         if (!FLAGS_SET(network->link_local, ADDRESS_FAMILY_IPV6) &&
             FLAGS_SET(network->dhcp, ADDRESS_FAMILY_IPV6)) {
-                log_warning("%s: DHCPv6 client is enabled but IPv6 link local addressing is disabled. "
+                log_warning("%s: DHCPv6 client is enabled but IPv6 link-local addressing is disabled. "
                             "Disabling DHCPv6 client.", network->filename);
                 SET_FLAG(network->dhcp, ADDRESS_FAMILY_IPV6, false);
         }

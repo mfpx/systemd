@@ -3,6 +3,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/btrfs.h>
+#if WANT_LINUX_FS_H
+#include <linux/fs.h>
+#endif
 #include <linux/magic.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
@@ -17,6 +20,7 @@
 #include "io-util.h"
 #include "macro.h"
 #include "missing_fcntl.h"
+#include "missing_fs.h"
 #include "missing_syscall.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -787,4 +791,25 @@ int btrfs_defrag_fd(int fd) {
                 return r;
 
         return RET_NERRNO(ioctl(fd, BTRFS_IOC_DEFRAG, NULL));
+}
+
+int fd_get_diskseq(int fd, uint64_t *ret) {
+        uint64_t diskseq;
+
+        assert(fd >= 0);
+        assert(ret);
+
+        if (ioctl(fd, BLKGETDISKSEQ, &diskseq) < 0) {
+                /* Note that the kernel is weird: non-existing ioctls currently return EINVAL
+                 * rather than ENOTTY on loopback block devices. They should fix that in the kernel,
+                 * but in the meantime we accept both here. */
+                if (!ERRNO_IS_NOT_SUPPORTED(errno) && errno != EINVAL)
+                        return -errno;
+
+                return -EOPNOTSUPP;
+        }
+
+        *ret = diskseq;
+
+        return 0;
 }

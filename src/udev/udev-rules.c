@@ -5,11 +5,11 @@
 #include "alloc-util.h"
 #include "architecture.h"
 #include "conf-files.h"
+#include "conf-parser.h"
 #include "def.h"
 #include "device-private.h"
 #include "device-util.h"
 #include "dirent-util.h"
-#include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
@@ -30,6 +30,7 @@
 #include "udev-builtin.h"
 #include "udev-event.h"
 #include "udev-netlink.h"
+#include "udev-node.h"
 #include "udev-rules.h"
 #include "udev-util.h"
 #include "user-util.h"
@@ -177,10 +178,10 @@ struct UdevRuleFile {
 };
 
 struct UdevRules {
-        usec_t dirs_ts_usec;
         ResolveNameTiming resolve_name_timing;
         Hashmap *known_users;
         Hashmap *known_groups;
+        Hashmap *stats_by_path;
         UdevRuleFile *current_file;
         LIST_HEAD(UdevRuleFile, rule_files);
 };
@@ -268,11 +269,9 @@ static void udev_rule_token_free(UdevRuleToken *token) {
 }
 
 static void udev_rule_line_clear_tokens(UdevRuleLine *rule_line) {
-        UdevRuleToken *i, *next;
-
         assert(rule_line);
 
-        LIST_FOREACH_SAFE(tokens, i, next, rule_line->tokens)
+        LIST_FOREACH(tokens, i, rule_line->tokens)
                 udev_rule_token_free(i);
 
         rule_line->tokens = NULL;
@@ -298,12 +297,10 @@ static UdevRuleLine* udev_rule_line_free(UdevRuleLine *rule_line) {
 DEFINE_TRIVIAL_CLEANUP_FUNC(UdevRuleLine*, udev_rule_line_free);
 
 static void udev_rule_file_free(UdevRuleFile *rule_file) {
-        UdevRuleLine *i, *next;
-
         if (!rule_file)
                 return;
 
-        LIST_FOREACH_SAFE(rule_lines, i, next, rule_file->rule_lines)
+        LIST_FOREACH(rule_lines, i, rule_file->rule_lines)
                 udev_rule_line_free(i);
 
         free(rule_file->filename);
@@ -311,16 +308,15 @@ static void udev_rule_file_free(UdevRuleFile *rule_file) {
 }
 
 UdevRules *udev_rules_free(UdevRules *rules) {
-        UdevRuleFile *i, *next;
-
         if (!rules)
                 return NULL;
 
-        LIST_FOREACH_SAFE(rule_files, i, next, rules->rule_files)
+        LIST_FOREACH(rule_files, i, rules->rule_files)
                 udev_rule_file_free(i);
 
         hashmap_free_free_key(rules->known_users);
         hashmap_free_free_key(rules->known_groups);
+        hashmap_free(rules->stats_by_path);
         return mfree(rules);
 }
 
@@ -1062,21 +1058,19 @@ static int parse_line(char **line, char **ret_key, char **ret_attr, UdevRuleOper
 }
 
 static void sort_tokens(UdevRuleLine *rule_line) {
-        UdevRuleToken *head_old;
-
         assert(rule_line);
 
-        head_old = TAKE_PTR(rule_line->tokens);
+        UdevRuleToken *old_tokens = TAKE_PTR(rule_line->tokens);
         rule_line->current_token = NULL;
 
-        while (!LIST_IS_EMPTY(head_old)) {
-                UdevRuleToken *t, *min_token = NULL;
+        while (old_tokens) {
+                UdevRuleToken *min_token = NULL;
 
-                LIST_FOREACH(tokens, t, head_old)
+                LIST_FOREACH(tokens, t, old_tokens)
                         if (!min_token || min_token->type > t->type)
                                 min_token = t;
 
-                LIST_REMOVE(tokens, head_old, min_token);
+                LIST_REMOVE(tokens, old_tokens, min_token);
                 rule_line_append_token(rule_line, min_token);
         }
 }
@@ -1146,12 +1140,10 @@ static int rule_add_line(UdevRules *rules, const char *line_str, unsigned line_n
 }
 
 static void rule_resolve_goto(UdevRuleFile *rule_file) {
-        UdevRuleLine *line, *line_next, *i;
-
         assert(rule_file);
 
         /* link GOTOs to LABEL rules in this file to be able to fast-forward */
-        LIST_FOREACH_SAFE(rule_lines, line, line_next, rule_file->rule_lines) {
+        LIST_FOREACH(rule_lines, line, rule_file->rule_lines) {
                 if (!FLAGS_SET(line->type, LINE_HAS_GOTO))
                         continue;
 
@@ -1186,6 +1178,7 @@ int udev_rules_parse_file(UdevRules *rules, const char *filename) {
         UdevRuleFile *rule_file;
         bool ignore_line = false;
         unsigned line_nr = 0;
+        struct stat st;
         int r;
 
         f = fopen(filename, "re");
@@ -1193,15 +1186,22 @@ int udev_rules_parse_file(UdevRules *rules, const char *filename) {
                 if (errno == ENOENT)
                         return 0;
 
-                return -errno;
+                return log_warning_errno(errno, "Failed to open %s, ignoring: %m", filename);
         }
 
-        (void) fd_warn_permissions(filename, fileno(f));
+        if (fstat(fileno(f), &st) < 0)
+                return log_warning_errno(errno, "Failed to stat %s, ignoring: %m", filename);
 
-        if (null_or_empty_fd(fileno(f))) {
+        if (null_or_empty(&st)) {
                 log_debug("Skipping empty file: %s", filename);
                 return 0;
         }
+
+        r = hashmap_put_stats_by_path(&rules->stats_by_path, filename, &st);
+        if (r < 0)
+                return log_warning_errno(errno, "Failed to save stat for %s, ignoring: %m", filename);
+
+        (void) fd_warn_permissions(filename, fileno(f));
 
         log_debug("Reading rules file: %s", filename);
 
@@ -1300,14 +1300,11 @@ UdevRules* udev_rules_new(ResolveNameTiming resolve_name_timing) {
 int udev_rules_load(UdevRules **ret_rules, ResolveNameTiming resolve_name_timing) {
         _cleanup_(udev_rules_freep) UdevRules *rules = NULL;
         _cleanup_strv_free_ char **files = NULL;
-        char **f;
         int r;
 
         rules = udev_rules_new(resolve_name_timing);
         if (!rules)
                 return -ENOMEM;
-
-        (void) udev_rules_check_timestamp(rules);
 
         r = conf_files_list_strv(&files, ".rules", NULL, 0, RULES_DIRS);
         if (r < 0)
@@ -1323,11 +1320,25 @@ int udev_rules_load(UdevRules **ret_rules, ResolveNameTiming resolve_name_timing
         return 0;
 }
 
-bool udev_rules_check_timestamp(UdevRules *rules) {
-        if (!rules)
-                return false;
+bool udev_rules_should_reload(UdevRules *rules) {
+        _cleanup_hashmap_free_ Hashmap *stats_by_path = NULL;
+        int r;
 
-        return paths_check_timestamp(RULES_DIRS, &rules->dirs_ts_usec, true);
+        if (!rules)
+                return true;
+
+        r = config_get_stats_by_path(".rules", NULL, 0, RULES_DIRS, /* check_dropins = */ false, &stats_by_path);
+        if (r < 0) {
+                log_warning_errno(r, "Failed to get stats of udev rules, ignoring: %m");
+                return true;
+        }
+
+        if (!stats_by_path_equal(rules->stats_by_path, stats_by_path)) {
+                log_debug("Udev rules need reloading");
+                return true;
+        }
+
+        return false;
 }
 
 static bool token_match_string(UdevRuleToken *token, const char *str) {
@@ -1726,7 +1737,7 @@ static int udev_rule_apply_token_to_event(
                 return token->op == (match ? OP_MATCH : OP_NOMATCH);
         }
         case TK_M_PROGRAM: {
-                char buf[UDEV_PATH_SIZE], result[UDEV_LINE_SIZE];
+                char buf[UDEV_LINE_SIZE], result[UDEV_LINE_SIZE];
                 bool truncated;
                 size_t count;
 
@@ -1814,7 +1825,7 @@ static int udev_rule_apply_token_to_event(
         }
         case TK_M_IMPORT_PROGRAM: {
                 _cleanup_strv_free_ char **lines = NULL;
-                char buf[UDEV_PATH_SIZE], result[UDEV_LINE_SIZE], **line;
+                char buf[UDEV_LINE_SIZE], result[UDEV_LINE_SIZE];
                 bool truncated;
 
                 (void) udev_event_apply_format(event, token->value, buf, sizeof(buf), false, &truncated);
@@ -1839,7 +1850,7 @@ static int udev_rule_apply_token_to_event(
                         bool found = false;
 
                         /* Drop the last line. */
-                        for (char *p = buf + strlen(buf) - 1; p >= buf; p--)
+                        for (char *p = PTR_SUB1(buf + strlen(buf), buf); p; p = PTR_SUB1(p, buf))
                                 if (strchr(NEWLINE, *p)) {
                                         *p = '\0';
                                         found = true;
@@ -1882,7 +1893,7 @@ static int udev_rule_apply_token_to_event(
                 UdevBuiltinCommand cmd = PTR_TO_UDEV_BUILTIN_CMD(token->data);
                 assert(cmd >= 0 && cmd < _UDEV_BUILTIN_MAX);
                 unsigned mask = 1U << (int) cmd;
-                char buf[UDEV_PATH_SIZE];
+                char buf[UDEV_LINE_SIZE];
                 bool truncated;
 
                 if (udev_builtin_run_once(cmd)) {
@@ -2137,7 +2148,7 @@ static int udev_rule_apply_token_to_event(
                 if (r == -ENOMEM)
                         return log_oom();
                 if (r < 0)
-                        return log_rule_error_errno(dev, rules, r, "Failed to store SECLABEL{%s}='%s': %m", name, label);;
+                        return log_rule_error_errno(dev, rules, r, "Failed to store SECLABEL{%s}='%s': %m", name, label);
 
                 log_rule_debug(dev, rules, "SECLABEL{%s}='%s'", name, label);
 
@@ -2378,7 +2389,7 @@ static int udev_rule_apply_token_to_event(
         case TK_A_RUN_BUILTIN:
         case TK_A_RUN_PROGRAM: {
                 _cleanup_free_ char *cmd = NULL;
-                char buf[UDEV_PATH_SIZE];
+                char buf[UDEV_LINE_SIZE];
                 bool truncated;
 
                 if (event->run_final)
@@ -2434,21 +2445,28 @@ static int udev_rule_apply_parent_token_to_event(
         UdevRuleToken *head;
         int r;
 
-        line = rules->current_file->current_line;
-        head = rules->current_file->current_line->current_token;
-        event->dev_parent = event->dev;
+        assert(rules);
+        assert(rules->current_file);
+        assert(event);
+
+        line = ASSERT_PTR(rules->current_file->current_line);
+        head = ASSERT_PTR(rules->current_file->current_line->current_token);
+        event->dev_parent = ASSERT_PTR(event->dev);
+
         for (;;) {
-                LIST_FOREACH(tokens, line->current_token, head) {
-                        if (!token_is_for_parents(line->current_token))
+                LIST_FOREACH(tokens, token, head) {
+                        if (!token_is_for_parents(token))
                                 return true; /* All parent tokens match. */
+
+                        line->current_token = token;
                         r = udev_rule_apply_token_to_event(rules, event->dev_parent, event, 0, timeout_signal, NULL);
                         if (r < 0)
                                 return r;
                         if (r == 0)
                                 break;
                 }
-                if (!line->current_token)
-                        /* All parent tokens match. But no assign tokens in the line. Hmm... */
+                if (r > 0)
+                        /* All parent tokens match, and no more token (except for GOTO) in the line. */
                         return true;
 
                 if (sd_device_get_parent(event->dev_parent, &event->dev_parent) < 0) {
@@ -2468,7 +2486,6 @@ static int udev_rule_apply_line_to_event(
 
         UdevRuleLine *line = rules->current_file->current_line;
         UdevRuleLineType mask = LINE_HAS_GOTO | LINE_UPDATE_SOMETHING;
-        UdevRuleToken *token, *next_token;
         bool parents_done = false;
         sd_device_action_t action;
         int r;
@@ -2492,7 +2509,7 @@ static int udev_rule_apply_line_to_event(
 
         DEVICE_TRACE_POINT(rules_apply_line, event->dev, line->rule_file->filename, line->line_number);
 
-        LIST_FOREACH_SAFE(tokens, token, next_token, line->tokens) {
+        LIST_FOREACH(tokens, token, line->tokens) {
                 line->current_token = token;
 
                 if (token_is_for_parents(token)) {
@@ -2525,8 +2542,6 @@ int udev_rules_apply_to_event(
                 int timeout_signal,
                 Hashmap *properties_list) {
 
-        UdevRuleFile *file;
-        UdevRuleLine *next_line;
         int r;
 
         assert(rules);
@@ -2534,7 +2549,8 @@ int udev_rules_apply_to_event(
 
         LIST_FOREACH(rule_files, file, rules->rule_files) {
                 rules->current_file = file;
-                LIST_FOREACH_SAFE(rule_lines, file->current_line, next_line, file->rule_lines) {
+                LIST_FOREACH_WITH_NEXT(rule_lines, line, next_line, file->rule_lines) {
+                        file->current_line = line;
                         r = udev_rule_apply_line_to_event(rules, event, timeout_usec, timeout_signal, properties_list, &next_line);
                         if (r < 0)
                                 return r;
@@ -2544,75 +2560,7 @@ int udev_rules_apply_to_event(
         return 0;
 }
 
-static int apply_static_dev_perms(const char *devnode, uid_t uid, gid_t gid, mode_t mode, char **tags) {
-        char device_node[UDEV_PATH_SIZE], tags_dir[UDEV_PATH_SIZE], tag_symlink[UDEV_PATH_SIZE];
-        _cleanup_free_ char *unescaped_filename = NULL;
-        struct stat stats;
-        char **t;
-        int r;
-
-        assert(devnode);
-
-        if (uid == UID_INVALID && gid == GID_INVALID && mode == MODE_INVALID && !tags)
-                return 0;
-
-        strscpyl(device_node, sizeof(device_node), "/dev/", devnode, NULL);
-        if (stat(device_node, &stats) < 0) {
-                if (errno != ENOENT)
-                        return log_error_errno(errno, "Failed to stat %s: %m", device_node);
-                return 0;
-        }
-
-        if (!S_ISBLK(stats.st_mode) && !S_ISCHR(stats.st_mode)) {
-                log_warning("%s is neither block nor character device, ignoring.", device_node);
-                return 0;
-        }
-
-        if (!strv_isempty(tags)) {
-                unescaped_filename = xescape(devnode, "/.");
-                if (!unescaped_filename)
-                        return log_oom();
-        }
-
-        /* export the tags to a directory as symlinks, allowing otherwise dead nodes to be tagged */
-        STRV_FOREACH(t, tags) {
-                strscpyl(tags_dir, sizeof(tags_dir), "/run/udev/static_node-tags/", *t, "/", NULL);
-                r = mkdir_p(tags_dir, 0755);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to create %s: %m", tags_dir);
-
-                strscpyl(tag_symlink, sizeof(tag_symlink), tags_dir, unescaped_filename, NULL);
-                r = symlink(device_node, tag_symlink);
-                if (r < 0 && errno != EEXIST)
-                        return log_error_errno(errno, "Failed to create symlink %s -> %s: %m",
-                                               tag_symlink, device_node);
-        }
-
-        /* don't touch the permissions if only the tags were set */
-        if (uid == UID_INVALID && gid == GID_INVALID && mode == MODE_INVALID)
-                return 0;
-
-        if (mode == MODE_INVALID)
-                mode = gid_is_valid(gid) ? 0660 : 0600;
-        if (!uid_is_valid(uid))
-                uid = 0;
-        if (!gid_is_valid(gid))
-                gid = 0;
-
-        r = chmod_and_chown(device_node, mode, uid, gid);
-        if (r == -ENOENT)
-                return 0;
-        if (r < 0)
-                return log_error_errno(r, "Failed to chown '%s' %u %u: %m", device_node, uid, gid);
-        else
-                log_debug("chown '%s' %u:%u with mode %#o", device_node, uid, gid, mode);
-
-        (void) utimensat(AT_FDCWD, device_node, NULL, 0);
-        return 0;
-}
-
 static int udev_rule_line_apply_static_dev_perms(UdevRuleLine *rule_line) {
-        UdevRuleToken *token;
         _cleanup_strv_free_ char **tags = NULL;
         uid_t uid = UID_INVALID;
         gid_t gid = GID_INVALID;
@@ -2636,7 +2584,7 @@ static int udev_rule_line_apply_static_dev_perms(UdevRuleLine *rule_line) {
                         if (r < 0)
                                 return log_oom();
                 } else if (token->type == TK_A_OPTIONS_STATIC_NODE) {
-                        r = apply_static_dev_perms(token->value, uid, gid, mode, tags);
+                        r = static_node_apply_permissions(token->value, mode, uid, gid, tags);
                         if (r < 0)
                                 return r;
                 }
@@ -2645,8 +2593,6 @@ static int udev_rule_line_apply_static_dev_perms(UdevRuleLine *rule_line) {
 }
 
 int udev_rules_apply_static_dev_perms(UdevRules *rules) {
-        UdevRuleFile *file;
-        UdevRuleLine *line;
         int r;
 
         assert(rules);

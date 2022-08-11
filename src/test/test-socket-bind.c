@@ -13,7 +13,7 @@
 #include "virt.h"
 
 static int find_netcat_executable(char **ret_path) {
-        char **candidates = STRV_MAKE("ncat", "nc", "netcat"), **c;
+        char **candidates = STRV_MAKE("ncat", "nc", "netcat");
         int r = 0;
 
         STRV_FOREACH(c, candidates) {
@@ -34,9 +34,7 @@ static int test_socket_bind(
                 char **deny_rules) {
         _cleanup_free_ char *exec_start = NULL;
         _cleanup_(unit_freep) Unit *u = NULL;
-        CGroupSocketBindItem *bi;
         CGroupContext *cc = NULL;
-        char **rule;
         int cld_code, r;
 
         assert_se(u = unit_new(m, sizeof(Service)));
@@ -110,10 +108,7 @@ int main(int argc, char *argv[]) {
         test_setup_logging(LOG_DEBUG);
 
         if (detect_container() > 0)
-                return log_tests_skipped("test-bpf fails inside LXC and Docker containers: https://github.com/systemd/systemd/issues/9666");
-
-        if (getuid() != 0)
-                return log_tests_skipped("not running as root");
+                return log_tests_skipped("test-socket-bind fails inside LXC and Docker containers: https://github.com/systemd/systemd/issues/9666");
 
         assert_se(getrlimit(RLIMIT_MEMLOCK, &rl) >= 0);
         rl.rlim_cur = rl.rlim_max = MAX(rl.rlim_max, CAN_MEMLOCK_SIZE);
@@ -127,7 +122,7 @@ int main(int argc, char *argv[]) {
                 return log_tests_skipped("socket-bind is not supported");
 
         if (find_netcat_executable(&netcat_path) != 0)
-                return log_tests_skipped("Can not find netcat executable");
+                return log_tests_skipped("Cannot find netcat executable");
 
         r = enter_cgroup_subroot(NULL);
         if (r == -ENOMEDIUM)
@@ -137,7 +132,7 @@ int main(int argc, char *argv[]) {
         assert_se(set_unit_path(unit_dir) >= 0);
         assert_se(runtime_dir = setup_fake_runtime_dir());
 
-        assert_se(manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_BASIC, &m) >= 0);
+        assert_se(manager_new(LOOKUP_SCOPE_USER, MANAGER_TEST_RUN_BASIC, &m) >= 0);
         assert_se(manager_startup(m, NULL, NULL, NULL) >= 0);
 
         assert_se(test_socket_bind(m, "socket_bind_test.service", netcat_path, "2000", STRV_MAKE("2000"), STRV_MAKE("any")) >= 0);

@@ -16,7 +16,6 @@ static int test_restrict_filesystems(Manager *m, const char *unit_name, const ch
         _cleanup_free_ char *exec_start = NULL;
         _cleanup_(unit_freep) Unit *u = NULL;
         ExecContext *ec = NULL;
-        char **allow_filesystem;
         int cld_code, r;
 
         assert_se(u = unit_new(m, sizeof(Service)));
@@ -69,9 +68,6 @@ int main(int argc, char *argv[]) {
 
         test_setup_logging(LOG_DEBUG);
 
-        if (getuid() != 0)
-                return log_tests_skipped("not running as root");
-
         assert_se(getrlimit(RLIMIT_MEMLOCK, &rl) >= 0);
         rl.rlim_cur = rl.rlim_max = MAX(rl.rlim_max, CAN_MEMLOCK_SIZE);
         (void) setrlimit_closest(RLIMIT_MEMLOCK, &rl);
@@ -79,8 +75,7 @@ int main(int argc, char *argv[]) {
         if (!can_memlock())
                 return log_tests_skipped("Can't use mlock()");
 
-        r = lsm_bpf_supported();
-        if (r <= 0)
+        if (!lsm_bpf_supported(/* initialize = */ true))
                 return log_tests_skipped("LSM BPF hooks are not supported");
 
         r = enter_cgroup_subroot(NULL);
@@ -91,7 +86,7 @@ int main(int argc, char *argv[]) {
         assert_se(set_unit_path(unit_dir) >= 0);
         assert_se(runtime_dir = setup_fake_runtime_dir());
 
-        assert_se(manager_new(UNIT_FILE_SYSTEM, MANAGER_TEST_RUN_BASIC, &m) >= 0);
+        assert_se(manager_new(LOOKUP_SCOPE_SYSTEM, MANAGER_TEST_RUN_BASIC, &m) >= 0);
         assert_se(manager_startup(m, NULL, NULL, NULL) >= 0);
 
         /* We need to enable access to the filesystem where the binary is so we

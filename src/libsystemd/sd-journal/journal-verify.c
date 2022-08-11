@@ -111,21 +111,24 @@ static void flush_progress(void) {
         } while (0)
 
 static int hash_payload(JournalFile *f, Object *o, uint64_t offset, const uint8_t *src, uint64_t size, uint64_t *res_hash) {
-        int compression, r;
+        Compression c;
+        int r;
 
         assert(o);
         assert(src);
         assert(res_hash);
 
-        compression = o->object.flags & OBJECT_COMPRESSION_MASK;
-        if (compression) {
+        c = COMPRESSION_FROM_OBJECT(o);
+        if (c < 0)
+                return -EBADMSG;
+        if (c != COMPRESSION_NONE) {
                 _cleanup_free_ void *b = NULL;
                 size_t b_size;
 
-                r = decompress_blob(compression, src, size, &b, &b_size, 0);
+                r = decompress_blob(c, src, size, &b, &b_size, 0);
                 if (r < 0) {
                         error_errno(offset, r, "%s decompression failed: %m",
-                                    object_compressed_to_string(compression));
+                                    compression_to_string(c));
                         return r;
                 }
 
@@ -145,7 +148,7 @@ static int journal_file_object_verify(JournalFile *f, uint64_t offset, Object *o
          * possible field values. It does not follow any references to
          * other objects. */
 
-        if ((o->object.flags & OBJECT_COMPRESSED_XZ) &&
+        if ((o->object.flags & _OBJECT_COMPRESSED_MASK) != 0 &&
             o->object.type != OBJECT_DATA) {
                 error(offset,
                       "Found compressed object of type %s that isn't of type data, which is not allowed.",
@@ -277,7 +280,7 @@ static int journal_file_object_verify(JournalFile *f, uint64_t offset, Object *o
                         if (le64toh(o->entry.items[i].object_offset) == 0 ||
                             !VALID64(le64toh(o->entry.items[i].object_offset))) {
                                 error(offset,
-                                      "Invalid entry item (%"PRIu64"/%"PRIu64" offset: "OFSfmt,
+                                      "Invalid entry item (%"PRIu64"/%"PRIu64") offset: "OFSfmt,
                                       i, journal_file_entry_n_items(o),
                                       le64toh(o->entry.items[i].object_offset));
                                 return -EBADMSG;
@@ -667,6 +670,11 @@ static int verify_entry(
                         return -EBADMSG;
                 }
 
+                /* Pointer might have moved, reposition */
+                r = journal_file_move_to_object(f, OBJECT_DATA, q, &u);
+                if (r < 0)
+                        return r;
+
                 r = journal_file_move_to_entry_by_offset_for_data(f, u, p, DIRECTION_DOWN, NULL, NULL);
                 if (r < 0)
                         return r;
@@ -812,7 +820,7 @@ int journal_file_verify(
         uint64_t p = 0, last_epoch = 0, last_tag_realtime = 0, last_sealed_realtime = 0;
 
         uint64_t entry_seqnum = 0, entry_monotonic = 0, entry_realtime = 0;
-        sd_id128_t entry_boot_id;
+        sd_id128_t entry_boot_id = {};  /* Unnecessary initialization to appease gcc */
         bool entry_seqnum_set = false, entry_monotonic_set = false, entry_realtime_set = false, found_main_entry_array = false;
         uint64_t n_weird = 0, n_objects = 0, n_entries = 0, n_data = 0, n_fields = 0, n_data_hash_tables = 0, n_field_hash_tables = 0, n_entry_arrays = 0, n_tags = 0;
         usec_t last_usec = 0;
@@ -839,7 +847,7 @@ int journal_file_verify(
 #else
                 return -EOPNOTSUPP;
 #endif
-        } else if (f->seal)
+        } else if (JOURNAL_HEADER_SEALED(f->header))
                 return -ENOKEY;
 
         r = var_tmp_dir(&tmp_dir);
@@ -1127,7 +1135,7 @@ int journal_file_verify(
                         }
 
 #if HAVE_GCRYPT
-                        if (f->seal) {
+                        if (JOURNAL_HEADER_SEALED(f->header)) {
                                 uint64_t q, rt;
 
                                 debug(p, "Checking tag %"PRIu64"...", le64toh(o->tag.seqnum));

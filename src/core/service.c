@@ -434,8 +434,8 @@ static int service_add_fd_store(Service *s, int fd, const char *name, bool do_po
                                  * Use this errno rather than E[NM]FILE to distinguish from
                                  * the case where systemd itself hits the file limit. */
 
-        LIST_FOREACH(fd_store, fs, s->fd_store) {
-                r = same_fd(fs->fd, fd);
+        LIST_FOREACH(fd_store, i, s->fd_store) {
+                r = same_fd(i->fd, fd);
                 if (r < 0)
                         return r;
                 if (r > 0) {
@@ -504,12 +504,10 @@ static int service_add_fd_store_set(Service *s, FDSet *fds, const char *name, bo
 }
 
 static void service_remove_fd_store(Service *s, const char *name) {
-        ServiceFDStore *fs, *n;
-
         assert(s);
         assert(name);
 
-        LIST_FOREACH_SAFE(fd_store, fs, n, s->fd_store) {
+        LIST_FOREACH(fd_store, fs, s->fd_store) {
                 if (!streq(fs->fdname, name))
                         continue;
 
@@ -567,9 +565,7 @@ static int service_verify(Service *s) {
         assert(s);
         assert(UNIT(s)->load_state == UNIT_LOADED);
 
-        for (ServiceExecCommand c = 0; c < _SERVICE_EXEC_COMMAND_MAX; c++) {
-                ExecCommand *command;
-
+        for (ServiceExecCommand c = 0; c < _SERVICE_EXEC_COMMAND_MAX; c++)
                 LIST_FOREACH(command, command, s->exec_command[c]) {
                         if (!path_is_absolute(command->path) && !filename_is_valid(command->path))
                                 return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC),
@@ -581,7 +577,6 @@ static int service_verify(Service *s) {
                                                             "Service has an empty argv in %s=. Refusing.",
                                                             service_exec_command_to_string(c));
                 }
-        }
 
         if (!s->exec_command[SERVICE_EXEC_START] && !s->exec_command[SERVICE_EXEC_STOP] &&
             UNIT(s)->success_action == EMERGENCY_ACTION_NONE)
@@ -605,7 +600,7 @@ static int service_verify(Service *s) {
                 return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has Restart= set to either always or on-success, which isn't allowed for Type=oneshot services. Refusing.");
 
         if (s->type == SERVICE_ONESHOT && !exit_status_set_is_empty(&s->restart_force_status))
-                return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has RestartForceStatus= set, which isn't allowed for Type=oneshot services. Refusing.");
+                return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has RestartForceExitStatus= set, which isn't allowed for Type=oneshot services. Refusing.");
 
         if (s->type == SERVICE_ONESHOT && s->exit_type == SERVICE_EXIT_CGROUP)
                 return log_unit_error_errno(UNIT(s), SYNTHETIC_ERRNO(ENOEXEC), "Service has ExitType=cgroup set, which isn't allowed for Type=oneshot services. Refusing.");
@@ -1334,7 +1329,6 @@ static int service_collect_fds(
         }
 
         if (s->n_fd_store > 0) {
-                ServiceFDStore *fs;
                 size_t n_fds;
                 char **nl;
                 int *t;
@@ -2241,7 +2235,7 @@ static void service_enter_start(Service *s) {
                 /* For simple services we immediately start
                  * the START_POST binaries. */
 
-                service_set_main_pid(s, pid);
+                (void) service_set_main_pid(s, pid);
                 service_enter_start_post(s);
 
         } else  if (s->type == SERVICE_FORKING) {
@@ -2259,7 +2253,7 @@ static void service_enter_start(Service *s) {
                 /* For D-Bus services we know the main pid right away, but wait for the bus name to appear on the
                  * bus. 'notify' and 'exec' services are similar. */
 
-                service_set_main_pid(s, pid);
+                (void) service_set_main_pid(s, pid);
                 service_set_state(s, SERVICE_START);
         } else
                 assert_not_reached();
@@ -2371,7 +2365,8 @@ static void service_enter_restart(Service *s) {
         log_unit_struct(UNIT(s), LOG_INFO,
                         "MESSAGE_ID=" SD_MESSAGE_UNIT_RESTART_SCHEDULED_STR,
                         LOG_UNIT_INVOCATION_ID(UNIT(s)),
-                        LOG_UNIT_MESSAGE(UNIT(s), "Scheduled restart job, restart counter is at %u.", s->n_restarts),
+                        LOG_UNIT_MESSAGE(UNIT(s),
+                                         "Scheduled restart job, restart counter is at %u.", s->n_restarts),
                         "N_RESTARTS=%u", s->n_restarts);
 
         /* Notify clients about changed restart counter */
@@ -2501,7 +2496,7 @@ static void service_run_next_main(Service *s) {
         if (r < 0)
                 goto fail;
 
-        service_set_main_pid(s, pid);
+        (void) service_set_main_pid(s, pid);
 
         return;
 
@@ -2656,7 +2651,6 @@ static int service_serialize_exec_command(Unit *u, FILE *f, ExecCommand *command
         ServiceExecCommand id;
         size_t length = 0;
         unsigned idx;
-        char **arg;
 
         assert(s);
         assert(f);
@@ -2712,7 +2706,6 @@ static int service_serialize_exec_command(Unit *u, FILE *f, ExecCommand *command
 
 static int service_serialize(Unit *u, FILE *f, FDSet *fds) {
         Service *s = SERVICE(u);
-        ServiceFDStore *fs;
         int r;
 
         assert(u);
@@ -3412,10 +3405,13 @@ static void service_notify_cgroup_empty_event(Unit *u) {
         }
 }
 
-static void service_notify_cgroup_oom_event(Unit *u) {
+static void service_notify_cgroup_oom_event(Unit *u, bool managed_oom) {
         Service *s = SERVICE(u);
 
-        log_unit_debug(u, "Process of control group was killed by the OOM killer.");
+        if (managed_oom)
+                log_unit_debug(u, "Process(es) of control group were killed by systemd-oomd.");
+        else
+                log_unit_debug(u, "Process of control group was killed by the OOM killer.");
 
         if (s->oom_policy == OOM_CONTINUE)
                 return;
@@ -4092,7 +4088,6 @@ static void service_notify_message(
         Service *s = SERVICE(u);
         bool notify_dbus = false;
         const char *e;
-        char * const *i;
         int r;
 
         assert(u);
@@ -4128,7 +4123,7 @@ static void service_notify_message(
                                         log_unit_debug(u, "New main PID "PID_FMT" does not belong to service, refusing.", new_main_pid);
                         }
                         if (r > 0) {
-                                service_set_main_pid(s, new_main_pid);
+                                (void) service_set_main_pid(s, new_main_pid);
 
                                 r = unit_watch_pid(UNIT(s), new_main_pid, false);
                                 if (r < 0)
@@ -4344,8 +4339,8 @@ static int bus_name_pid_lookup_callback(sd_bus_message *reply, void *userdata, s
 
         log_unit_debug(u, "D-Bus name %s is now owned by process " PID_FMT, s->bus_name, (pid_t) pid);
 
-        service_set_main_pid(s, pid);
-        unit_watch_pid(UNIT(s), pid, false);
+        (void) service_set_main_pid(s, pid);
+        (void) unit_watch_pid(UNIT(s), pid, false);
         return 1;
 }
 

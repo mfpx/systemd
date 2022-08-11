@@ -9,9 +9,10 @@
 #include "device-util.h"
 #include "devnode-acl.h"
 #include "dirent-util.h"
-#include "escape.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "fs-util.h"
+#include "glyph-util.h"
 #include "set.h"
 #include "string-util.h"
 #include "util.h"
@@ -141,15 +142,11 @@ int devnode_acl_all(const char *seat,
                     bool add, uid_t new_uid) {
 
         _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
-        _cleanup_set_free_free_ Set *nodes = NULL;
+        _cleanup_set_free_ Set *nodes = NULL;
         _cleanup_closedir_ DIR *dir = NULL;
         sd_device *d;
         char *n;
         int r;
-
-        nodes = set_new(&path_hash_ops);
-        if (!nodes)
-                return -ENOMEM;
 
         r = sd_device_enumerator_new(&e);
         if (r < 0)
@@ -185,7 +182,7 @@ int devnode_acl_all(const char *seat,
                         continue;
 
                 log_device_debug(d, "Found udev node %s for seat %s", node, seat);
-                r = set_put_strdup(&nodes, node);
+                r = set_put_strdup_full(&nodes, &path_hash_ops_free, node);
                 if (r < 0)
                         return r;
         }
@@ -195,21 +192,18 @@ int devnode_acl_all(const char *seat,
         dir = opendir("/run/udev/static_node-tags/uaccess");
         if (dir) {
                 FOREACH_DIRENT(de, dir, return -errno) {
-                        _cleanup_free_ char *unescaped_devname = NULL;
-                        ssize_t l;
-
-                        l = cunescape(de->d_name, UNESCAPE_RELAX, &unescaped_devname);
-                        if (l < 0)
-                                return l;
-
-                        n = path_join("/dev", unescaped_devname);
-                        if (!n)
-                                return -ENOMEM;
+                        r = readlinkat_malloc(dirfd(dir), de->d_name, &n);
+                        if (r == -ENOENT)
+                                continue;
+                        if (r < 0) {
+                                log_debug_errno(r,
+                                                "Unable to read symlink '/run/udev/static_node-tags/uaccess/%s', ignoring: %m",
+                                                de->d_name);
+                                continue;
+                        }
 
                         log_debug("Found static node %s for seat %s", n, seat);
-                        r = set_consume(nodes, n);
-                        if (r == -EEXIST)
-                                continue;
+                        r = set_ensure_consume(&nodes, &path_hash_ops_free, n);
                         if (r < 0)
                                 return r;
                 }
@@ -219,8 +213,8 @@ int devnode_acl_all(const char *seat,
         SET_FOREACH(n, nodes) {
                 int k;
 
-                log_debug("Changing ACLs at %s for seat %s (uid "UID_FMT"→"UID_FMT"%s%s)",
-                          n, seat, old_uid, new_uid,
+                log_debug("Changing ACLs at %s for seat %s (uid "UID_FMT"%s"UID_FMT"%s%s)",
+                          n, seat, old_uid, special_glyph(SPECIAL_GLYPH_ARROW_RIGHT), new_uid,
                           del ? " del" : "", add ? " add" : "");
 
                 k = devnode_acl(n, flush, del, old_uid, add, new_uid);

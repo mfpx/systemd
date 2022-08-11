@@ -197,7 +197,6 @@ static int fscrypt_slot_try_many(
                 const uint8_t match_key_descriptor[static FS_KEY_DESCRIPTOR_SIZE],
                 void **ret_decrypted, size_t *ret_decrypted_size) {
 
-        char **i;
         int r;
 
         STRV_FOREACH(i, passwords) {
@@ -410,7 +409,7 @@ static int fscrypt_slot_set(
         const EVP_CIPHER *cc;
         size_t encrypted_size;
 
-        r = genuine_random_bytes(salt, sizeof(salt), RANDOM_BLOCK);
+        r = crypto_random_bytes(salt, sizeof(salt));
         if (r < 0)
                 return log_error_errno(r, "Failed to generate salt: %m");
 
@@ -499,7 +498,6 @@ int home_create_fscrypt(
         _cleanup_free_ char *d = NULL;
         uint32_t nr = 0;
         const char *ip;
-        char **i;
         int r;
 
         assert(h);
@@ -542,7 +540,7 @@ int home_create_fscrypt(
         if (!volume_key)
                 return log_oom();
 
-        r = genuine_random_bytes(volume_key, volume_key_size, RANDOM_BLOCK);
+        r = crypto_random_bytes(volume_key, volume_key_size);
         if (r < 0)
                 return log_error_errno(r, "Failed to acquire volume key: %m");
 
@@ -649,7 +647,6 @@ int home_passwd_fscrypt(
         size_t volume_key_size = 0;
         uint32_t slot = 0;
         const char *xa;
-        char **p;
         int r;
 
         assert(h);

@@ -53,7 +53,7 @@ int udev_ctrl_new_from_fd(UdevCtrl **ret, int fd) {
         assert(ret);
 
         if (fd < 0) {
-                sock = socket(AF_LOCAL, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
+                sock = socket(AF_UNIX, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
                 if (sock < 0)
                         return log_error_errno(errno, "Failed to create socket: %m");
         }
@@ -323,7 +323,7 @@ int udev_ctrl_send(UdevCtrl *uctrl, UdevCtrlMessageType type, const void *data) 
 }
 
 int udev_ctrl_wait(UdevCtrl *uctrl, usec_t timeout) {
-        _cleanup_(sd_event_source_unrefp) sd_event_source *source_io = NULL, *source_timeout = NULL;
+        _cleanup_(sd_event_source_disable_unrefp) sd_event_source *source_io = NULL, *source_timeout = NULL;
         int r;
 
         assert(uctrl);
@@ -356,7 +356,7 @@ int udev_ctrl_wait(UdevCtrl *uctrl, usec_t timeout) {
 
         if (timeout != USEC_INFINITY) {
                 r = sd_event_add_time_relative(
-                                uctrl->event, &source_timeout, clock_boottime_or_monotonic(),
+                                uctrl->event, &source_timeout, CLOCK_BOOTTIME,
                                 timeout,
                                 0, NULL, INT_TO_PTR(-ETIMEDOUT));
                 if (r < 0)

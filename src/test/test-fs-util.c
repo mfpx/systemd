@@ -692,7 +692,6 @@ TEST(rename_noreplace) {
 
         _cleanup_(rm_rf_physical_and_freep) char *z = NULL;
         const char *j = NULL;
-        char **a, **b;
 
         if (arg_test_dir)
                 j = strjoina(arg_test_dir, "/testXXXXXX");
@@ -713,7 +712,7 @@ TEST(rename_noreplace) {
         j = strjoina(z, table[4]);
         (void) symlink("foobar", j);
 
-        STRV_FOREACH(a, (char**) table) {
+        STRV_FOREACH(a, table) {
                 _cleanup_free_ char *x = NULL, *y = NULL;
 
                 x = strjoin(z, *a);
@@ -724,7 +723,7 @@ TEST(rename_noreplace) {
                         continue;
                 }
 
-                STRV_FOREACH(b, (char**) table) {
+                STRV_FOREACH(b, table) {
                         _cleanup_free_ char *w = NULL;
 
                         w = strjoin(z, *b);
@@ -969,6 +968,74 @@ TEST(open_mkdir_at) {
 
         subsubdir_fd = open_mkdir_at(fd, "xxx/yyy", O_CLOEXEC, 0700);
         assert_se(subsubdir_fd >= 0);
+}
+
+TEST(openat_report_new) {
+        _cleanup_free_ char *j = NULL;
+        _cleanup_(rm_rf_physical_and_freep) char *d = NULL;
+        _cleanup_close_ int fd = -1;
+        bool b;
+
+        assert_se(mkdtemp_malloc(NULL, &d) >= 0);
+
+        j = path_join(d, "test");
+        assert_se(j);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(b);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(!b);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(!b);
+
+        assert_se(unlink(j) >= 0);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(b);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(!b);
+
+        assert_se(unlink(j) >= 0);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT, 0666, NULL);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(!b);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(!b);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT|O_EXCL, 0666, &b);
+        assert_se(fd == -EEXIST);
+
+        assert_se(unlink(j) >= 0);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR, 0666, &b);
+        assert_se(fd == -ENOENT);
+
+        fd = openat_report_new(AT_FDCWD, j, O_RDWR|O_CREAT|O_EXCL, 0666, &b);
+        assert_se(fd >= 0);
+        fd = safe_close(fd);
+        assert_se(b);
 }
 
 static int intro(void) {
