@@ -237,6 +237,9 @@ void netdev_drop(NetDev *netdev) {
                 return;
         }
 
+        if (NETDEV_VTABLE(netdev) && NETDEV_VTABLE(netdev)->drop)
+                NETDEV_VTABLE(netdev)->drop(netdev);
+
         netdev->state = NETDEV_STATE_LINGER;
 
         log_netdev_debug(netdev, "netdev removed");
@@ -789,6 +792,7 @@ int netdev_load_one(Manager *manager, const char *filename) {
                         config_item_perf_lookup, network_netdev_gperf_lookup,
                         CONFIG_PARSE_WARN,
                         netdev_raw,
+                        NULL,
                         NULL);
         if (r < 0)
                 return r; /* config_parse_many() logs internally. */
@@ -823,7 +827,7 @@ int netdev_load_one(Manager *manager, const char *filename) {
                         NETDEV_VTABLE(netdev)->sections,
                         config_item_perf_lookup, network_netdev_gperf_lookup,
                         CONFIG_PARSE_WARN,
-                        netdev, NULL);
+                        netdev, NULL, NULL);
         if (r < 0)
                 return r; /* config_parse_many() logs internally. */
 
@@ -898,11 +902,10 @@ int config_parse_netdev_kind(
                 void *data,
                 void *userdata) {
 
-        NetDevKind k, *kind = data;
+        NetDevKind k, *kind = ASSERT_PTR(data);
 
         assert(filename);
         assert(rvalue);
-        assert(data);
 
         k = netdev_kind_from_string(rvalue);
         if (k < 0) {
@@ -934,10 +937,9 @@ int config_parse_netdev_hw_addr(
                 void *data,
                 void *userdata) {
 
-        struct hw_addr_data *hw_addr = data;
+        struct hw_addr_data *hw_addr = ASSERT_PTR(data);
 
         assert(rvalue);
-        assert(data);
 
         if (streq(rvalue, "none")) {
                 *hw_addr = HW_ADDR_NONE;

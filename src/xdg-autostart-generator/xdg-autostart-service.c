@@ -8,15 +8,17 @@
 
 #include "conf-parser.h"
 #include "escape.h"
-#include "unit-name.h"
-#include "path-util.h"
 #include "fd-util.h"
 #include "generator.h"
 #include "log.h"
+#include "nulstr-util.h"
+#include "parse-util.h"
+#include "path-util.h"
 #include "specifier.h"
 #include "string-util.h"
-#include "nulstr-util.h"
 #include "strv.h"
+#include "unit-name.h"
+#include "user-util.h"
 
 XdgAutostartService* xdg_autostart_service_free(XdgAutostartService *s) {
         if (!s)
@@ -73,20 +75,17 @@ static int xdg_config_parse_bool(
                 void *data,
                 void *userdata) {
 
-        bool *b = data;
+        bool *b = ASSERT_PTR(data);
+        int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
-        if (streq(rvalue, "true"))
-                *b = true;
-        else if (streq(rvalue, "false"))
-                *b = false;
-        else
+        r = parse_boolean(rvalue);
+        if (r < 0)
                 return log_syntax(unit, LOG_ERR, filename, line, SYNTHETIC_ERRNO(EINVAL), "Invalid value for boolean: %s", rvalue);
-
+        *b = r;
         return 0;
 }
 
@@ -157,13 +156,12 @@ static int xdg_config_parse_string(
                 void *userdata) {
 
         _cleanup_free_ char *res = NULL;
-        char **out = data;
+        char **out = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         /* XDG does not allow duplicate definitions. */
         if (*out) {
@@ -228,13 +226,12 @@ static int xdg_config_parse_strv(
                 void *data,
                 void *userdata) {
 
-        char ***ret_sv = data;
+        char ***ret_sv = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         /* XDG does not allow duplicate definitions. */
         if (*ret_sv) {
@@ -396,7 +393,7 @@ int xdg_autostart_format_exec_start(
 
         first_arg = true;
         for (i = n = 0; exec_split[i]; i++) {
-                _cleanup_free_ char *c = NULL, *raw = NULL, *percent = NULL;
+                _cleanup_free_ char *c = NULL, *raw = NULL, *percent = NULL, *tilde_expanded = NULL;
                 ssize_t l;
 
                 l = cunescape(exec_split[i], 0, &c);
@@ -445,7 +442,22 @@ int xdg_autostart_format_exec_start(
                 if (!percent)
                         return log_oom();
 
-                free_and_replace(exec_split[n++], percent);
+                /*
+                 * Expand ~ if it comes at the beginning of an argument to form a path
+                 */
+                if (percent[0] == '~' && (isempty(percent + 1) || path_is_absolute(percent + 1))) {
+                        _cleanup_free_ char *home = NULL;
+
+                        r = get_home_dir(&home);
+                        if (r < 0)
+                                return r;
+
+                        tilde_expanded = strjoin(home, &percent[1]);
+                        if (!tilde_expanded)
+                                return log_oom();
+                        free_and_replace(exec_split[n++], tilde_expanded);
+                } else
+                        free_and_replace(exec_split[n++], percent);
         }
         for (; exec_split[n]; n++)
                 exec_split[n] = mfree(exec_split[n]);

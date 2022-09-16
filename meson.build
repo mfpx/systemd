@@ -347,7 +347,6 @@ endif
 # Those generate many false positives, and we do not want to change the code to
 # avoid them.
 basic_disabled_warnings = [
-        '-Wno-format-signedness',
         '-Wno-missing-field-initializers',
         '-Wno-unused-parameter',
 ]
@@ -356,6 +355,7 @@ possible_common_cc_flags = [
         '-Wdate-time',
         '-Wendif-labels',
         '-Werror=format=2',
+        '-Werror=format-signedness',
         '-Werror=implicit-function-declaration',
         '-Werror=incompatible-pointer-types',
         '-Werror=int-conversion',
@@ -1013,6 +1013,16 @@ endif
 
 #####################################################################
 
+libatomic = []
+if not cc.links('''#include <stdint.h>
+                   int main() {
+                     char i;
+                     __atomic_exchange_1(&i, 1, 0);
+                     return 1;
+                   }''',
+                name : 'Atomic builtin requires -latomic')
+        libatomic = cc.find_library('atomic')
+endif
 threads = dependency('threads')
 librt = cc.find_library('rt')
 libm = cc.find_library('m')
@@ -2324,6 +2334,10 @@ exe = executable(
         install : true,
         install_dir : systemgeneratordir)
 
+meson.add_install_script(meson_make_symlink,
+                         systemgeneratordir / 'systemd-fstab-generator',
+                         rootlibexecdir / 'systemd-sysroot-fstab-check')
+
 if want_tests != 'false'
         test('test-fstab-generator',
              test_fstab_generator_sh,
@@ -3173,7 +3187,7 @@ if conf.get('ENABLE_OOMD') == 1
                    systemd_oomd_sources,
                    include_directories : includes,
                    link_with : [libshared],
-                   dependencies : [],
+                   dependencies : [libatomic],
                    install_rpath : rootpkglibdir,
                    install : true,
                    install_dir : rootlibexecdir)
@@ -3664,12 +3678,6 @@ if conf.get('ENABLE_REPART') == 1
                 install : true,
                 install_dir : rootbindir)
         public_programs += exe
-
-        if want_tests != 'false'
-                test('test-repart',
-                     test_repart_sh,
-                     args : [exe.full_path(), udevadm.full_path()])
-        endif
 endif
 
 executable(

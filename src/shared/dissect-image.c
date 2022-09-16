@@ -150,19 +150,8 @@ static void check_partition_flags(
 }
 #endif
 
-static void dissected_partition_done(int fd, DissectedPartition *p) {
-        assert(fd >= 0);
+static void dissected_partition_done(DissectedPartition *p) {
         assert(p);
-
-#if HAVE_BLKID
-        if (p->node && p->partno > 0 && !p->relinquished) {
-                int r;
-
-                r = block_device_remove_partition(fd, p->node, p->partno);
-                if (r < 0)
-                        log_debug_errno(r, "BLKPG_DEL_PARTITION failed, ignoring: %m");
-        }
-#endif
 
         free(p->fstype);
         free(p->node);
@@ -204,11 +193,10 @@ static int make_partition_devname(
 
 int dissect_image(
                 int fd,
+                const char *devname,
+                const char *image_path,
                 const VeritySettings *verity,
                 const MountOptions *mount_options,
-                uint64_t diskseq,
-                uint64_t uevent_seqnum_not_before,
-                usec_t timestamp_not_before,
                 DissectImageFlags flags,
                 DissectedImage **ret) {
 
@@ -218,17 +206,16 @@ int dissect_image(
         bool is_gpt, is_mbr, multiple_generic = false,
                 generic_rw = false,  /* initialize to appease gcc */
                 generic_growfs = false;
-        _cleanup_(sd_device_unrefp) sd_device *d = NULL;
         _cleanup_(dissected_image_unrefp) DissectedImage *m = NULL;
         _cleanup_(blkid_free_probep) blkid_probe b = NULL;
         _cleanup_free_ char *generic_node = NULL;
         sd_id128_t generic_uuid = SD_ID128_NULL;
-        const char *pttype = NULL, *sysname = NULL, *devname = NULL;
+        const char *pttype = NULL;
         blkid_partlist pl;
         int r, generic_nr = -1, n_partitions;
-        struct stat st;
 
         assert(fd >= 0);
+        assert(devname);
         assert(ret);
         assert(!verity || verity->designator < 0 || IN_SET(verity->designator, PARTITION_ROOT, PARTITION_USR));
         assert(!verity || verity->root_hash || verity->root_hash_size == 0);
@@ -272,16 +259,6 @@ int dissect_image(
                 }
         }
 
-        if (fstat(fd, &st) < 0)
-                return -errno;
-
-        if (!S_ISBLK(st.st_mode))
-                return -ENOTBLK;
-
-        r = sd_device_new_from_stat_rdev(&d, &st);
-        if (r < 0)
-                return r;
-
         b = blkid_new_probe();
         if (!b)
                 return -ENOMEM;
@@ -312,43 +289,24 @@ int dissect_image(
                 return -ENOMEM;
 
         *m = (DissectedImage) {
-                .fd = -1,
                 .has_init_system = -1,
         };
 
-        m->fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-        if (m->fd < 0)
-                return -errno;
+        if (image_path) {
+                _cleanup_free_ char *extracted_filename = NULL, *name_stripped = NULL;
 
-        r = sd_device_get_sysname(d, &sysname);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to get device sysname: %m");
-        if (startswith(sysname, "loop")) {
-                _cleanup_free_ char *name_stripped = NULL;
-                const char *full_path;
-
-                r = sd_device_get_sysattr_value(d, "loop/backing_file", &full_path);
-                if (r < 0)
-                        log_debug_errno(r, "Failed to lookup image name via loop device backing file sysattr, ignoring: %m");
-                else {
-                        r = raw_strip_suffixes(basename(full_path), &name_stripped);
-                        if (r < 0)
-                                return r;
-                }
-
-                free_and_replace(m->image_name, name_stripped);
-        } else {
-                r = free_and_strdup(&m->image_name, sysname);
+                r = path_extract_filename(image_path, &extracted_filename);
                 if (r < 0)
                         return r;
-        }
-        r = sd_device_get_devname(d, &devname);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to get device devname: %m");
 
-        if (!image_name_is_valid(m->image_name)) {
-                log_debug("Image name %s is not valid, ignoring", strempty(m->image_name));
-                m->image_name = mfree(m->image_name);
+                r = raw_strip_suffixes(extracted_filename, &name_stripped);
+                if (r < 0)
+                        return r;
+
+                if (!image_name_is_valid(name_stripped))
+                        log_debug("Image name %s is not valid, ignoring.", strna(name_stripped));
+                else
+                        m->image_name = TAKE_PTR(name_stripped);
         }
 
         if ((!(flags & DISSECT_IMAGE_GPT_ONLY) &&
@@ -765,7 +723,7 @@ int dissect_image(
                         }
 
                         if (designator != _PARTITION_DESIGNATOR_INVALID) {
-                                _cleanup_free_ char *t = NULL, *n = NULL, *o = NULL, *l = NULL;
+                                _cleanup_free_ char *t = NULL, *o = NULL, *l = NULL;
                                 const char *options = NULL;
 
                                 if (m->partitions[designator].found) {
@@ -775,14 +733,10 @@ int dissect_image(
                                          * scheme in OS images. */
 
                                         if (!PARTITION_DESIGNATOR_VERSIONED(designator) ||
-                                            strverscmp_improved(m->partitions[designator].label, label) >= 0) {
-                                                r = block_device_remove_partition(fd, node, nr);
-                                                if (r < 0)
-                                                        log_debug_errno(r, "BLKPG_DEL_PARTITION failed, ignoring: %m");
+                                            strverscmp_improved(m->partitions[designator].label, label) >= 0)
                                                 continue;
-                                        }
 
-                                        dissected_partition_done(fd, m->partitions + designator);
+                                        dissected_partition_done(m->partitions + designator);
                                 }
 
                                 if (fstype) {
@@ -790,10 +744,6 @@ int dissect_image(
                                         if (!t)
                                                 return -ENOMEM;
                                 }
-
-                                n = strdup(node);
-                                if (!n)
-                                        return -ENOMEM;
 
                                 if (label) {
                                         l = strdup(label);
@@ -814,7 +764,7 @@ int dissect_image(
                                         .rw = rw,
                                         .growfs = growfs,
                                         .architecture = architecture,
-                                        .node = TAKE_PTR(n),
+                                        .node = TAKE_PTR(node),
                                         .fstype = TAKE_PTR(t),
                                         .label = TAKE_PTR(l),
                                         .uuid = id,
@@ -847,25 +797,17 @@ int dissect_image(
                                 break;
 
                         case 0xEA: { /* Boot Loader Spec extended $BOOT partition */
-                                _cleanup_free_ char *n = NULL, *o = NULL;
+                                _cleanup_free_ char *o = NULL;
                                 sd_id128_t id = SD_ID128_NULL;
                                 const char *sid, *options = NULL;
 
                                 /* First one wins */
-                                if (m->partitions[PARTITION_XBOOTLDR].found) {
-                                        r = block_device_remove_partition(fd, node, nr);
-                                        if (r < 0)
-                                                log_debug_errno(r, "BLKPG_DEL_PARTITION failed, ignoring: %m");
+                                if (m->partitions[PARTITION_XBOOTLDR].found)
                                         continue;
-                                }
 
                                 sid = blkid_partition_get_uuid(pp);
                                 if (sid)
                                         (void) sd_id128_from_string(sid, &id);
-
-                                n = strdup(node);
-                                if (!n)
-                                        return -ENOMEM;
 
                                 options = mount_options_from_designator(mount_options, PARTITION_XBOOTLDR);
                                 if (options) {
@@ -880,7 +822,7 @@ int dissect_image(
                                         .rw = true,
                                         .growfs = false,
                                         .architecture = _ARCHITECTURE_INVALID,
-                                        .node = TAKE_PTR(n),
+                                        .node = TAKE_PTR(node),
                                         .uuid = id,
                                         .mount_options = TAKE_PTR(o),
                                         .offset = (uint64_t) start * 512,
@@ -1171,9 +1113,8 @@ DissectedImage* dissected_image_unref(DissectedImage *m) {
                 return NULL;
 
         for (PartitionDesignator i = 0; i < _PARTITION_DESIGNATOR_MAX; i++)
-                dissected_partition_done(m->fd, m->partitions + i);
+                dissected_partition_done(m->partitions + i);
 
-        safe_close(m->fd);
         free(m->image_name);
         free(m->hostname);
         strv_free(m->machine_info);
@@ -1181,16 +1122,6 @@ DissectedImage* dissected_image_unref(DissectedImage *m) {
         strv_free(m->extension_release);
 
         return mfree(m);
-}
-
-void dissected_image_relinquish(DissectedImage *m) {
-        assert(m);
-
-        /* Partitions are automatically removed when the underlying loop device is closed. We just need to
-         * make sure we don't try to remove the partitions early. */
-
-        for (PartitionDesignator i = 0; i < _PARTITION_DESIGNATOR_MAX; i++)
-                m->partitions[i].relinquished = true;
 }
 
 static int is_loop_device(const char *path) {
@@ -1415,7 +1346,7 @@ static int mount_partition(
                 (void) fs_grow(node, p);
 
         if (remap_uid_gid) {
-                r = remount_idmap(p, uid_shift, uid_range, REMOUNT_IDMAP_HOST_ROOT);
+                r = remount_idmap(p, uid_shift, uid_range, UID_INVALID, REMOUNT_IDMAPPING_HOST_ROOT);
                 if (r < 0)
                         return r;
         }
@@ -2055,9 +1986,28 @@ static int verity_partition(
                         if (!IN_SET(r, 0, -ENODEV, -ENOENT, -EBUSY))
                                 return log_debug_errno(r, "Checking whether existing verity device %s can be reused failed: %m", node);
                         if (r == 0) {
+                                usec_t timeout_usec = 100 * USEC_PER_MSEC;
+                                const char *e;
+
+                                /* On slower machines, like non-KVM vm, setting up device may take a long time.
+                                 * Let's make the timeout configurable. */
+                                e = getenv("SYSTEMD_DISSECT_VERITY_TIMEOUT_SEC");
+                                if (e) {
+                                        usec_t t;
+
+                                        r = parse_sec(e, &t);
+                                        if (r < 0)
+                                                log_debug_errno(r,
+                                                                "Failed to parse timeout specified in $SYSTEMD_DISSECT_VERITY_TIMEOUT_SEC, "
+                                                                "using the default timeout (%s).",
+                                                                FORMAT_TIMESPAN(timeout_usec, USEC_PER_MSEC));
+                                        else
+                                                timeout_usec = t;
+                                }
+
                                 /* devmapper might say that the device exists, but the devlink might not yet have been
                                  * created. Check and wait for the udev event in that case. */
-                                r = device_wait_for_devlink(node, "block", usec_add(now(CLOCK_MONOTONIC), 100 * USEC_PER_MSEC), NULL);
+                                r = device_wait_for_devlink(node, "block", timeout_usec, NULL);
                                 /* Fallback to activation with a unique device if it's taking too long */
                                 if (r == -ETIMEDOUT)
                                         break;
@@ -2812,29 +2762,22 @@ finish:
         return r;
 }
 
-int dissect_image_and_warn(
-                int fd,
-                const char *name,
+int dissect_loop_device_and_warn(
+                const LoopDevice *loop,
                 const VeritySettings *verity,
                 const MountOptions *mount_options,
-                uint64_t diskseq,
-                uint64_t uevent_seqnum_not_before,
-                usec_t timestamp_not_before,
                 DissectImageFlags flags,
                 DissectedImage **ret) {
 
-        _cleanup_free_ char *buffer = NULL;
+        const char *name;
         int r;
 
-        if (!name) {
-                r = fd_get_path(fd, &buffer);
-                if (r < 0)
-                        return r;
+        assert(loop);
+        assert(loop->fd >= 0);
 
-                name = buffer;
-        }
+        name = ASSERT_PTR(loop->backing_file ?: loop->node);
 
-        r = dissect_image(fd, verity, mount_options, diskseq, uevent_seqnum_not_before, timestamp_not_before, flags, ret);
+        r = dissect_loop_device(loop, verity, mount_options, flags, ret);
         switch (r) {
 
         case -EOPNOTSUPP:
@@ -2982,16 +2925,12 @@ int mount_image_privately_interactively(
                         image,
                         FLAGS_SET(flags, DISSECT_IMAGE_DEVICE_READ_ONLY) ? O_RDONLY : O_RDWR,
                         FLAGS_SET(flags, DISSECT_IMAGE_NO_PARTITION_TABLE) ? 0 : LO_FLAGS_PARTSCAN,
+                        LOCK_SH,
                         &d);
         if (r < 0)
                 return log_error_errno(r, "Failed to set up loopback device for %s: %m", image);
 
-        /* Make sure udevd doesn't issue BLKRRPART behind our backs */
-        r = loop_device_flock(d, LOCK_SH);
-        if (r < 0)
-                return r;
-
-        r = dissect_image_and_warn(d->fd, image, &verity, NULL, d->diskseq, d->uevent_seqnum_not_before, d->timestamp_not_before, flags, &dissected_image);
+        r = dissect_loop_device_and_warn(d, &verity, NULL, flags, &dissected_image);
         if (r < 0)
                 return r;
 
@@ -3027,7 +2966,6 @@ int mount_image_privately_interactively(
                         return log_error_errno(r, "Failed to relinquish DM devices: %m");
         }
 
-        dissected_image_relinquish(dissected_image);
         loop_device_relinquish(d);
 
         *ret_directory = TAKE_PTR(created_dir);
@@ -3098,32 +3036,23 @@ int verity_dissect_and_mount(
                         src_fd >= 0 ? FORMAT_PROC_FD_PATH(src_fd) : src,
                         -1,
                         verity.data_path ? 0 : LO_FLAGS_PARTSCAN,
+                        LOCK_SH,
                         &loop_device);
         if (r < 0)
                 return log_debug_errno(r, "Failed to create loop device for image: %m");
 
-        r = loop_device_flock(loop_device, LOCK_SH);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to lock loop device: %m");
-
-        r = dissect_image(
-                        loop_device->fd,
+        r = dissect_loop_device(
+                        loop_device,
                         &verity,
                         options,
-                        loop_device->diskseq,
-                        loop_device->uevent_seqnum_not_before,
-                        loop_device->timestamp_not_before,
                         dissect_image_flags,
                         &dissected_image);
         /* No partition table? Might be a single-filesystem image, try again */
         if (!verity.data_path && r == -ENOPKG)
-                 r = dissect_image(
-                                loop_device->fd,
+                 r = dissect_loop_device(
+                                loop_device,
                                 &verity,
                                 options,
-                                loop_device->diskseq,
-                                loop_device->uevent_seqnum_not_before,
-                                loop_device->timestamp_not_before,
                                 dissect_image_flags | DISSECT_IMAGE_NO_PARTITION_TABLE,
                                 &dissected_image);
         if (r < 0)
@@ -3190,7 +3119,6 @@ int verity_dissect_and_mount(
                         return log_debug_errno(r, "Failed to relinquish decrypted image: %m");
         }
 
-        dissected_image_relinquish(dissected_image);
         loop_device_relinquish(loop_device);
 
         return 0;

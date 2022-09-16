@@ -61,6 +61,7 @@ char* path_make_absolute(const char *p, const char *prefix);
 int safe_getcwd(char **ret);
 int path_make_absolute_cwd(const char *p, char **ret);
 int path_make_relative(const char *from, const char *to, char **ret);
+int path_make_relative_parent(const char *from_child, const char *to, char **ret);
 char *path_startswith_full(const char *path, const char *prefix, bool accept_dot_dot) _pure_;
 static inline char* path_startswith(const char *path, const char *prefix) {
         return path_startswith_full(path, prefix, true);
@@ -151,7 +152,6 @@ int fsck_exists(const char *fstype);
                 _ret;                                                   \
         })
 
-char* dirname_malloc(const char *path);
 int path_find_first_component(const char **p, bool accept_dot_dot, const char **ret);
 int path_find_last_component(const char *path, bool accept_dot_dot, const char **next, const char **ret);
 const char *last_path_component(const char *path);
@@ -196,3 +196,5 @@ static inline const char *empty_to_root(const char *path) {
 
 bool path_strv_contains(char **l, const char *path);
 bool prefixed_path_strv_contains(char **l, const char *path);
+
+int path_glob_can_match(const char *pattern, const char *prefix, char **ret);

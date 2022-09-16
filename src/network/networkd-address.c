@@ -12,6 +12,7 @@
 #include "networkd-dhcp-server.h"
 #include "networkd-ipv4acd.h"
 #include "networkd-manager.h"
+#include "networkd-netlabel.h"
 #include "networkd-network.h"
 #include "networkd-queue.h"
 #include "networkd-route-util.h"
@@ -137,19 +138,20 @@ Address *address_free(Address *address) {
 
         config_section_free(address->section);
         free(address->label);
+        free(address->netlabel);
         return mfree(address);
 }
 
 bool address_is_ready(const Address *a) {
         assert(a);
 
+        if (!ipv4acd_bound(a))
+                return false;
+
         if (FLAGS_SET(a->flags, IFA_F_TENTATIVE))
                 return false;
 
         if (FLAGS_SET(a->state, NETWORK_CONFIG_STATE_REMOVING))
-                return false;
-
-        if (FLAGS_SET(a->state, NETWORK_CONFIG_STATE_PROBING))
                 return false;
 
         if (!FLAGS_SET(a->state, NETWORK_CONFIG_STATE_CONFIGURED))
@@ -392,12 +394,17 @@ int address_dup(const Address *src, Address **ret) {
         dest->link = NULL;
         dest->label = NULL;
         dest->acd = NULL;
+        dest->netlabel = NULL;
 
         if (src->family == AF_INET) {
                 r = free_and_strdup(&dest->label, src->label);
                 if (r < 0)
                         return r;
         }
+
+        r = free_and_strdup(&dest->netlabel, src->netlabel);
+        if (r < 0)
+                return r;
 
         *ret = TAKE_PTR(dest);
         return 0;
@@ -485,6 +492,8 @@ static int address_update(Address *address) {
         if (r < 0)
                 return log_link_warning_errno(link, r, "Could not enable IP masquerading: %m");
 
+        address_add_netlabel(address);
+
         if (address_is_ready(address) && address->callback) {
                 r = address->callback(address);
                 if (r < 0)
@@ -510,6 +519,8 @@ static int address_drop(Address *address) {
         r = address_set_masquerade(address, false);
         if (r < 0)
                 log_link_warning_errno(link, r, "Failed to disable IP masquerading, ignoring: %m");
+
+        address_del_netlabel(address);
 
         if (address->state == 0)
                 address_free(address);
@@ -809,7 +820,7 @@ int link_drop_ipv6ll_addresses(Link *link) {
         if (r < 0)
                 return r;
 
-        r = sd_netlink_message_request_dump(req, true);
+        r = sd_netlink_message_set_request_dump(req, true);
         if (r < 0)
                 return r;
 
@@ -1089,7 +1100,7 @@ static bool address_is_ready_to_configure(Link *link, const Address *address) {
         if (!link_is_ready_to_configure(link, false))
                 return false;
 
-        if (FLAGS_SET(address->state, NETWORK_CONFIG_STATE_PROBING))
+        if (!ipv4acd_bound(address))
                 return false;
 
         /* Refuse adding more than the limit */
@@ -1190,6 +1201,7 @@ int link_request_address(
         } else {
                 existing->source = address->source;
                 existing->provider = address->provider;
+                existing->duplicate_address_detection = address->duplicate_address_detection;
                 existing->lifetime_valid_usec = address->lifetime_valid_usec;
                 existing->lifetime_preferred_usec = address->lifetime_preferred_usec;
                 if (consume_object)
@@ -1935,6 +1947,47 @@ int config_parse_duplicate_address_detection(
                 return 0;
         }
         n->duplicate_address_detection = a;
+
+        TAKE_PTR(n);
+        return 0;
+}
+
+int config_parse_address_netlabel(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Network *network = userdata;
+        _cleanup_(address_free_or_set_invalidp) Address *n = NULL;
+        int r;
+
+        assert(filename);
+        assert(section);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+        assert(network);
+
+        r = address_new_static(network, filename, section_line, &n);
+        if (r == -ENOMEM)
+                return log_oom();
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to allocate new address, ignoring assignment: %m");
+                return 0;
+        }
+
+        r = config_parse_string(unit, filename, line, section, section_line,
+                                lvalue, CONFIG_PARSE_STRING_SAFE, rvalue, &n->netlabel, network);
+        if (r < 0)
+                return r;
 
         TAKE_PTR(n);
         return 0;

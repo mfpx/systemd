@@ -31,7 +31,6 @@ struct DissectedPartition {
         char *mount_options;
         uint64_t size;
         uint64_t offset;
-        bool relinquished;
 };
 
 typedef enum PartitionDesignator {
@@ -204,8 +203,6 @@ typedef enum DissectImageFlags {
 } DissectImageFlags;
 
 struct DissectedImage {
-        int fd;                    /* Backing fd */
-
         bool encrypted:1;
         bool has_verity:1;         /* verity available in image, but not necessarily used */
         bool has_verity_sig:1;     /* pkcs#7 signature embedded in image */
@@ -256,12 +253,22 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(MountOptions*, mount_options_free_all);
 const char* mount_options_from_designator(const MountOptions *options, PartitionDesignator designator);
 
 int probe_filesystem(const char *node, char **ret_fstype);
-int dissect_image(int fd, const VeritySettings *verity, const MountOptions *mount_options, uint64_t diskseq, uint64_t uevent_seqnum_not_before, usec_t timestamp_not_before, DissectImageFlags flags, DissectedImage **ret);
-int dissect_image_and_warn(int fd, const char *name, const VeritySettings *verity, const MountOptions *mount_options, uint64_t diskseq, uint64_t uevent_seqnum_not_before, usec_t timestamp_not_before, DissectImageFlags flags, DissectedImage **ret);
+int dissect_image(
+                int fd,
+                const char *devname,
+                const char *image_path,
+                const VeritySettings *verity,
+                const MountOptions *mount_options,
+                DissectImageFlags flags,
+                DissectedImage **ret);
+static inline int dissect_loop_device(const LoopDevice *loop, const VeritySettings *verity, const MountOptions *mount_options, DissectImageFlags flags, DissectedImage **ret) {
+        assert(loop);
+        return dissect_image(loop->fd, loop->node, loop->backing_file ?: loop->node, verity, mount_options, flags, ret);
+}
+int dissect_loop_device_and_warn(const LoopDevice *loop, const VeritySettings *verity, const MountOptions *mount_options, DissectImageFlags flags, DissectedImage **ret);
 
 DissectedImage* dissected_image_unref(DissectedImage *m);
 DEFINE_TRIVIAL_CLEANUP_FUNC(DissectedImage*, dissected_image_unref);
-void dissected_image_relinquish(DissectedImage *m);
 
 int dissected_image_decrypt(DissectedImage *m, const char *passphrase, const VeritySettings *verity, DissectImageFlags flags, DecryptedImage **ret);
 int dissected_image_decrypt_interactively(DissectedImage *m, const char *passphrase, const VeritySettings *verity, DissectImageFlags flags, DecryptedImage **ret);

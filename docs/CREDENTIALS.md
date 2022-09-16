@@ -128,7 +128,7 @@ Associated service shell script `/usr/bin/myservice.sh`:
 ```sh
 #!/bin/sh
 
-sha256sum $CREDENTIAL_PATH/foobar
+sha256sum $CREDENTIALS_DIRECTORY/foobar
 sha256sum $FOOBARPATH
 
 ```
@@ -145,7 +145,7 @@ In an ideal world, well-behaved service code would directly support credentials
 passed this way, i.e. look for `$CREDENTIALS_DIRECTORY` and load the credential
 data it needs from there. For daemons that do not support this but allow
 passing credentials via a path supplied over the command line use
-`${CREDENTIAL_PATH}` in the `ExecStart=` command line to reference the
+`${CREDENTIALS_DIRECTORY}` in the `ExecStart=` command line to reference the
 credentials directory. For daemons that allow passing credentials via a path
 supplied as environment variable, use the `%d` specifier in the `Environment=`
 setting to build valid paths to specific credentials.
@@ -266,7 +266,8 @@ services where they are ultimately consumed.
    three of these specific switches would set credential `foo` to `bar`.)
    Passing credentials via the SMBIOS mechanism is typically preferable over
    `fw_cfg` since it is faster and less specific to the chosen VMM
-   implementation.
+   implementation. Moreover, `fw_cfg` has a 55 character limitation
+   on names passed that way. So some settings may not fit.
 
 3. Credentials can also be passed into a system via the kernel command line,
    via the `systemd.set-credential=` kernel command line option. Note though
@@ -341,6 +342,10 @@ Various services shipped with `systemd` consume credentials for tweaking behavio
   `firstboot.keymap`, `firstboot.timezone`, that configure locale, keymap or
   timezone settings in case the data is not yet set in `/etc/`.
 
+* [`tmpfiles.d(5)`](https://www.freedesktop.org/software/systemd/man/tmpfiles.d.html)
+  will look for the credentials `tmpfiles.extra` with arbitrary tmpfiles.d lines.
+  Can be encoded in base64 to allow easily passing it on the command line.
+
 In future more services are likely to gain support for consuming credentials.
 
 Example:
@@ -376,6 +381,23 @@ qemu-system-x86_64 \
         -smbios type=11,value=io.systemd.credential:firstboot.locale=C.UTF-8
 ```
 
+This boots the specified disk image via qemu, provisioning public key SSH access
+for the root user from the caller's key:
+
+```
+qemu-system-x86_64 \
+        -machine type=q35,accel=kvm,smm=on \
+        -smp 2 \
+        -m 1G \
+        -cpu host \
+        -nographic \
+        -nodefaults \
+        -serial mon:stdio \
+        -drive if=none,id=hd,file=test.raw,format=raw \
+        -device virtio-scsi-pci,id=scsi \
+        -device scsi-hd,drive=hd,bootindex=1 \
+        -smbios type=11,value=io.systemd.credential.binary:tmpfiles.extra=$(echo "f~ /root/.ssh/authorized_keys 700 root root - $(ssh-add -L | base64 -w 0)" | base64 -w 0)
+```
 ## Relevant Paths
 
 From *service* perspective the runtime path to find loaded credentials in is

@@ -272,7 +272,7 @@ static void service_extend_event_source_timeout(Service *s, sd_event_source *sou
         if (r < 0) {
                 const char *desc;
                 (void) sd_event_source_get_description(s->timer_event_source, &desc);
-                log_unit_warning_errno(UNIT(s), r, "Failed to set timeout time for even source '%s', ignoring %m", strna(desc));
+                log_unit_warning_errno(UNIT(s), r, "Failed to set timeout time for event source '%s', ignoring %m", strna(desc));
         }
 }
 
@@ -406,10 +406,9 @@ static void service_done(Unit *u) {
 }
 
 static int on_fd_store_io(sd_event_source *e, int fd, uint32_t revents, void *userdata) {
-        ServiceFDStore *fs = userdata;
+        ServiceFDStore *fs = ASSERT_PTR(userdata);
 
         assert(e);
-        assert(fs);
 
         /* If we get either EPOLLHUP or EPOLLERR, it's time to remove this entry from the fd store */
         log_unit_debug(UNIT(fs->service),
@@ -496,7 +495,7 @@ static int service_add_fd_store_set(Service *s, FDSet *fds, const char *name, bo
                 if (r < 0)
                         return log_unit_error_errno(UNIT(s), r, "Failed to add fd to store: %m");
                 if (r > 0)
-                        log_unit_debug(UNIT(s), "Added fd %u (%s) to fd store.", fd, strna(name));
+                        log_unit_debug(UNIT(s), "Added fd %i (%s) to fd store.", fd, strna(name));
                 fd = -1;
         }
 
@@ -1639,6 +1638,16 @@ static int service_spawn_internal(
                         if (asprintf(our_env + n_env++, "%sUNIT=%s", monitor_prefix, UNIT(env_source)->id) < 0)
                                 return -ENOMEM;
                 }
+        }
+
+        if (UNIT(s)->activation_details) {
+                r = activation_details_append_env(UNIT(s)->activation_details, &our_env);
+                if (r < 0)
+                        return r;
+                /* The number of env vars added here can vary, rather than keeping the allocation block in
+                 * sync manually, these functions simply use the strv methods to append to it, so we need
+                 * to update n_env when we are done in case of future usage. */
+                n_env += r;
         }
 
         r = unit_set_exec_params(UNIT(s), &exec_params);
@@ -3241,10 +3250,8 @@ static int service_demand_pid_file(Service *s) {
 }
 
 static int service_dispatch_inotify_io(sd_event_source *source, int fd, uint32_t events, void *userdata) {
-        PathSpec *p = userdata;
+        PathSpec *p = ASSERT_PTR(userdata);
         Service *s;
-
-        assert(p);
 
         s = SERVICE(p->unit);
 
@@ -4305,13 +4312,12 @@ static bool pick_up_pid_from_bus_name(Service *s) {
 
 static int bus_name_pid_lookup_callback(sd_bus_message *reply, void *userdata, sd_bus_error *ret_error) {
         const sd_bus_error *e;
-        Unit *u = userdata;
+        Unit *u = ASSERT_PTR(userdata);
         uint32_t pid;
         Service *s;
         int r;
 
         assert(reply);
-        assert(u);
 
         s = SERVICE(u);
         s->bus_name_pid_lookup_slot = sd_bus_slot_unref(s->bus_name_pid_lookup_slot);

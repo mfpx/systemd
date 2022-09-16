@@ -43,7 +43,7 @@ static BusPrintPropertyFlags arg_print_flags = 0;
 static bool arg_full = false;
 static PagerFlags arg_pager_flags = 0;
 static bool arg_legend = true;
-static const char *arg_kill_who = NULL;
+static const char *arg_kill_whom = NULL;
 static int arg_signal = SIGTERM;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
 static char *arg_host = NULL;
@@ -117,10 +117,9 @@ static int list_sessions(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_(table_unrefp) Table *table = NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         pager_open(arg_pager_flags);
@@ -191,10 +190,9 @@ static int list_users(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_(table_unrefp) Table *table = NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         pager_open(arg_pager_flags);
@@ -254,10 +252,9 @@ static int list_seats(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_(table_unrefp) Table *table = NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         pager_open(arg_pager_flags);
@@ -478,9 +475,9 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
         printf("%s - ", strna(i.id));
 
         if (i.name)
-                printf("%s (%"PRIu32")\n", i.name, i.uid);
+                printf("%s (" UID_FMT ")\n", i.name, i.uid);
         else
-                printf("%"PRIu32"\n", i.uid);
+                printf(UID_FMT "\n", i.uid);
 
         if (timestamp_is_set(i.timestamp.realtime))
                 printf("\t   Since: %s; %s\n",
@@ -490,7 +487,7 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
         if (i.leader > 0) {
                 _cleanup_free_ char *t = NULL;
 
-                printf("\t  Leader: %"PRIu32, i.leader);
+                printf("\t  Leader: " PID_FMT, i.leader);
 
                 (void) get_process_comm(i.leader, &t);
                 if (t)
@@ -811,12 +808,11 @@ static int show_properties(sd_bus *bus, const char *path, bool *new_line) {
 
 static int show_session(int argc, char *argv[], void *userdata) {
         bool properties, new_line = false;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_free_ char *path = NULL;
 
-        assert(bus);
         assert(argv);
 
         properties = !strstr(argv[0], "status");
@@ -850,10 +846,9 @@ static int show_session(int argc, char *argv[], void *userdata) {
 
 static int show_user(int argc, char *argv[], void *userdata) {
         bool properties, new_line = false;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         properties = !strstr(argv[0], "status");
@@ -907,10 +902,9 @@ static int show_user(int argc, char *argv[], void *userdata) {
 
 static int show_seat(int argc, char *argv[], void *userdata) {
         bool properties, new_line = false;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         properties = !strstr(argv[0], "status");
@@ -952,10 +946,9 @@ static int show_seat(int argc, char *argv[], void *userdata) {
 
 static int activate(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -997,16 +990,15 @@ static int activate(int argc, char *argv[], void *userdata) {
 
 static int kill_session(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
 
-        if (!arg_kill_who)
-                arg_kill_who = "all";
+        if (!arg_kill_whom)
+                arg_kill_whom = "all";
 
         for (int i = 1; i < argc; i++) {
 
@@ -1015,7 +1007,7 @@ static int kill_session(int argc, char *argv[], void *userdata) {
                                 bus_login_mgr,
                                 "KillSession",
                                 &error, NULL,
-                                "ssi", argv[i], arg_kill_who, arg_signal);
+                                "ssi", argv[i], arg_kill_whom, arg_signal);
                 if (r < 0)
                         return log_error_errno(r, "Could not kill session: %s", bus_error_message(&error, r));
         }
@@ -1025,12 +1017,11 @@ static int kill_session(int argc, char *argv[], void *userdata) {
 
 static int enable_linger(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         char* short_argv[3];
         bool b;
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -1074,10 +1065,9 @@ static int enable_linger(int argc, char *argv[], void *userdata) {
 
 static int terminate_user(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -1105,16 +1095,15 @@ static int terminate_user(int argc, char *argv[], void *userdata) {
 
 static int kill_user(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
 
-        if (!arg_kill_who)
-                arg_kill_who = "all";
+        if (!arg_kill_whom)
+                arg_kill_whom = "all";
 
         for (int i = 1; i < argc; i++) {
                 uid_t uid;
@@ -1144,10 +1133,9 @@ static int kill_user(int argc, char *argv[], void *userdata) {
 
 static int attach(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -1169,10 +1157,9 @@ static int attach(int argc, char *argv[], void *userdata) {
 
 static int flush_devices(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -1186,10 +1173,9 @@ static int flush_devices(int argc, char *argv[], void *userdata) {
 
 static int lock_sessions(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -1208,10 +1194,9 @@ static int lock_sessions(int argc, char *argv[], void *userdata) {
 
 static int terminate_seat(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus *bus = userdata;
+        sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
-        assert(bus);
         assert(argv);
 
         polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
@@ -1277,7 +1262,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "  -a --all                 Show all properties, including empty ones\n"
                "     --value               When showing properties, only print the value\n"
                "  -l --full                Do not ellipsize output\n"
-               "     --kill-who=WHO        Who to send signal to\n"
+               "     --kill-whom=WHOM      Whom to send signal to\n"
                "  -s --signal=SIGNAL       Which signal to send\n"
                "  -n --lines=INTEGER       Number of journal entries to show\n"
                "  -o --output=STRING       Change journal output mode (short, short-precise,\n"
@@ -1300,7 +1285,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_VALUE,
                 ARG_NO_PAGER,
                 ARG_NO_LEGEND,
-                ARG_KILL_WHO,
+                ARG_KILL_WHOM,
                 ARG_NO_ASK_PASSWORD,
         };
 
@@ -1313,7 +1298,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "full",            no_argument,       NULL, 'l'                 },
                 { "no-pager",        no_argument,       NULL, ARG_NO_PAGER        },
                 { "no-legend",       no_argument,       NULL, ARG_NO_LEGEND       },
-                { "kill-who",        required_argument, NULL, ARG_KILL_WHO        },
+                { "kill-whom",       required_argument, NULL, ARG_KILL_WHOM       },
                 { "signal",          required_argument, NULL, 's'                 },
                 { "host",            required_argument, NULL, 'H'                 },
                 { "machine",         required_argument, NULL, 'M'                 },
@@ -1399,8 +1384,8 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_ask_password = false;
                         break;
 
-                case ARG_KILL_WHO:
-                        arg_kill_who = optarg;
+                case ARG_KILL_WHOM:
+                        arg_kill_whom = optarg;
                         break;
 
                 case 's':

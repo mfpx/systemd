@@ -333,7 +333,7 @@ static int portable_extract_by_path(
 
         assert(path);
 
-        r = loop_device_make_by_path(path, O_RDONLY, LO_FLAGS_PARTSCAN, &d);
+        r = loop_device_make_by_path(path, O_RDONLY, LO_FLAGS_PARTSCAN, LOCK_SH, &d);
         if (r == -EISDIR) {
                 _cleanup_free_ char *image_name = NULL;
 
@@ -359,22 +359,15 @@ static int portable_extract_by_path(
                 /* We now have a loopback block device, let's fork off a child in its own mount namespace, mount it
                  * there, and extract the metadata we need. The metadata is sent from the child back to us. */
 
-                r = loop_device_flock(d, LOCK_SH);
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to acquire lock on loopback block device: %m");
-
                 BLOCK_SIGNALS(SIGCHLD);
 
                 r = mkdtemp_malloc("/tmp/inspect-XXXXXX", &tmpdir);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to create temporary directory: %m");
 
-                r = dissect_image(
-                                d->fd,
+                r = dissect_loop_device(
+                                d,
                                 NULL, NULL,
-                                d->diskseq,
-                                d->uevent_seqnum_not_before,
-                                d->timestamp_not_before,
                                 DISSECT_IMAGE_READ_ONLY |
                                 DISSECT_IMAGE_GENERIC_ROOT |
                                 DISSECT_IMAGE_REQUIRE_ROOT |
@@ -873,6 +866,8 @@ static int portable_changes_add_with_prefix(
                 const char *path,
                 const char *source) {
 
+        _cleanup_free_ char *path_buf = NULL, *source_buf = NULL;
+
         assert(path);
         assert(!changes == !n_changes);
 
@@ -880,10 +875,19 @@ static int portable_changes_add_with_prefix(
                 return 0;
 
         if (prefix) {
-                path = prefix_roota(prefix, path);
+                path_buf = path_join(prefix, path);
+                if (!path_buf)
+                        return -ENOMEM;
 
-                if (source)
-                        source = prefix_roota(prefix, source);
+                path = path_buf;
+
+                if (source) {
+                        source_buf = path_join(prefix, source);
+                        if (!source_buf)
+                                return -ENOMEM;
+
+                        source = source_buf;
+                }
         }
 
         return portable_changes_add(changes, n_changes, type_or_errno, path, source);
@@ -1098,7 +1102,8 @@ static int attach_unit_file(
 
         _cleanup_(unlink_and_freep) char *chroot_dropin = NULL, *profile_dropin = NULL;
         _cleanup_(rmdir_and_freep) char *dropin_dir = NULL;
-        const char *where, *path;
+        _cleanup_free_ char *path = NULL;
+        const char *where;
         int r;
 
         assert(paths);
@@ -1115,7 +1120,10 @@ static int attach_unit_file(
         } else
                 (void) portable_changes_add(changes, n_changes, PORTABLE_MKDIR, where, NULL);
 
-        path = prefix_roota(where, m->name);
+        path = path_join(where, m->name);
+        if (!path)
+                return -ENOMEM;
+
         dropin_dir = strjoin(path, ".d");
         if (!dropin_dir)
                 return -ENOMEM;

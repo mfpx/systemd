@@ -534,22 +534,15 @@ static int merge_subprocess(Hashmap *images, const char *workspace) {
                                         img->path,
                                         O_RDONLY,
                                         FLAGS_SET(flags, DISSECT_IMAGE_NO_PARTITION_TABLE) ? 0 : LO_FLAGS_PARTSCAN,
+                                        LOCK_SH,
                                         &d);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to set up loopback device for %s: %m", img->path);
 
-                        r = loop_device_flock(d, LOCK_SH);
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to lock loopback device: %m");
-
-                        r = dissect_image_and_warn(
-                                        d->fd,
-                                        img->path,
+                        r = dissect_loop_device_and_warn(
+                                        d,
                                         &verity_settings,
                                         NULL,
-                                        d->diskseq,
-                                        d->uevent_seqnum_not_before,
-                                        d->timestamp_not_before,
                                         flags,
                                         &m);
                         if (r < 0)
@@ -585,7 +578,6 @@ static int merge_subprocess(Hashmap *images, const char *workspace) {
                                         return log_error_errno(r, "Failed to relinquish DM devices: %m");
                         }
 
-                        dissected_image_relinquish(m);
                         loop_device_relinquish(d);
                         break;
                 }
@@ -886,7 +878,7 @@ static int verb_help(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return log_oom();
 
-        printf("%1$s [OPTIONS...] [DEVICE]\n"
+        printf("%1$s [OPTIONS...] COMMAND\n"
                "\n%5$sMerge extension images into /usr/ and /opt/ hierarchies.%6$s\n"
                "\n%3$sCommands:%4$s\n"
                "  status                  Show current merge status (default)\n"

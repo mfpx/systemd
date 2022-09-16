@@ -64,6 +64,7 @@
 #include "strv.h"
 #include "tc.h"
 #include "tmpfile-util.h"
+#include "tuntap.h"
 #include "udev-util.h"
 #include "util.h"
 #include "vrf.h"
@@ -1588,10 +1589,8 @@ static int link_carrier_lost_impl(Link *link) {
 }
 
 static int link_carrier_lost_handler(sd_event_source *s, uint64_t usec, void *userdata) {
-        Link *link = userdata;
+        Link *link = ASSERT_PTR(userdata);
         int r;
-
-        assert(link);
 
         r = link_carrier_lost_impl(link);
         if (r < 0) {

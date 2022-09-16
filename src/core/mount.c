@@ -51,6 +51,9 @@ static const UnitActiveState state_translation_table[_MOUNT_STATE_MAX] = {
 
 static int mount_dispatch_timer(sd_event_source *source, usec_t usec, void *userdata);
 static int mount_dispatch_io(sd_event_source *source, int fd, uint32_t revents, void *userdata);
+static void mount_enter_dead(Mount *m, MountResult f);
+static void mount_enter_mounted(Mount *m, MountResult f);
+static void mount_cycle_clear(Mount *m);
 static int mount_process_proc_self_mountinfo(Manager *m);
 
 static bool MOUNT_STATE_WITH_PROCESS(MountState state) {
@@ -300,9 +303,9 @@ static int mount_add_mount_dependencies(Mount *m) {
 
                 /* Adds in links to other mount points that might lie further up in the hierarchy */
 
-                parent = dirname_malloc(m->where);
-                if (!parent)
-                        return -ENOMEM;
+                r = path_extract_directory(m->where, &parent);
+                if (r < 0)
+                        return r;
 
                 r = unit_require_mounts_for(UNIT(m), parent, UNIT_DEPENDENCY_IMPLICIT);
                 if (r < 0)
@@ -762,23 +765,17 @@ static void mount_set_state(Mount *m, MountState state) {
 
 static int mount_coldplug(Unit *u) {
         Mount *m = MOUNT(u);
-        MountState new_state = MOUNT_DEAD;
         int r;
 
         assert(m);
         assert(m->state == MOUNT_DEAD);
 
-        if (m->deserialized_state != m->state)
-                new_state = m->deserialized_state;
-        else if (m->from_proc_self_mountinfo)
-                new_state = MOUNT_MOUNTED;
-
-        if (new_state == m->state)
+        if (m->deserialized_state == m->state)
                 return 0;
 
         if (m->control_pid > 0 &&
             pid_is_unwaited(m->control_pid) &&
-            MOUNT_STATE_WITH_PROCESS(new_state)) {
+            MOUNT_STATE_WITH_PROCESS(m->deserialized_state)) {
 
                 r = unit_watch_pid(UNIT(m), m->control_pid, false);
                 if (r < 0)
@@ -789,13 +786,50 @@ static int mount_coldplug(Unit *u) {
                         return r;
         }
 
-        if (!IN_SET(new_state, MOUNT_DEAD, MOUNT_FAILED)) {
+        if (!IN_SET(m->deserialized_state, MOUNT_DEAD, MOUNT_FAILED)) {
                 (void) unit_setup_dynamic_creds(u);
                 (void) unit_setup_exec_runtime(u);
         }
 
-        mount_set_state(m, new_state);
+        mount_set_state(m, m->deserialized_state);
         return 0;
+}
+
+static void mount_catchup(Unit *u) {
+        Mount *m = MOUNT(ASSERT_PTR(u));
+
+        assert(m);
+
+        /* Adjust the deserialized state. See comments in mount_process_proc_self_mountinfo(). */
+        if (m->from_proc_self_mountinfo)
+                switch (m->state) {
+                case MOUNT_DEAD:
+                case MOUNT_FAILED:
+                        assert(m->control_pid == 0);
+                        (void) unit_acquire_invocation_id(u);
+                        mount_cycle_clear(m);
+                        mount_enter_mounted(m, MOUNT_SUCCESS);
+                        break;
+                case MOUNT_MOUNTING:
+                        assert(m->control_pid > 0);
+                        mount_set_state(m, MOUNT_MOUNTING_DONE);
+                        break;
+                default:
+                        break;
+                }
+        else
+                switch (m->state) {
+                case MOUNT_MOUNTING_DONE:
+                        assert(m->control_pid > 0);
+                        mount_set_state(m, MOUNT_MOUNTING);
+                        break;
+                case MOUNT_MOUNTED:
+                        assert(m->control_pid == 0);
+                        mount_enter_dead(m, MOUNT_SUCCESS);
+                        break;
+                default:
+                        break;
+                }
 }
 
 static void mount_dump(Unit *u, FILE *f, const char *prefix) {
@@ -1852,10 +1886,8 @@ static bool mount_is_mounted(Mount *m) {
 }
 
 static int mount_on_ratelimit_expire(sd_event_source *s, void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
         Job *j;
-
-        assert(m);
 
         /* Let's enqueue all start jobs that were previously skipped because of active ratelimit. */
         HASHMAP_FOREACH(j, m->jobs) {
@@ -2081,9 +2113,8 @@ static int mount_process_proc_self_mountinfo(Manager *m) {
 }
 
 static int mount_dispatch_io(sd_event_source *source, int fd, uint32_t revents, void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
 
-        assert(m);
         assert(revents & EPOLLIN);
 
         return mount_process_proc_self_mountinfo(m);
@@ -2227,6 +2258,7 @@ const UnitVTable mount_vtable = {
         .done = mount_done,
 
         .coldplug = mount_coldplug,
+        .catchup = mount_catchup,
 
         .dump = mount_dump,
 

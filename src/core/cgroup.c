@@ -783,6 +783,9 @@ static void cgroup_xattr_apply(Unit *u) {
 
         assert(u);
 
+        /* The 'user.*' xattrs can be set from a user manager. */
+        cgroup_oomd_xattr_apply(u, u->cgroup_path);
+
         if (!MANAGER_IS_SYSTEM(u->manager))
                 return;
 
@@ -809,8 +812,6 @@ static void cgroup_xattr_apply(Unit *u) {
                 else
                         unit_remove_xattr_graceful(u, NULL, xn);
         }
-
-        cgroup_oomd_xattr_apply(u, u->cgroup_path);
 }
 
 static int lookup_block_device(const char *p, dev_t *ret) {
@@ -1598,7 +1599,7 @@ static void cgroup_context_apply(
 
                         if (unit_has_unified_memory_config(u)) {
                                 val = c->memory_max;
-                                log_cgroup_compat(u, "Applying MemoryMax=%" PRIi64 " as MemoryLimit=", val);
+                                log_cgroup_compat(u, "Applying MemoryMax=%" PRIu64 " as MemoryLimit=", val);
                         } else
                                 val = c->memory_limit;
 
@@ -2295,6 +2296,7 @@ static int unit_attach_pid_to_cgroup_via_bus(Unit *u, pid_t pid, const char *suf
 }
 
 int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path) {
+        _cleanup_free_ char *joined = NULL;
         CGroupMask delegated_mask;
         const char *p;
         void *pidp;
@@ -2320,8 +2322,13 @@ int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path) {
 
         if (isempty(suffix_path))
                 p = u->cgroup_path;
-        else
-                p = prefix_roota(u->cgroup_path, suffix_path);
+        else {
+                joined = path_join(u->cgroup_path, suffix_path);
+                if (!joined)
+                        return -ENOMEM;
+
+                p = joined;
+        }
 
         delegated_mask = unit_get_delegate_mask(u);
 
@@ -2977,12 +2984,11 @@ int unit_watch_all_pids(Unit *u) {
 }
 
 static int on_cgroup_empty_event(sd_event_source *s, void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
         Unit *u;
         int r;
 
         assert(s);
-        assert(m);
 
         u = m->cgroup_empty_queue;
         if (!u)
@@ -3158,12 +3164,11 @@ int unit_check_oom(Unit *u) {
 }
 
 static int on_cgroup_oom_event(sd_event_source *s, void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
         Unit *u;
         int r;
 
         assert(s);
-        assert(m);
 
         u = m->cgroup_oom_queue;
         if (!u)
@@ -3261,11 +3266,10 @@ static int unit_check_cgroup_events(Unit *u) {
 }
 
 static int on_cgroup_inotify_event(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
-        Manager *m = userdata;
+        Manager *m = ASSERT_PTR(userdata);
 
         assert(s);
         assert(fd >= 0);
-        assert(m);
 
         for (;;) {
                 union inotify_event_buffer buffer;

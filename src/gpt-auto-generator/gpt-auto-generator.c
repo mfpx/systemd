@@ -42,70 +42,6 @@ static bool arg_enabled = true;
 static bool arg_root_enabled = true;
 static int arg_root_rw = -1;
 
-static int open_parent_block_device(dev_t devnum, int *ret_fd) {
-        _cleanup_(sd_device_unrefp) sd_device *d = NULL;
-        const char *name, *devtype, *node;
-        sd_device *parent;
-        dev_t pn;
-        int fd, r;
-
-        assert(ret_fd);
-
-        r = sd_device_new_from_devnum(&d, 'b', devnum);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to open device: %m");
-
-        if (sd_device_get_devname(d, &name) < 0) {
-                r = sd_device_get_syspath(d, &name);
-                if (r < 0) {
-                        log_device_debug_errno(d, r, "Device " DEVNUM_FORMAT_STR " does not have a name, ignoring: %m",
-                                               DEVNUM_FORMAT_VAL(devnum));
-                        return 0;
-                }
-        }
-
-        r = sd_device_get_parent(d, &parent);
-        if (r < 0) {
-                log_device_debug_errno(d, r, "Not a partitioned device, ignoring: %m");
-                return 0;
-        }
-
-        /* Does it have a devtype? */
-        r = sd_device_get_devtype(parent, &devtype);
-        if (r < 0) {
-                log_device_debug_errno(parent, r, "Parent doesn't have a device type, ignoring: %m");
-                return 0;
-        }
-
-        /* Is this a disk or a partition? We only care for disks... */
-        if (!streq(devtype, "disk")) {
-                log_device_debug(parent, "Parent isn't a raw disk, ignoring.");
-                return 0;
-        }
-
-        /* Does it have a device node? */
-        r = sd_device_get_devname(parent, &node);
-        if (r < 0) {
-                log_device_debug_errno(parent, r, "Parent device does not have device node, ignoring: %m");
-                return 0;
-        }
-
-        log_device_debug(d, "Root device %s.", node);
-
-        r = sd_device_get_devnum(parent, &pn);
-        if (r < 0) {
-                log_device_debug_errno(parent, r, "Parent device is not a proper block device, ignoring: %m");
-                return 0;
-        }
-
-        fd = open(node, O_RDONLY|O_CLOEXEC|O_NOCTTY);
-        if (fd < 0)
-                return log_error_errno(errno, "Failed to open %s: %m", node);
-
-        *ret_fd = fd;
-        return 1;
-}
-
 static int add_cryptsetup(const char *id, const char *what, bool rw, bool require, char **device) {
 #if HAVE_LIBCRYPTSETUP
         _cleanup_free_ char *e = NULL, *n = NULL, *d = NULL;
@@ -414,9 +350,9 @@ static int add_automount(
                 const char *description,
                 usec_t timeout) {
 
-        _cleanup_free_ char *unit = NULL;
+        _cleanup_free_ char *unit = NULL, *p = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        const char *opt = "noauto", *p;
+        const char *opt = "noauto";
         int r;
 
         assert(id);
@@ -442,7 +378,10 @@ static int add_automount(
         if (r < 0)
                 return log_error_errno(r, "Failed to generate unit name: %m");
 
-        p = prefix_roota(arg_dest, unit);
+        p = path_join(arg_dest, unit);
+        if (!p)
+                return log_oom();
+
         f = fopen(p, "wxe");
         if (!f)
                 return log_error_errno(errno, "Failed to create unit file %s: %m", unit);
@@ -690,26 +629,31 @@ static int add_root_mount(void) {
 }
 
 static int enumerate_partitions(dev_t devnum) {
-        _cleanup_close_ int fd = -1;
         _cleanup_(dissected_image_unrefp) DissectedImage *m = NULL;
+        _cleanup_(loop_device_unrefp) LoopDevice *loop = NULL;
+        _cleanup_free_ char *devname = NULL;
         int r, k;
 
-        r = open_parent_block_device(devnum, &fd);
-        if (r <= 0)
-                return r;
+        r = block_get_whole_disk(devnum, &devnum);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to get whole block device for " DEVNUM_FORMAT_STR ": %m",
+                                       DEVNUM_FORMAT_VAL(devnum));
+
+        r = devname_from_devnum(S_IFBLK, devnum, &devname);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to get device node of " DEVNUM_FORMAT_STR ": %m",
+                                       DEVNUM_FORMAT_VAL(devnum));
 
         /* Let's take a LOCK_SH lock on the block device, in case udevd is already running. If we don't take
          * the lock, udevd might end up issuing BLKRRPART in the middle, and we don't want that, since that
          * might remove all partitions while we are operating on them. */
-        if (flock(fd, LOCK_SH) < 0)
-                return log_error_errno(errno, "Failed to lock root block device: %m");
+        r = loop_device_open(devname, O_RDONLY, LOCK_SH, &loop);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to open %s: %m", devname);
 
-        r = dissect_image(
-                        fd,
+        r = dissect_loop_device(
+                        loop,
                         NULL, NULL,
-                        /* diskseq= */ 0,
-                        UINT64_MAX,
-                        USEC_INFINITY,
                         DISSECT_IMAGE_GPT_ONLY|
                         DISSECT_IMAGE_USR_NO_ROOT,
                         &m);
@@ -767,8 +711,6 @@ static int enumerate_partitions(dev_t devnum) {
                 if (k < 0)
                         r = k;
         }
-
-        dissected_image_relinquish(m);
 
         return r;
 }

@@ -278,6 +278,10 @@ static int ndisc_request_address(Address *in, Link *link, sd_ndisc_router *rt) {
         address->source = NETWORK_CONFIG_SOURCE_NDISC;
         address->provider.in6 = router;
 
+        r = free_and_strdup_warn(&address->netlabel, link->network->ndisc_netlabel);
+        if (r < 0)
+                return r;
+
         if (address_get(link, address, &existing) < 0)
                 link->ndisc_configured = false;
         else
@@ -707,7 +711,7 @@ static int ndisc_router_process_rdnss(Link *link, sd_ndisc_router *rt) {
                 return log_link_error_errno(link, n, "Failed to get RDNSS addresses: %m");
 
         if (n >= (int) NDISC_RDNSS_MAX) {
-                log_link_warning(link, "Too many RDNSS records per link. Only first %i records will be used.", NDISC_RDNSS_MAX);
+                log_link_warning(link, "Too many RDNSS records per link. Only first %u records will be used.", NDISC_RDNSS_MAX);
                 n = NDISC_RDNSS_MAX;
         }
 
@@ -801,7 +805,7 @@ static int ndisc_router_process_dnssl(Link *link, sd_ndisc_router *rt) {
                 return log_link_error_errno(link, r, "Failed to get DNSSL addresses: %m");
 
         if (strv_length(l) >= NDISC_DNSSL_MAX) {
-                log_link_warning(link, "Too many DNSSL records per link. Only first %i records will be used.", NDISC_DNSSL_MAX);
+                log_link_warning(link, "Too many DNSSL records per link. Only first %u records will be used.", NDISC_DNSSL_MAX);
                 STRV_FOREACH(j, l + NDISC_DNSSL_MAX)
                         *j = mfree(*j);
         }
@@ -1005,10 +1009,8 @@ static int ndisc_router_handler(Link *link, sd_ndisc_router *rt) {
 }
 
 static void ndisc_handler(sd_ndisc *nd, sd_ndisc_event_t event, sd_ndisc_router *rt, void *userdata) {
-        Link *link = userdata;
+        Link *link = ASSERT_PTR(userdata);
         int r;
-
-        assert(link);
 
         if (IN_SET(link->state, LINK_STATE_FAILED, LINK_STATE_LINGER))
                 return;

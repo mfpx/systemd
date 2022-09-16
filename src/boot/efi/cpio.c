@@ -116,8 +116,7 @@ static EFI_STATUS pack_cpio_one(
         *cpio_buffer = a;
         a = (char *) *cpio_buffer + *cpio_buffer_size;
 
-        memcpy(a, "070701", 6); /* magic ID */
-        a += 6;
+        a = mempcpy(a, "070701", 6); /* magic ID */
 
         a = write_cpio_word(a, (*inode_counter)++);                         /* inode */
         a = write_cpio_word(a, access_mode | 0100000 /* = S_IFREG */);      /* mode */
@@ -139,16 +138,14 @@ static EFI_STATUS pack_cpio_one(
         a = write_cpio_word(a, target_dir_prefix_size + fname_size + 2);    /* fname size */
         a = write_cpio_word(a, 0);                                          /* "crc" */
 
-        memcpy(a, target_dir_prefix, target_dir_prefix_size);
-        a += target_dir_prefix_size;
+        a = mempcpy(a, target_dir_prefix, target_dir_prefix_size);
         *(a++) = '/';
         a = mangle_filename(a, fname);
 
         /* Pad to next multiple of 4 */
         a = pad4(a, *cpio_buffer);
 
-        memcpy(a, contents, contents_size);
-        a += contents_size;
+        a = mempcpy(a, contents, contents_size);
 
         /* Pad to next multiple of 4 */
         a = pad4(a, *cpio_buffer);
@@ -198,8 +195,7 @@ static EFI_STATUS pack_cpio_dir(
         *cpio_buffer = a = xrealloc(*cpio_buffer, *cpio_buffer_size, *cpio_buffer_size + l);
         a = (char *) *cpio_buffer + *cpio_buffer_size;
 
-        memcpy(a, "070701", 6); /* magic ID */
-        a += 6;
+        a = mempcpy(a, "070701", 6); /* magic ID */
 
         a = write_cpio_word(a, (*inode_counter)++);                         /* inode */
         a = write_cpio_word(a, access_mode | 0040000 /* = S_IFDIR */);      /* mode */
@@ -215,8 +211,7 @@ static EFI_STATUS pack_cpio_dir(
         a = write_cpio_word(a, path_size + 1);                              /* fname size */
         a = write_cpio_word(a, 0);                                          /* "crc" */
 
-        memcpy(a, path, path_size + 1);
-        a += path_size + 1;
+        a = mempcpy(a, path, path_size + 1);
 
         /* Pad to next multiple of 4 */
         a = pad4(a, *cpio_buffer);
@@ -304,6 +299,48 @@ static EFI_STATUS pack_cpio_trailer(
         return EFI_SUCCESS;
 }
 
+static EFI_STATUS measure_cpio(
+                void *buffer,
+                UINTN buffer_size,
+                const uint32_t tpm_pcr[],
+                UINTN n_tpm_pcr,
+                const char16_t *tpm_description,
+                bool *ret_measured) {
+
+        int measured = -1;
+        EFI_STATUS err;
+
+        assert(buffer || buffer_size == 0);
+        assert(tpm_pcr || n_tpm_pcr == 0);
+
+        for (UINTN i = 0; i < n_tpm_pcr; i++) {
+                bool m;
+
+                if (tpm_pcr[i] == UINT32_MAX) /* Disabled */
+                        continue;
+
+                err = tpm_log_event(
+                                tpm_pcr[i],
+                                POINTER_TO_PHYSICAL_ADDRESS(buffer),
+                                buffer_size,
+                                tpm_description,
+                                &m);
+                if (err != EFI_SUCCESS) {
+                        log_error_stall(L"Unable to add initrd TPM measurement for PCR %u (%s), ignoring: %r", tpm_pcr[i], tpm_description, err);
+                        measured = false;
+                        continue;
+                }
+
+                if (measured != false)
+                        measured = m;
+        }
+
+        if (ret_measured)
+                *ret_measured = measured > 0;
+
+        return EFI_SUCCESS;
+}
+
 EFI_STATUS pack_cpio(
                 EFI_LOADED_IMAGE_PROTOCOL *loaded_image,
                 const char16_t *dropin_dir,
@@ -325,7 +362,6 @@ EFI_STATUS pack_cpio(
         _cleanup_(strv_freep) char16_t **items = NULL;
         _cleanup_free_ void *buffer = NULL;
         uint32_t inode = 1; /* inode counter, so that each item gets a new inode */
-        int measured = -1;
         EFI_STATUS err;
 
         assert(loaded_image);
@@ -433,32 +469,12 @@ EFI_STATUS pack_cpio(
         if (err != EFI_SUCCESS)
                 return log_error_status_stall(err, L"Failed to pack cpio trailer: %r");
 
-        for (UINTN i = 0; i < n_tpm_pcr; i++) {
-                bool m;
-
-                if (tpm_pcr[i] == UINT32_MAX) /* Disabled */
-                        continue;
-
-                err = tpm_log_event(
-                                tpm_pcr[i],
-                                POINTER_TO_PHYSICAL_ADDRESS(buffer),
-                                buffer_size,
-                                tpm_description,
-                                &m);
-                if (err != EFI_SUCCESS) {
-                        log_error_stall(L"Unable to add initrd TPM measurement for PCR %u (%s), ignoring: %r", tpm_pcr[i], tpm_description, err);
-                        measured = false;
-                        continue;
-                }
-
-                measured = measured < 0 ? m : (measured && m);
-        }
+        err = measure_cpio(buffer, buffer_size, tpm_pcr, n_tpm_pcr, tpm_description, ret_measured);
+        if (err != EFI_SUCCESS)
+                return err;
 
         *ret_buffer = TAKE_PTR(buffer);
         *ret_buffer_size = buffer_size;
-
-        if (ret_measured)
-                *ret_measured = measured;
 
         return EFI_SUCCESS;
 
@@ -467,7 +483,64 @@ nothing:
         *ret_buffer_size = 0;
 
         if (ret_measured)
-                *ret_measured = true;
+                *ret_measured = n_tpm_pcr > 0;
+
+        return EFI_SUCCESS;
+}
+
+EFI_STATUS pack_cpio_literal(
+                const void *data,
+                size_t data_size,
+                const char *target_dir_prefix,
+                const char16_t *target_filename,
+                uint32_t dir_mode,
+                uint32_t access_mode,
+                const uint32_t tpm_pcr[],
+                UINTN n_tpm_pcr,
+                const char16_t *tpm_description,
+                void **ret_buffer,
+                UINTN *ret_buffer_size,
+                bool *ret_measured) {
+
+        uint32_t inode = 1; /* inode counter, so that each item gets a new inode */
+        _cleanup_free_ void *buffer = NULL;
+        UINTN buffer_size = 0;
+        EFI_STATUS err;
+
+        assert(data || data_size == 0);
+        assert(target_dir_prefix);
+        assert(target_filename);
+        assert(tpm_pcr || n_tpm_pcr == 0);
+        assert(ret_buffer);
+        assert(ret_buffer_size);
+
+        /* Generate the leading directory inodes right before adding the first files, to the
+         * archive. Otherwise the cpio archive cannot be unpacked, since the leading dirs won't exist. */
+
+        err = pack_cpio_prefix(target_dir_prefix, dir_mode, &inode, &buffer, &buffer_size);
+        if (err != EFI_SUCCESS)
+                return log_error_status_stall(err, L"Failed to pack cpio prefix: %r", err);
+
+        err = pack_cpio_one(
+                        target_filename,
+                        data, data_size,
+                        target_dir_prefix,
+                        access_mode,
+                        &inode,
+                        &buffer, &buffer_size);
+        if (err != EFI_SUCCESS)
+                return log_error_status_stall(err, L"Failed to pack cpio file %s: %r", target_filename, err);
+
+        err = pack_cpio_trailer(&buffer, &buffer_size);
+        if (err != EFI_SUCCESS)
+                return log_error_status_stall(err, L"Failed to pack cpio trailer: %r");
+
+        err = measure_cpio(buffer, buffer_size, tpm_pcr, n_tpm_pcr, tpm_description, ret_measured);
+        if (err != EFI_SUCCESS)
+                return err;
+
+        *ret_buffer = TAKE_PTR(buffer);
+        *ret_buffer_size = buffer_size;
 
         return EFI_SUCCESS;
 }

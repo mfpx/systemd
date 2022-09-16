@@ -147,7 +147,7 @@ static void set_location(sd_journal *j, JournalFile *f, Object *o) {
 }
 
 static int match_is_valid(const void *data, size_t size) {
-        assert(data);
+        const char *b = ASSERT_PTR(data);
 
         if (size < 2)
                 return false;
@@ -155,7 +155,6 @@ static int match_is_valid(const void *data, size_t size) {
         if (((char*) data)[0] == '_' && ((char*) data)[1] == '_')
                 return false;
 
-        const char *b = data;
         for (const char *p = b; p < b + size; p++) {
 
                 if (*p == '=')
@@ -1375,7 +1374,7 @@ static int add_file_by_name(
                 const char *prefix,
                 const char *filename) {
 
-        const char *path;
+        _cleanup_free_ char *path = NULL;
 
         assert(j);
         assert(prefix);
@@ -1387,28 +1386,35 @@ static int add_file_by_name(
         if (!file_type_wanted(j->flags, filename))
                 return 0;
 
-        path = prefix_roota(prefix, filename);
+        path = path_join(prefix, filename);
+        if (!path)
+                return -ENOMEM;
+
         return add_any_file(j, -1, path);
 }
 
-static void remove_file_by_name(
+static int remove_file_by_name(
                 sd_journal *j,
                 const char *prefix,
                 const char *filename) {
 
-        const char *path;
+        _cleanup_free_ char *path = NULL;
         JournalFile *f;
 
         assert(j);
         assert(prefix);
         assert(filename);
 
-        path = prefix_roota(prefix, filename);
+        path = path_join(prefix, filename);
+        if (!path)
+                return -ENOMEM;
+
         f = ordered_hashmap_get(j->files, path);
         if (!f)
-                return;
+                return 0;
 
         remove_file_real(j, f);
+        return 1;
 }
 
 static void remove_file_real(sd_journal *j, JournalFile *f) {
@@ -1851,9 +1857,9 @@ static int add_current_paths(sd_journal *j) {
                 _cleanup_free_ char *dir = NULL;
                 int r;
 
-                dir = dirname_malloc(f->path);
-                if (!dir)
-                        return -ENOMEM;
+                r = path_extract_directory(f->path, &dir);
+                if (r < 0)
+                        return r;
 
                 r = add_directory(j, dir, NULL);
                 if (r < 0)
@@ -2620,7 +2626,7 @@ static void process_inotify_event(sd_journal *j, const struct inotify_event *e) 
                         if (e->mask & (IN_CREATE|IN_MOVED_TO|IN_MODIFY|IN_ATTRIB))
                                 (void) add_file_by_name(j, d->path, e->name);
                         else if (e->mask & (IN_DELETE|IN_MOVED_FROM|IN_UNMOUNT))
-                                remove_file_by_name(j, d->path, e->name);
+                                (void) remove_file_by_name(j, d->path, e->name);
 
                 } else if (!d->is_root && e->len == 0) {
 
@@ -3201,13 +3207,12 @@ _public_ int sd_journal_reliable_fd(sd_journal *j) {
 }
 
 static char *lookup_field(const char *field, void *userdata) {
-        sd_journal *j = userdata;
+        sd_journal *j = ASSERT_PTR(userdata);
         const void *data;
         size_t size, d;
         int r;
 
         assert(field);
-        assert(j);
 
         r = sd_journal_get_data(j, field, &data, &size);
         if (r < 0 ||

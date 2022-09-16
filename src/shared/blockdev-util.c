@@ -3,6 +3,7 @@
 #include <linux/blkpg.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <unistd.h>
 
 #include "sd-device.h"
@@ -221,7 +222,6 @@ int get_block_device_harder(const char *path, dev_t *ret) {
 }
 
 int lock_whole_block_device(dev_t devt, int operation) {
-        _cleanup_free_ char *whole_node = NULL;
         _cleanup_close_ int lock_fd = -1;
         dev_t whole_devt;
         int r;
@@ -232,13 +232,9 @@ int lock_whole_block_device(dev_t devt, int operation) {
         if (r < 0)
                 return r;
 
-        r = device_path_make_major_minor(S_IFBLK, whole_devt, &whole_node);
+        lock_fd = r = device_open_from_devnum(S_IFBLK, whole_devt, O_RDONLY|O_CLOEXEC|O_NONBLOCK, NULL);
         if (r < 0)
                 return r;
-
-        lock_fd = open(whole_node, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
-        if (lock_fd < 0)
-                return -errno;
 
         if (flock(lock_fd, operation) < 0)
                 return -errno;
@@ -432,7 +428,13 @@ int path_get_whole_disk(const char *path, bool backing, dev_t *ret) {
         return fd_get_whole_disk(fd, backing, ret);
 }
 
-int block_device_add_partition(int fd, const char *name, int nr, uint64_t start, uint64_t size) {
+int block_device_add_partition(
+                int fd,
+                const char *name,
+                int nr,
+                uint64_t start,
+                uint64_t size) {
+
         assert(fd >= 0);
         assert(name);
         assert(nr > 0);
@@ -457,7 +459,11 @@ int block_device_add_partition(int fd, const char *name, int nr, uint64_t start,
         return RET_NERRNO(ioctl(fd, BLKPG, &ba));
 }
 
-int block_device_remove_partition(int fd, const char *name, int nr) {
+int block_device_remove_partition(
+                int fd,
+                const char *name,
+                int nr) {
+
         assert(fd >= 0);
         assert(name);
         assert(nr > 0);
@@ -480,21 +486,57 @@ int block_device_remove_partition(int fd, const char *name, int nr) {
         return RET_NERRNO(ioctl(fd, BLKPG, &ba));
 }
 
-int block_device_remove_all_partitions(int fd) {
-        struct stat stat;
-        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
+int block_device_resize_partition(
+                int fd,
+                int nr,
+                uint64_t start,
+                uint64_t size) {
+
+        assert(fd >= 0);
+        assert(nr > 0);
+
+        struct blkpg_partition bp = {
+                .pno = nr,
+                .start = start,
+                .length = size,
+        };
+
+        struct blkpg_ioctl_arg ba = {
+                .op = BLKPG_RESIZE_PARTITION,
+                .data = &bp,
+                .datalen = sizeof(bp),
+        };
+
+        return RET_NERRNO(ioctl(fd, BLKPG, &ba));
+}
+
+int partition_enumerator_new(sd_device *dev, sd_device_enumerator **ret) {
         _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
-        sd_device *part;
-        int r, k = 0;
+        const char *s;
+        int r;
 
-        if (fstat(fd, &stat) < 0)
-                return -errno;
+        assert(dev);
+        assert(ret);
 
-        r = sd_device_new_from_devnum(&dev, 'b', stat.st_rdev);
+        r = sd_device_get_subsystem(dev, &s);
         if (r < 0)
                 return r;
 
+        if (!streq(s, "block"))
+                return -ENOTBLK;
+
+        r = sd_device_get_devtype(dev, &s);
+        if (r < 0)
+                return r;
+
+        if (!streq(s, "disk")) /* Refuse invocation on partition block device, insist on "whole" device */
+                return -EINVAL;
+
         r = sd_device_enumerator_new(&e);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_allow_uninitialized(e);
         if (r < 0)
                 return r;
 
@@ -502,7 +544,17 @@ int block_device_remove_all_partitions(int fd) {
         if (r < 0)
                 return r;
 
-        r = sd_device_enumerator_add_match_subsystem(e, "block", true);
+        r = sd_device_get_sysname(dev, &s);
+        if (r < 0)
+                return r;
+
+        /* Also add sysname check for safety. Hopefully, this also improves performance. */
+        s = strjoina(s, "*");
+        r = sd_device_enumerator_add_match_sysname(e, s);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_add_match_subsystem(e, "block", /* match = */ true);
         if (r < 0)
                 return r;
 
@@ -510,9 +562,50 @@ int block_device_remove_all_partitions(int fd) {
         if (r < 0)
                 return r;
 
+        *ret = TAKE_PTR(e);
+        return 0;
+}
+
+int block_device_remove_all_partitions(sd_device *dev, int fd) {
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        _cleanup_(sd_device_unrefp) sd_device *dev_unref = NULL;
+        _cleanup_close_ int fd_close = -1;
+        bool has_partitions = false;
+        sd_device *part;
+        int r, k = 0;
+
+        assert(dev || fd >= 0);
+
+        if (!dev) {
+                struct stat st;
+
+                if (fstat(fd, &st) < 0)
+                        return -errno;
+
+                r = sd_device_new_from_stat_rdev(&dev_unref, &st);
+                if (r < 0)
+                        return r;
+
+                dev = dev_unref;
+        }
+
+        r = partition_enumerator_new(dev, &e);
+        if (r < 0)
+                return r;
+
+        if (fd < 0) {
+                fd_close = sd_device_open(dev, O_CLOEXEC|O_NONBLOCK|O_NOCTTY|O_RDONLY);
+                if (fd_close < 0)
+                        return fd_close;
+
+                fd = fd_close;
+        }
+
         FOREACH_DEVICE(e, part) {
                 const char *v, *devname;
                 int nr;
+
+                has_partitions = true;
 
                 r = sd_device_get_devname(part, &devname);
                 if (r < 0)
@@ -533,12 +626,47 @@ int block_device_remove_all_partitions(int fd) {
                 }
                 if (r < 0) {
                         log_debug_errno(r, "Failed to remove partition %s: %m", devname);
-                        k = k ?: r;
+                        k = k < 0 ? k : r;
                         continue;
                 }
 
                 log_debug("Removed partition %s", devname);
         }
 
-        return k;
+        return k < 0 ? k : has_partitions;
+}
+
+int block_device_has_partitions(sd_device *dev) {
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        int r;
+
+        assert(dev);
+
+        /* Checks if the specified device currently has partitions. */
+
+        r = partition_enumerator_new(dev, &e);
+        if (r < 0)
+                return r;
+
+        return !!sd_device_enumerator_get_device_first(e);
+}
+
+int blockdev_reread_partition_table(sd_device *dev) {
+        _cleanup_close_ int fd = -1;
+
+        assert(dev);
+
+        /* Try to re-read the partition table. This only succeeds if none of the devices is busy. */
+
+        fd = sd_device_open(dev, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
+        if (fd < 0)
+                return fd;
+
+        if (flock(fd, LOCK_EX|LOCK_NB) < 0)
+                return -errno;
+
+        if (ioctl(fd, BLKRRPART, 0) < 0)
+                return -errno;
+
+        return 0;
 }

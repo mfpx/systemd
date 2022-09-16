@@ -286,6 +286,11 @@ All tools:
   the installed ones. By default non-UTF-8 locales are suppressed from the
   selection, since we are living in the 21st century.
 
+`systemd-resolved`:
+
+* `$SYSTEMD_RESOLVED_SYNTHESIZE_HOSTNAME` — if set to "0", `systemd-resolved`
+  won't synthesize system hostname on both regular and reverse lookups.
+
 `systemd-sysext`:
 
 * `$SYSTEMD_SYSEXT_HIERARCHIES` — this variable may be used to override which
@@ -304,6 +309,16 @@ All tools:
   (or another value interpreted as true), these lines will always create
   subvolumes if the backing filesystem supports them. If set to `0`, these
   lines will always create directories.
+
+`systemd-sysusers`
+
+* `SOURCE_DATE_EPOCH` — if unset, the field of the date of last password change
+  in `/etc/shadow` will be the number of days from Jan 1, 1970 00:00 UTC until
+  today. If SOURCE_DATE_EPOCH is set to a valid UNIX epoch value in seconds,
+  then the field will be the number of days until that time instead. This is to
+  support creating bit-by-bit reproducible system images by choosing a
+  reproducible value for the field of the date of last password change in
+  `/etc/shadow`. See: https://reproducible-builds.org/specs/source-date-epoch/
 
 `systemd-sysv-generator`:
 
@@ -378,6 +393,9 @@ disk images with `--image=` or similar:
   against any of the certificates in `/etc/verity.d/*.crt` (and similar
   directories in `/usr/lib/`, `/run`, …) or passed to the kernel for validation
   against its built-in certificates.
+
+* `$SYSTEMD_DISSECT_VERITY_TIMEOUT_SEC=sec` — takes a timespan, which controls
+  the timeout waiting for the image to be configured. Defaults to 100 msec.
 
 * `$SYSTEMD_LOOP_DIRECT_IO` – takes a boolean, which controls whether to enable
   LO_FLAGS_DIRECT_IO (i.e. direct IO + asynchronous IO) on loopback block

@@ -358,8 +358,8 @@
         <listitem><para>The UUID to assign to the partition if none is assigned yet. Note that this
         setting is not used for matching. It is also not used when a UUID is already set for an existing
         partition. It is thus only used when a partition is newly created or when an existing one had a
-        all-zero UUID set. If not specified a UUID derived from the partition type is automatically
-        used.</para></listitem>
+        all-zero UUID set. If set to <literal>null</literal>, the UUID is set to all zeroes. If not specified
+        a UUID derived from the partition type is automatically used.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -399,7 +399,7 @@
       <varlistentry>
         <term><varname>PaddingWeight=</varname></term>
 
-        <listitem><para>Similar to <varname>Weight=</varname> but sets a weight for the free space after the
+        <listitem><para>Similar to <varname>Weight=</varname>, but sets a weight for the free space after the
         partition (the "padding"). When distributing available space the weights of all partitions and all
         defined padding is summed, and then each partition and padding gets the fraction defined by its
         weight. Defaults to 0, i.e. by default no padding is applied.</para>
@@ -493,9 +493,9 @@
 
         <para>This option has no effect if the partition already exists.</para>
 
-        <para>Similar to the behaviour of <varname>CopyBlocks=</varname> the file system is formatted before
-        the partition is created, ensuring that the partition only ever exists with a fully initialized
-        file system.</para>
+        <para>Similarly to the behaviour of <varname>CopyBlocks=</varname>, the file system is formatted
+        before the partition is created, ensuring that the partition only ever exists with a fully
+        initialized file system.</para>
 
         <para>This option cannot be combined with <varname>CopyBlocks=</varname>.</para></listitem>
       </varlistentry>
@@ -578,6 +578,38 @@
         for the LUKS2 superblock (see above).</para>
 
         <para>This option has no effect if the partition already exists.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>Verity=</varname></term>
+
+        <listitem><para>Takes one of <literal>off</literal>, <literal>data</literal> or
+        <literal>hash</literal>. Defaults to <literal>off</literal>. If set to <literal>off</literal> or
+        <literal>data</literal>, the partition is populated with content as specified by
+        <varname>CopyBlocks=</varname> or <varname>CopyFiles=</varname>. If set to <literal>hash</literal>,
+        the partition will be populated with verity hashes from a matching verity data partition. A matching
+        data partition is a partition with <varname>Verity=</varname> set to <literal>data</literal> and the
+        same verity match key (as configured with <varname>VerityMatchKey=</varname>). If not explicitly
+        configured, the data partition's UUID will be set to the first 128 bits of the verity root hash.
+        Similarly, if not configured, the hash partition's UUID will be set to the final 128 bits of the
+        verity root hash. The verity root hash itself will be included in the output of
+        <command>systemd-repart</command>.</para>
+
+        <para>This option has no effect if the partition already exists.</para>
+
+        <para>Usage of this option in combination with <varname>Encrypt=</varname> is not supported.</para>
+
+        <para>For each unique <varname>VerityMatchKey=</varname> value, a single verity data partition
+        (<literal>Verity=data</literal>) and a single verity hash partition (<literal>Verity=hash</literal>)
+        must be defined.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>VerityMatchKey=</varname></term>
+
+        <listitem><para>Takes a short, user-chosen identifier string. This setting is used to find sibling
+        verity partitions for the current verity partition. See the description for
+        <varname>Verity=</varname>.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -746,6 +778,28 @@ SizeMaxBytes=64M
 
 <para><programlisting># ln -s 50-root.conf /usr/lib/repart.d/70-root-b.conf
 # ln -s 60-root-verity.conf /usr/lib/repart.d/80-root-verity-b.conf
+</programlisting></para>
+    </example>
+
+     <example>
+      <title>Create a data and verity partition from a OS tree</title>
+
+      <para>Assuming we have an OS tree at /var/tmp/os-tree that we want to package in a root partition
+      together with a matching verity partition, we can do so as follows:</para>
+
+      <para><programlisting># 50-root.conf
+[Partition]
+Type=root
+CopyFiles=/var/tmp/os-tree
+Verity=data
+VerityMatchKey=root
+</programlisting></para>
+
+      <para><programlisting># 60-root-verity.conf
+[Partition]
+Type=root-verity
+Verity=hash
+VerityMatchKey=root
 </programlisting></para>
     </example>
 

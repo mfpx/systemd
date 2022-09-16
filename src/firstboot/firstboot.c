@@ -161,7 +161,7 @@ static int show_menu(char **x, unsigned n_columns, unsigned width, unsigned perc
                         if (!e)
                                 return log_oom();
 
-                        printf("%4zu) %-*s", j * per_column + i + 1, width, e);
+                        printf("%4zu) %-*s", j * per_column + i + 1, (int) width, e);
                 }
 
                 putchar('\n');
@@ -479,8 +479,9 @@ static int process_timezone(void) {
                                 return log_error_errno(r, "Failed to read host timezone: %m");
 
                         (void) mkdir_parents(etc_localtime, 0755);
-                        if (symlink(p, etc_localtime) < 0)
-                                return log_error_errno(errno, "Failed to create %s symlink: %m", etc_localtime);
+                        r = symlink_atomic(p, etc_localtime);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to create %s symlink: %m", etc_localtime);
 
                         log_info("%s copied.", etc_localtime);
                         return 0;
@@ -497,8 +498,9 @@ static int process_timezone(void) {
         e = strjoina("../usr/share/zoneinfo/", arg_timezone);
 
         (void) mkdir_parents(etc_localtime, 0755);
-        if (symlink(e, etc_localtime) < 0)
-                return log_error_errno(errno, "Failed to create %s symlink: %m", etc_localtime);
+        r = symlink_atomic(e, etc_localtime);
+        if (r < 0)
+                return log_error_errno(r, "Failed to create %s symlink: %m", etc_localtime);
 
         log_info("%s written", etc_localtime);
         return 0;
@@ -595,21 +597,8 @@ static int prompt_root_password(void) {
         if (arg_root_password)
                 return 0;
 
-        r = read_credential("passwd.hashed-password.root", (void**) &arg_root_password, NULL);
-        if (r == -ENOENT) {
-                r = read_credential("passwd.plaintext-password.root", (void**) &arg_root_password, NULL);
-                if (r < 0)
-                        log_debug_errno(r, "Couldn't read credential 'passwd.{hashed|plaintext}-password.root', ignoring: %m");
-                else {
-                        arg_root_password_is_hashed = false;
-                        return 0;
-                }
-        } else if (r < 0)
-                log_debug_errno(r, "Couldn't read credential 'passwd.hashed-password.root', ignoring: %m");
-        else {
-                arg_root_password_is_hashed = true;
+        if (get_credential_user_password("root", &arg_root_password, &arg_root_password_is_hashed) >= 0)
                 return 0;
-        }
 
         if (!arg_prompt_root_password)
                 return 0;
@@ -766,7 +755,7 @@ static int write_root_passwd(const char *passwd_path, const char *password, cons
                         .pw_gid = 0,
                         .pw_gecos = (char *) "Super User",
                         .pw_dir = (char *) "/root",
-                        .pw_shell = (char *) (shell ?: "/bin/sh"),
+                        .pw_shell = (char *) (shell ?: default_root_shell(arg_root)),
                 };
 
                 if (errno != ENOENT)

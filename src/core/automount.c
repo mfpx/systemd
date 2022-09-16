@@ -134,12 +134,13 @@ static int automount_add_trigger_dependencies(Automount *a) {
 
 static int automount_add_mount_dependencies(Automount *a) {
         _cleanup_free_ char *parent = NULL;
+        int r;
 
         assert(a);
 
-        parent = dirname_malloc(a->where);
-        if (!parent)
-                return -ENOMEM;
+        r = path_extract_directory(a->where, &parent);
+        if (r < 0)
+                return r;
 
         return unit_require_mounts_for(UNIT(a), parent, UNIT_DEPENDENCY_IMPLICIT);
 }
@@ -374,7 +375,7 @@ static int open_dev_autofs(Manager *m) {
                 return -errno;
         }
 
-        log_debug("Autofs kernel version %i.%i", param.ver_major, param.ver_minor);
+        log_debug("Autofs kernel version %u.%u", param.ver_major, param.ver_minor);
 
         return m->dev_autofs_fd;
 }
@@ -428,7 +429,7 @@ static int autofs_protocol(int dev_autofs_fd, int ioctl_fd) {
 
         minor = param.protosubver.sub_version;
 
-        log_debug("Autofs protocol version %i.%i", major, minor);
+        log_debug("Autofs protocol version %u.%u", major, minor);
         return 0;
 }
 

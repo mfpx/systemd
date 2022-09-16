@@ -12,18 +12,12 @@ TEST_DESCRIPTION="systemd-udev storage tests"
 TEST_NO_NSPAWN=1
 # Save only journals of failing test cases by default (to conserve space)
 TEST_SAVE_JOURNAL="${TEST_SAVE_JOURNAL:-fail}"
-QEMU_TIMEOUT="${QEMU_TIMEOUT:-600}"
 
 # shellcheck source=test/test-functions
 . "${TEST_BASE_DIR:?}/test-functions"
 
 USER_QEMU_OPTIONS="${QEMU_OPTIONS:-}"
 USER_KERNEL_APPEND="${KERNEL_APPEND:-}"
-
-if ! get_bool "$QEMU_KVM"; then
-    echo "This test requires KVM, skipping..."
-    exit 0
-fi
 
 _host_has_feature() {(
     set -e
@@ -213,6 +207,7 @@ testcase_nvme_basic() {
 
 # Test for issue https://github.com/systemd/systemd/issues/20212
 testcase_virtio_scsi_identically_named_partitions() {
+
     if ! "${QEMU_BIN:?}" -device help | grep 'name "virtio-scsi-pci"'; then
         echo "virtio-scsi-pci device driver is not available, skipping test..."
         return 77
@@ -222,25 +217,26 @@ testcase_virtio_scsi_identically_named_partitions() {
     # and attach them to a virtio-scsi controller
     local qemu_opts=("-device virtio-scsi-pci,id=scsi0,num_queues=4")
     local diskpath="${TESTDIR:?}/namedpart0.img"
-    local i lodev qemu_timeout
+    local i lodev num_disk num_part qemu_timeout
+
+    if get_bool "${IS_BUILT_WITH_ASAN:=}" || ! get_bool "$QEMU_KVM"; then
+        num_disk=4
+        num_part=4
+    else
+        num_disk=16
+        num_part=8
+    fi
 
     dd if=/dev/zero of="$diskpath" bs=1M count=18
     lodev="$(losetup --show -f -P "$diskpath")"
     sfdisk "${lodev:?}" <<EOF
 label: gpt
 
-name="Hello world", size=2M
-name="Hello world", size=2M
-name="Hello world", size=2M
-name="Hello world", size=2M
-name="Hello world", size=2M
-name="Hello world", size=2M
-name="Hello world", size=2M
-name="Hello world", size=2M
+$(for ((i = 1; i <= num_part; i++)); do echo 'name="Hello world", size=2M'; done)
 EOF
     losetup -d "$lodev"
 
-    for i in {0..15}; do
+    for ((i = 0; i < num_disk; i++)); do
         diskpath="${TESTDIR:?}/namedpart$i.img"
         if [[ $i -gt 0 ]]; then
             cp -uv "${TESTDIR:?}/namedpart0.img" "$diskpath"
@@ -254,7 +250,13 @@ EOF
 
     # Bump the timeout when collecting test coverage, since the test is a bit
     # slower in that case
-    is_built_with_coverage && qemu_timeout=120 || qemu_timeout=60
+    if get_bool "${IS_BUILT_WITH_ASAN:=}" || ! get_bool "$QEMU_KVM"; then
+        qemu_timeout=240
+    elif is_built_with_coverage; then
+        qemu_timeout=120
+    else
+        qemu_timeout=60
+    fi
 
     KERNEL_APPEND="systemd.setenv=TEST_FUNCTION_NAME=${FUNCNAME[0]} ${USER_KERNEL_APPEND:-}"
     # Limit the number of VCPUs and set a timeout to make sure we trigger the issue
@@ -286,8 +288,8 @@ EOF
     mkfs.ext4 -U "deadbeef-dead-dead-beef-111111111111" -L "failover_vol" "${lodev}p2"
     losetup -d "$lodev"
 
-    # Add 64 multipath devices, each backed by 4 paths
-    for ndisk in {0..63}; do
+    # Add 16 multipath devices, each backed by 4 paths
+    for ndisk in {0..15}; do
         wwn="0xDEADDEADBEEF$(printf "%.4d" "$ndisk")"
         # Use a partitioned disk for the first device to test failover
         [[ $ndisk -eq 0 ]] && image="$partdisk" || image="${TESTDIR:?}/disk$ndisk.img"

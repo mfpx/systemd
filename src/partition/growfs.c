@@ -10,10 +10,13 @@
 #include <sys/types.h>
 #include <sys/vfs.h>
 
+#include "sd-device.h"
+
 #include "blockdev-util.h"
 #include "btrfs-util.h"
 #include "cryptsetup-util.h"
 #include "device-nodes.h"
+#include "device-util.h"
 #include "devnum-util.h"
 #include "dissect-image.h"
 #include "escape.h"
@@ -41,22 +44,21 @@ static int resize_crypt_luks_device(dev_t devno, const char *fstype, dev_t main_
         if (r < 0)
                 return log_error_errno(r, "Cannot resize LUKS device: %m");
 
-        r = device_path_make_major_minor(S_IFBLK, main_devno, &main_devpath);
+        main_devfd = r = device_open_from_devnum(S_IFBLK, main_devno, O_RDONLY|O_CLOEXEC, &main_devpath);
         if (r < 0)
-                return log_error_errno(r, "Failed to format device major/minor path: %m");
-
-        main_devfd = open(main_devpath, O_RDONLY|O_CLOEXEC);
-        if (main_devfd < 0)
-                return log_error_errno(errno, "Failed to open \"%s\": %m", main_devpath);
+                return log_error_errno(r, "Failed to open main block device " DEVNUM_FORMAT_STR ": %m",
+                                       DEVNUM_FORMAT_VAL(main_devno));
 
         if (ioctl(main_devfd, BLKGETSIZE64, &size) != 0)
                 return log_error_errno(errno, "Failed to query size of \"%s\" (before resize): %m",
                                        main_devpath);
 
         log_debug("%s is %"PRIu64" bytes", main_devpath, size);
-        r = device_path_make_major_minor(S_IFBLK, devno, &devpath);
+
+        r = devname_from_devnum(S_IFBLK, devno, &devpath);
         if (r < 0)
-                return log_error_errno(r, "Failed to format major/minor path: %m");
+                return log_error_errno(r, "Failed to get devpath of " DEVNUM_FORMAT_STR ": %m",
+                                       DEVNUM_FORMAT_VAL(devno));
 
         r = sym_crypt_init(&cd, devpath);
         if (r < 0)
@@ -90,7 +92,7 @@ static int maybe_resize_underlying_device(
                 const char *mountpath,
                 dev_t main_devno) {
 
-        _cleanup_free_ char *fstype = NULL, *devpath = NULL;
+        _cleanup_free_ char *devpath = NULL, *fstype = NULL;
         dev_t devno;
         int r;
 
@@ -108,16 +110,17 @@ static int maybe_resize_underlying_device(
         if (devno == 0)
                 return log_error_errno(SYNTHETIC_ERRNO(ENODEV), "File system \"%s\" not backed by block device.", arg_target);
 
-        log_debug("Underlying device %d:%d, main dev %d:%d, %s",
-                  major(devno), minor(devno),
-                  major(main_devno), minor(main_devno),
+        log_debug("Underlying device " DEVNUM_FORMAT_STR ", main dev " DEVNUM_FORMAT_STR ", %s",
+                  DEVNUM_FORMAT_VAL(devno),
+                  DEVNUM_FORMAT_VAL(main_devno),
                   devno == main_devno ? "same" : "different");
         if (devno == main_devno)
                 return 0;
 
-        r = device_path_make_major_minor(S_IFBLK, devno, &devpath);
+        r = devname_from_devnum(S_IFBLK, devno, &devpath);
         if (r < 0)
-                return log_error_errno(r, "Failed to format device major/minor path: %m");
+                return log_error_errno(r, "Failed to get devpath for block device " DEVNUM_FORMAT_STR ": %m",
+                                       DEVNUM_FORMAT_VAL(devno));
 
         r = probe_filesystem(devpath, &fstype);
         if (r == -EUCLEAN)
@@ -205,7 +208,6 @@ static int run(int argc, char *argv[]) {
         _cleanup_close_ int mountfd = -1, devfd = -1;
         _cleanup_free_ char *devpath = NULL;
         uint64_t size, newsize;
-        struct stat st;
         dev_t devno;
         int r;
 
@@ -237,18 +239,10 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 log_warning_errno(r, "Unable to resize underlying device of \"%s\", proceeding anyway: %m", arg_target);
 
-        r = device_path_make_major_minor(S_IFBLK, devno, &devpath);
+        devfd = r = device_open_from_devnum(S_IFBLK, devno, O_RDONLY|O_CLOEXEC, &devpath);
         if (r < 0)
-                return log_error_errno(r, "Failed to format device major/minor path: %m");
-
-        devfd = open(devpath, O_RDONLY|O_CLOEXEC|O_NOCTTY);
-        if (devfd < 0)
-                return log_error_errno(errno, "Failed to open \"%s\": %m", devpath);
-
-        if (fstat(devfd, &st) < 0)
-                return log_error_errno(r, "Failed to stat() device %s: %m", devpath);
-        if (!S_ISBLK(st.st_mode))
-                return log_error_errno(SYNTHETIC_ERRNO(ENOTBLK), "Backing device of file system is not a block device, refusing.");
+                return log_error_errno(r, "Failed to open block device " DEVNUM_FORMAT_STR ": %m",
+                                       DEVNUM_FORMAT_VAL(devno));
 
         if (ioctl(devfd, BLKGETSIZE64, &size) != 0)
                 return log_error_errno(errno, "Failed to query size of \"%s\": %m", devpath);

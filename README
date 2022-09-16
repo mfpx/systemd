@@ -17,7 +17,6 @@ BUG REPORTS:
         https://github.com/systemd/systemd/issues
 
 OLDER DOCUMENTATION:
-
         http://0pointer.de/blog/projects/systemd.html
         https://www.freedesktop.org/wiki/Software/systemd
 
@@ -43,10 +42,15 @@ REQUIREMENTS:
                      ≥ 5.4 for signed Verity images
                      ≥ 5.7 for BPF links and the BPF LSM hook
 
-        Kernel versions below 4.15 have significant gaps in functionality and
-        are not recommended for use with this version of systemd. Taint flag
-        'old-kernel' will be set. Systemd will most likely still function, but
-        upstream support and testing are limited.
+        ⛔ Kernel versions below 3.15 ("minimum baseline") are not supported at
+        all, and are missing required functionality (e.g. CLOCK_BOOTTIME
+        support for timerfd_create()).
+
+        ⚠️ Kernel versions below 4.15 ("recommended baseline") have significant
+        gaps in functionality and are not recommended for use with this version
+        of systemd (e.g. lack sufficiently comprehensive and working cgroupv2
+        support). Taint flag 'old-kernel' will be set. systemd will most likely
+        still function, but upstream support and testing are limited.
 
         Kernel Config Options:
           CONFIG_DEVTMPFS
@@ -59,11 +63,6 @@ REQUIREMENTS:
           CONFIG_SYSFS
           CONFIG_PROC_FS
           CONFIG_FHANDLE (libudev, mount and bind mount handling)
-
-        Kernel crypto/hash API:
-          CONFIG_CRYPTO_USER_API_HASH
-          CONFIG_CRYPTO_HMAC
-          CONFIG_CRYPTO_SHA256
 
         udev will fail to work with the legacy sysfs layout:
           CONFIG_SYSFS_DEPRECATED=n
@@ -269,7 +268,6 @@ REQUIREMENTS:
         - capsh              (optional, used by test-execute)
 
 POLICY FOR SUPPORT OF DISTRIBUTIONS AND ARCHITECTURES:
-
         systemd main branch and latest major or stable releases are generally
         expected to compile on current versions of popular distributions (at
         least all non-EOL versions of Fedora, Debian unstable/testing/stable,
@@ -314,7 +312,7 @@ USERS AND GROUPS:
         Similarly, the coredump support requires the "systemd-coredump" system
         user and group to exist.
 
-NSS:
+GLIBC NSS:
         systemd ships with four glibc NSS modules:
 
         nss-myhostname resolves the local hostname to locally configured IP

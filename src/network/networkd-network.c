@@ -45,7 +45,7 @@
 #include "util.h"
 
 /* Let's assume that anything above this number is a user misconfiguration. */
-#define MAX_NTP_SERVERS 128
+#define MAX_NTP_SERVERS 128U
 
 static int network_resolve_netdev_one(Network *network, const char *name, NetDevKind kind, NetDev **ret) {
         const char *kind_string;
@@ -550,7 +550,8 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                         config_item_perf_lookup, network_network_gperf_lookup,
                         CONFIG_PARSE_WARN,
                         network,
-                        &network->stats_by_path);
+                        &network->stats_by_path,
+                        NULL);
         if (r < 0)
                 return r; /* config_parse_many() logs internally. */
 
@@ -711,6 +712,7 @@ static Network *network_free(Network *network) {
         set_free(network->dhcp_request_options);
         ordered_hashmap_free(network->dhcp_client_send_options);
         ordered_hashmap_free(network->dhcp_client_send_vendor_options);
+        free(network->dhcp_netlabel);
 
         /* DHCPv6 client */
         free(network->dhcp6_mudurl);
@@ -719,10 +721,12 @@ static Network *network_free(Network *network) {
         set_free(network->dhcp6_request_options);
         ordered_hashmap_free(network->dhcp6_client_send_options);
         ordered_hashmap_free(network->dhcp6_client_send_vendor_options);
+        free(network->dhcp6_netlabel);
 
         /* DHCP PD */
         free(network->dhcp_pd_uplink_name);
         set_free(network->dhcp_pd_tokens);
+        free(network->dhcp_pd_netlabel);
 
         /* Router advertisement */
         ordered_set_free(network->router_search_domains);
@@ -737,6 +741,7 @@ static Network *network_free(Network *network) {
         set_free(network->ndisc_deny_listed_route_prefix);
         set_free(network->ndisc_allow_listed_route_prefix);
         set_free(network->ndisc_tokens);
+        free(network->ndisc_netlabel);
 
         /* LLDP */
         free(network->lldp_mudurl);
@@ -845,13 +850,12 @@ int config_parse_stacked_netdev(
 
         _cleanup_free_ char *name = NULL;
         NetDevKind kind = ltype;
-        Hashmap **h = data;
+        Hashmap **h = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
         assert(IN_SET(kind,
                       NETDEV_KIND_IPOIB,
                       NETDEV_KIND_IPVLAN,
@@ -901,13 +905,12 @@ int config_parse_domains(
                 void *data,
                 void *userdata) {
 
-        Network *n = userdata;
+        Network *n = ASSERT_PTR(userdata);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(n);
 
         if (isempty(rvalue)) {
                 n->search_domains = ordered_set_free(n->search_domains);
@@ -979,13 +982,12 @@ int config_parse_timezone(
                 void *data,
                 void *userdata) {
 
-        char **tz = data;
+        char **tz = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         if (isempty(rvalue)) {
                 *tz = mfree(*tz);
@@ -1014,13 +1016,12 @@ int config_parse_dns(
                 void *data,
                 void *userdata) {
 
-        Network *n = userdata;
+        Network *n = ASSERT_PTR(userdata);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(n);
 
         if (isempty(rvalue)) {
                 for (unsigned i = 0; i < n->n_dns; i++)
@@ -1077,13 +1078,12 @@ int config_parse_dnssec_negative_trust_anchors(
                 void *data,
                 void *userdata) {
 
-        Set **nta = data;
+        Set **nta = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(nta);
 
         if (isempty(rvalue)) {
                 *nta = set_free_free(*nta);
@@ -1129,13 +1129,12 @@ int config_parse_ntp(
                 void *data,
                 void *userdata) {
 
-        char ***l = data;
+        char ***l = ASSERT_PTR(data);
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(l);
 
         if (isempty(rvalue)) {
                 *l = strv_free(*l);
@@ -1188,7 +1187,7 @@ int config_parse_required_for_online(
                 void *data,
                 void *userdata) {
 
-        Network *network = userdata;
+        Network *network = ASSERT_PTR(userdata);
         LinkOperationalStateRange range;
         bool required = true;
         int r;
@@ -1196,7 +1195,6 @@ int config_parse_required_for_online(
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(network);
 
         if (isempty(rvalue)) {
                 network->required_for_online = -1;
@@ -1236,14 +1234,13 @@ int config_parse_link_group(
                 void *data,
                 void *userdata) {
 
-        Network *network = userdata;
+        Network *network = ASSERT_PTR(userdata);
         int r;
         int32_t group;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(network);
 
         if (isempty(rvalue)) {
                 network->group = -1;
@@ -1279,14 +1276,13 @@ int config_parse_ignore_carrier_loss(
                 void *data,
                 void *userdata) {
 
-        Network *network = userdata;
+        Network *network = ASSERT_PTR(userdata);
         usec_t usec;
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(network);
 
         if (isempty(rvalue)) {
                 network->ignore_carrier_loss_set = false;

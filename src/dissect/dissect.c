@@ -14,6 +14,8 @@
 #include "blockdev-util.h"
 #include "chase-symlinks.h"
 #include "copy.h"
+#include "device-util.h"
+#include "devnum-util.h"
 #include "dissect-image.h"
 #include "env-util.h"
 #include "fd-util.h"
@@ -683,7 +685,6 @@ static int action_mount(DissectedImage *m, LoopDevice *d) {
                         return log_error_errno(r, "Failed to relinquish DM devices: %m");
         }
 
-        dissected_image_relinquish(m);
         loop_device_relinquish(d);
         return 0;
 }
@@ -736,7 +737,6 @@ static int action_copy(DissectedImage *m, LoopDevice *d) {
                         return log_error_errno(r, "Failed to relinquish DM devices: %m");
         }
 
-        dissected_image_relinquish(m);
         loop_device_relinquish(d);
 
         if (arg_action == ACTION_COPY_FROM) {
@@ -791,9 +791,9 @@ static int action_copy(DissectedImage *m, LoopDevice *d) {
 
                 assert(arg_action == ACTION_COPY_TO);
 
-                dn = dirname_malloc(arg_target);
-                if (!dn)
-                        return log_oom();
+                r = path_extract_directory(arg_target, &dn);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to extract directory name from target path '%s': %m", arg_target);
 
                 r = chase_symlinks(dn, mounted_dir, CHASE_PREFIX_ROOT|CHASE_WARN, NULL, &dfd);
                 if (r < 0)
@@ -859,12 +859,10 @@ static int action_copy(DissectedImage *m, LoopDevice *d) {
 
 static int action_umount(const char *path) {
         _cleanup_close_ int fd = -1;
-        _cleanup_free_ char *canonical = NULL;
-        dev_t devno;
-        const char *devname;
+        _cleanup_free_ char *canonical = NULL, *devname = NULL;
         _cleanup_(loop_device_unrefp) LoopDevice *d = NULL;
-        _cleanup_(sd_device_unrefp) sd_device *device = NULL;
-        int r, k;
+        dev_t devno;
+        int r;
 
         fd = chase_symlinks_and_open(path, NULL, 0, O_DIRECTORY, &canonical);
         if (fd == -ENOTDIR)
@@ -882,23 +880,14 @@ static int action_umount(const char *path) {
         if (r < 0)
                 return log_error_errno(r, "Failed to find backing block device for '%s': %m", canonical);
 
-        r = sd_device_new_from_devnum(&device, 'b', devno);
+        r = devname_from_devnum(S_IFBLK, devno, &devname);
         if (r < 0)
-                return log_error_errno(r, "Failed to create sd-device object for block device %u:%u: %m",
-                                       major(devno), minor(devno));
+                return log_error_errno(r, "Failed to get devname of block device " DEVNUM_FORMAT_STR ": %m",
+                                       DEVNUM_FORMAT_VAL(devno));
 
-        r = sd_device_get_devname(device, &devname);
-        if (r < 0)
-                return log_error_errno(r, "Failed to get devname of block device %u:%u: %m",
-                                       major(devno), minor(devno));
-
-        r = loop_device_open(devname, 0, &d);
+        r = loop_device_open(devname, 0, LOCK_EX, &d);
         if (r < 0)
                 return log_error_errno(r, "Failed to open loop device '%s': %m", devname);
-
-        r = loop_device_flock(d, LOCK_EX);
-        if (r < 0)
-                return log_error_errno(r, "Failed to lock loop device '%s': %m", devname);
 
         /* We've locked the loop device, now we're ready to unmount. To allow the unmount to succeed, we have
          * to close the O_PATH fd we opened earlier. */
@@ -912,25 +901,12 @@ static int action_umount(const char *path) {
         loop_device_unrelinquish(d);
 
         if (arg_rmdir) {
-                k = RET_NERRNO(rmdir(canonical));
-                if (k < 0)
-                        log_error_errno(k, "Failed to remove mount directory '%s': %m", canonical);
-        } else
-                k = 0;
-
-        /* Before loop_device_unrefp() kicks in, let's explicitly remove all the partition subdevices of the
-         * loop device. We do this to ensure that all traces of the loop device are gone by the time this
-         * command exits. */
-        r = block_device_remove_all_partitions(d->fd);
-        if (r == -EBUSY) {
-                log_error_errno(r, "One or more partitions of '%s' are busy, ignoring", devname);
-                r = 0;
+                r = RET_NERRNO(rmdir(canonical));
+                if (r < 0)
+                        return log_error_errno(r, "Failed to remove mount directory '%s': %m", canonical);
         }
-        if (r < 0)
-                log_error_errno(r, "Failed to remove one or more partitions of '%s': %m", devname);
 
-
-        return k < 0 ? k : r;
+        return 0;
 }
 
 static int run(int argc, char *argv[]) {
@@ -964,24 +940,15 @@ static int run(int argc, char *argv[]) {
                         arg_image,
                         FLAGS_SET(arg_flags, DISSECT_IMAGE_DEVICE_READ_ONLY) ? O_RDONLY : O_RDWR,
                         FLAGS_SET(arg_flags, DISSECT_IMAGE_NO_PARTITION_TABLE) ? 0 : LO_FLAGS_PARTSCAN,
+                        LOCK_SH,
                         &d);
         if (r < 0)
                 return log_error_errno(r, "Failed to set up loopback device for %s: %m", arg_image);
 
-        /* Make sure udevd doesn't issue BLKRRPART underneath us thus making devices disappear in the middle,
-         * that we assume already are there. */
-        r = loop_device_flock(d, LOCK_SH);
-        if (r < 0)
-                return log_error_errno(r, "Failed to lock loopback device: %m");
-
-        r = dissect_image_and_warn(
-                        d->fd,
-                        arg_image,
+        r = dissect_loop_device_and_warn(
+                        d,
                         &arg_verity_settings,
                         NULL,
-                        d->diskseq,
-                        d->uevent_seqnum_not_before,
-                        d->timestamp_not_before,
                         arg_flags,
                         &m);
         if (r < 0)

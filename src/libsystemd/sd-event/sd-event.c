@@ -3823,7 +3823,7 @@ static void event_close_inode_data_fds(sd_event *e) {
 
         /* Close the fds pointing to the inodes to watch now. We need to close them as they might otherwise pin
          * filesystems. But we can't close them right-away as we need them as long as the user still wants to make
-         * adjustments to the even source, such as changing the priority (which requires us to remove and re-add a watch
+         * adjustments to the event source, such as changing the priority (which requires us to remove and re-add a watch
          * for the inode). Hence, let's close them when entering the first iteration after they were added, as a
          * compromise. */
 
@@ -4531,8 +4531,8 @@ _public_ int sd_event_source_set_ratelimit_expire_callback(sd_event_source *s, s
 _public_ int sd_event_source_get_ratelimit(sd_event_source *s, uint64_t *ret_interval, unsigned *ret_burst) {
         assert_return(s, -EINVAL);
 
-        /* Querying whether an event source has ratelimiting configured is not a loggable offsense, hence
-         * don't use assert_return(). Unlike turning on ratelimiting it's not really a programming error */
+        /* Querying whether an event source has ratelimiting configured is not a loggable offense, hence
+         * don't use assert_return(). Unlike turning on ratelimiting it's not really a programming error. */
         if (!EVENT_SOURCE_CAN_RATE_LIMIT(s->type))
                 return -EDOM;
 

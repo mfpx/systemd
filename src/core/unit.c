@@ -41,6 +41,7 @@
 #include "path-util.h"
 #include "process-util.h"
 #include "rm-rf.h"
+#include "serialize.h"
 #include "set.h"
 #include "signal-util.h"
 #include "sparse-endian.h"
@@ -594,12 +595,10 @@ static void unit_remove_transient(Unit *u) {
         STRV_FOREACH(i, u->dropin_paths) {
                 _cleanup_free_ char *p = NULL, *pp = NULL;
 
-                p = dirname_malloc(*i); /* Get the drop-in directory from the drop-in file */
-                if (!p)
+                if (path_extract_directory(*i, &p) < 0) /* Get the drop-in directory from the drop-in file */
                         continue;
 
-                pp = dirname_malloc(p); /* Get the config directory from the drop-in directory */
-                if (!pp)
+                if (path_extract_directory(p, &pp) < 0) /* Get the config directory from the drop-in directory */
                         continue;
 
                 /* Only drop transient drop-ins */
@@ -808,6 +807,8 @@ Unit* unit_free(Unit *u) {
 
         set_free_free(u->aliases);
         free(u->id);
+
+        activation_details_unref(u->activation_details);
 
         return mfree(u);
 }
@@ -1190,6 +1191,9 @@ int unit_merge(Unit *u, Unit *other) {
         other->load_state = UNIT_MERGED;
         other->merged_into = u;
 
+        if (!u->activation_details)
+                u->activation_details = activation_details_ref(other->activation_details);
+
         /* If there is still some data attached to the other node, we
          * don't need it anymore, and can free it. */
         if (other->load_state != UNIT_STUB)
@@ -1444,9 +1448,7 @@ int unit_load_fragment_and_dropin(Unit *u, bool fragment_required) {
 }
 
 void unit_add_to_target_deps_queue(Unit *u) {
-        Manager *m = u->manager;
-
-        assert(u);
+        Manager *m = ASSERT_PTR(ASSERT_PTR(u)->manager);
 
         if (u->in_target_deps_queue)
                 return;
@@ -1863,7 +1865,7 @@ static bool unit_verify_deps(Unit *u) {
  *         -ESTALE:     This unit has been started before and can't be started a second time
  *         -ENOENT:     This is a triggering unit and unit to trigger is not loaded
  */
-int unit_start(Unit *u) {
+int unit_start(Unit *u, ActivationDetails *details) {
         UnitActiveState state;
         Unit *following;
         int r;
@@ -1912,7 +1914,7 @@ int unit_start(Unit *u) {
 
         /* Let's make sure that the deps really are in order before we start this. Normally the job engine
          * should have taken care of this already, but let's check this here again. After all, our
-         * dependencies might not be in effect anymore, due to a reload or due to a failed condition. */
+         * dependencies might not be in effect anymore, due to a reload or due to an unmet condition. */
         if (!unit_verify_deps(u))
                 return -ENOLINK;
 
@@ -1920,7 +1922,7 @@ int unit_start(Unit *u) {
         following = unit_following(u);
         if (following) {
                 log_unit_debug(u, "Redirecting start request from %s to %s.", u->id, following->id);
-                return unit_start(following);
+                return unit_start(following, details);
         }
 
         /* Check our ability to start early so that failure conditions don't cause us to enter a busy loop. */
@@ -1940,6 +1942,9 @@ int unit_start(Unit *u) {
 
         unit_add_to_dbus_queue(u);
         unit_cgroup_freezer_action(u, FREEZER_THAW);
+
+        if (!u->activation_details) /* Older details object wins */
+                u->activation_details = activation_details_ref(details);
 
         return UNIT_VTABLE(u)->start(u);
 }
@@ -2256,7 +2261,7 @@ void unit_start_on_failure(
         }
 
         if (n_jobs >= 0)
-                log_unit_debug(u, "Triggering %s dependencies done (%u %s).",
+                log_unit_debug(u, "Triggering %s dependencies done (%i %s).",
                                dependency_name, n_jobs, n_jobs == 1 ? "job" : "jobs");
 }
 
@@ -2918,10 +2923,9 @@ static void unit_tidy_watch_pids(Unit *u) {
 }
 
 static int on_rewatch_pids_event(sd_event_source *s, void *userdata) {
-        Unit *u = userdata;
+        Unit *u = ASSERT_PTR(userdata);
 
         assert(s);
-        assert(u);
 
         unit_tidy_watch_pids(u);
         unit_watch_all_pids(u);
@@ -3434,11 +3438,10 @@ int unit_load_related_unit(Unit *u, const char *type, Unit **_found) {
 
 static int signal_name_owner_changed(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         const char *new_owner;
-        Unit *u = userdata;
+        Unit *u = ASSERT_PTR(userdata);
         int r;
 
         assert(message);
-        assert(u);
 
         r = sd_bus_message_read(message, "sss", NULL, NULL, &new_owner);
         if (r < 0) {
@@ -3455,11 +3458,10 @@ static int signal_name_owner_changed(sd_bus_message *message, void *userdata, sd
 static int get_name_owner_handler(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         const sd_bus_error *e;
         const char *new_owner;
-        Unit *u = userdata;
+        Unit *u = ASSERT_PTR(userdata);
         int r;
 
         assert(message);
-        assert(u);
 
         u->get_name_owner_slot = sd_bus_slot_unref(u->get_name_owner_slot);
 
@@ -3843,9 +3845,7 @@ static Set *unit_pid_set(pid_t main_pid, pid_t control_pid) {
 
 static int kill_common_log(pid_t pid, int signo, void *userdata) {
         _cleanup_free_ char *comm = NULL;
-        Unit *u = userdata;
-
-        assert(u);
+        Unit *u = ASSERT_PTR(userdata);
 
         (void) get_process_comm(pid, &comm);
         log_unit_info(u, "Sending signal SIG%s to process " PID_FMT " (%s) on client request.",
@@ -4247,51 +4247,62 @@ static const char* unit_drop_in_dir(Unit *u, UnitWriteFlags flags) {
 }
 
 char* unit_escape_setting(const char *s, UnitWriteFlags flags, char **buf) {
-        char *ret = NULL;
+        assert(!FLAGS_SET(flags, UNIT_ESCAPE_EXEC_SYNTAX | UNIT_ESCAPE_C));
+
+        _cleanup_free_ char *t = NULL;
 
         if (!s)
                 return NULL;
 
-        /* Escapes the input string as requested. Returns the escaped string. If 'buf' is specified then the allocated
-         * return buffer pointer is also written to *buf, except if no escaping was necessary, in which case *buf is
-         * set to NULL, and the input pointer is returned as-is. This means the return value always contains a properly
-         * escaped version, but *buf when passed only contains a pointer if an allocation was necessary. If *buf is
-         * not specified, then the return value always needs to be freed. Callers can use this to optimize memory
-         * allocations. */
+        /* Escapes the input string as requested. Returns the escaped string. If 'buf' is specified then the
+         * allocated return buffer pointer is also written to *buf, except if no escaping was necessary, in
+         * which case *buf is set to NULL, and the input pointer is returned as-is. This means the return
+         * value always contains a properly escaped version, but *buf when passed only contains a pointer if
+         * an allocation was necessary. If *buf is not specified, then the return value always needs to be
+         * freed. Callers can use this to optimize memory allocations. */
 
         if (flags & UNIT_ESCAPE_SPECIFIERS) {
-                ret = specifier_escape(s);
-                if (!ret)
+                t = specifier_escape(s);
+                if (!t)
                         return NULL;
 
-                s = ret;
+                s = t;
         }
 
-        if (flags & UNIT_ESCAPE_C) {
-                char *a;
+        /* We either do c-escaping or shell-escaping, to additionally escape characters that we parse for
+         * ExecStart= and friend, i.e. '$' and ';' and quotes. */
 
-                a = cescape(s);
-                free(ret);
-                if (!a)
+        if (flags & UNIT_ESCAPE_EXEC_SYNTAX) {
+                char *t2 = shell_escape(s, "$;'\"");
+                if (!t2)
                         return NULL;
+                free_and_replace(t, t2);
 
-                ret = a;
+                s = t;
+
+        } else if (flags & UNIT_ESCAPE_C) {
+                char *t2 = cescape(s);
+                if (!t2)
+                        return NULL;
+                free_and_replace(t, t2);
+
+                s = t;
         }
 
         if (buf) {
-                *buf = ret;
-                return ret ?: (char*) s;
+                *buf = TAKE_PTR(t);
+                return (char*) s;
         }
 
-        return ret ?: strdup(s);
+        return TAKE_PTR(t) ?: strdup(s);
 }
 
 char* unit_concat_strv(char **l, UnitWriteFlags flags) {
         _cleanup_free_ char *result = NULL;
         size_t n = 0;
 
-        /* Takes a list of strings, escapes them, and concatenates them. This may be used to format command lines in a
-         * way suitable for ExecStart= stanzas */
+        /* Takes a list of strings, escapes them, and concatenates them. This may be used to format command
+         * lines in a way suitable for ExecStart= stanzas. */
 
         STRV_FOREACH(i, l) {
                 _cleanup_free_ char *buf = NULL;
@@ -5921,3 +5932,154 @@ int unit_get_dependency_array(const Unit *u, UnitDependencyAtom atom, Unit ***re
         assert(n <= INT_MAX);
         return (int) n;
 }
+
+const ActivationDetailsVTable * const activation_details_vtable[_UNIT_TYPE_MAX] = {
+        [UNIT_PATH] = &activation_details_path_vtable,
+        [UNIT_TIMER] = &activation_details_timer_vtable,
+};
+
+ActivationDetails *activation_details_new(Unit *trigger_unit) {
+        _cleanup_free_ ActivationDetails *details = NULL;
+
+        assert(trigger_unit);
+        assert(trigger_unit->type != _UNIT_TYPE_INVALID);
+        assert(trigger_unit->id);
+
+        details = malloc0(activation_details_vtable[trigger_unit->type]->object_size);
+        if (!details)
+                return NULL;
+
+        *details = (ActivationDetails) {
+                .n_ref = 1,
+                .trigger_unit_type = trigger_unit->type,
+        };
+
+        details->trigger_unit_name = strdup(trigger_unit->id);
+        if (!details->trigger_unit_name)
+                return NULL;
+
+        if (ACTIVATION_DETAILS_VTABLE(details)->init)
+                ACTIVATION_DETAILS_VTABLE(details)->init(details, trigger_unit);
+
+        return TAKE_PTR(details);
+}
+
+static ActivationDetails *activation_details_free(ActivationDetails *details) {
+        if (!details)
+                return NULL;
+
+        if (ACTIVATION_DETAILS_VTABLE(details)->done)
+                ACTIVATION_DETAILS_VTABLE(details)->done(details);
+
+        free(details->trigger_unit_name);
+
+        return mfree(details);
+}
+
+void activation_details_serialize(ActivationDetails *details, FILE *f) {
+        if (!details || details->trigger_unit_type == _UNIT_TYPE_INVALID)
+                return;
+
+        (void) serialize_item(f, "activation-details-unit-type", unit_type_to_string(details->trigger_unit_type));
+        if (details->trigger_unit_name)
+                (void) serialize_item(f, "activation-details-unit-name", details->trigger_unit_name);
+        if (ACTIVATION_DETAILS_VTABLE(details)->serialize)
+                ACTIVATION_DETAILS_VTABLE(details)->serialize(details, f);
+}
+
+int activation_details_deserialize(const char *key, const char *value, ActivationDetails **details) {
+        assert(key);
+        assert(value);
+        assert(details);
+
+        if (!*details) {
+                UnitType t;
+
+                if (!streq(key, "activation-details-unit-type"))
+                        return -EINVAL;
+
+                t = unit_type_from_string(value);
+                if (t == _UNIT_TYPE_INVALID)
+                        return -EINVAL;
+
+                *details = malloc0(activation_details_vtable[t]->object_size);
+                if (!*details)
+                        return -ENOMEM;
+
+                **details = (ActivationDetails) {
+                        .n_ref = 1,
+                        .trigger_unit_type = t,
+                };
+
+                return 0;
+        }
+
+        if (streq(key, "activation-details-unit-name")) {
+                (*details)->trigger_unit_name = strdup(value);
+                if (!(*details)->trigger_unit_name)
+                        return -ENOMEM;
+
+                return 0;
+        }
+
+        if (ACTIVATION_DETAILS_VTABLE(*details)->deserialize)
+                return ACTIVATION_DETAILS_VTABLE(*details)->deserialize(key, value, details);
+
+        return -EINVAL;
+}
+
+int activation_details_append_env(ActivationDetails *details, char ***strv) {
+        int r = 0;
+
+        assert(strv);
+
+        if (!details)
+                return 0;
+
+        if (!isempty(details->trigger_unit_name)) {
+                char *s = strjoin("TRIGGER_UNIT=", details->trigger_unit_name);
+                if (!s)
+                        return -ENOMEM;
+
+                r = strv_consume(strv, TAKE_PTR(s));
+                if (r < 0)
+                        return r;
+        }
+
+        if (ACTIVATION_DETAILS_VTABLE(details)->append_env) {
+                r = ACTIVATION_DETAILS_VTABLE(details)->append_env(details, strv);
+                if (r < 0)
+                        return r;
+        }
+
+        return r + !isempty(details->trigger_unit_name); /* Return the number of variables added to the env block */
+}
+
+int activation_details_append_pair(ActivationDetails *details, char ***strv) {
+        int r = 0;
+
+        assert(strv);
+
+        if (!details)
+                return 0;
+
+        if (!isempty(details->trigger_unit_name)) {
+                r = strv_extend(strv, "trigger_unit");
+                if (r < 0)
+                        return r;
+
+                r = strv_extend(strv, details->trigger_unit_name);
+                if (r < 0)
+                        return r;
+        }
+
+        if (ACTIVATION_DETAILS_VTABLE(details)->append_env) {
+                r = ACTIVATION_DETAILS_VTABLE(details)->append_pair(details, strv);
+                if (r < 0)
+                        return r;
+        }
+
+        return r + !isempty(details->trigger_unit_name); /* Return the number of pairs added to the strv */
+}
+
+DEFINE_TRIVIAL_REF_UNREF_FUNC(ActivationDetails, activation_details, activation_details_free);

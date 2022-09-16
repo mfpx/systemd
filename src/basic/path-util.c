@@ -1,22 +1,18 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
+#include <fnmatch.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-/* When we include libgen.h because we need dirname() we immediately
- * undefine basename() since libgen.h defines it as a macro to the
- * POSIX version which is really broken. We prefer GNU basename(). */
-#include <libgen.h>
-#undef basename
 
 #include "alloc-util.h"
 #include "chase-symlinks.h"
 #include "extract-word.h"
 #include "fd-util.h"
 #include "fs-util.h"
+#include "glob-util.h"
 #include "log.h"
 #include "macro.h"
 #include "path-util.h"
@@ -197,6 +193,24 @@ int path_make_relative(const char *from, const char *to, char **ret) {
         return 0;
 }
 
+int path_make_relative_parent(const char *from_child, const char *to, char **ret) {
+        _cleanup_free_ char *from = NULL;
+        int r;
+
+        assert(from_child);
+        assert(to);
+        assert(ret);
+
+        /* Similar to path_make_relative(), but provides the relative path from the parent directory of
+         * 'from_child'. This may be useful when creating relative symlink. */
+
+        r = path_extract_directory(from_child, &from);
+        if (r < 0)
+                return r;
+
+        return path_make_relative(from, to, ret);
+}
+
 char* path_startswith_strv(const char *p, char **set) {
         STRV_FOREACH(s, set) {
                 char *t;
@@ -324,10 +338,8 @@ char **path_strv_resolve_uniq(char **l, const char *root) {
 
 char *path_simplify(char *path) {
         bool add_slash = false;
-        char *f = path;
+        char *f = ASSERT_PTR(path);
         int r;
-
-        assert(path);
 
         /* Removes redundant inner and trailing slashes. Also removes unnecessary dots.
          * Modifies the passed string in-place.
@@ -770,27 +782,6 @@ int fsck_exists(const char *fstype) {
 
         checker = strjoina("fsck.", fstype);
         return executable_is_good(checker);
-}
-
-char* dirname_malloc(const char *path) {
-        char *d, *dir, *dir2;
-
-        assert(path);
-
-        d = strdup(path);
-        if (!d)
-                return NULL;
-
-        dir = dirname(d);
-        assert(dir);
-
-        if (dir == d)
-                return d;
-
-        dir2 = strdup(dir);
-        free(d);
-
-        return dir2;
 }
 
 static const char *skip_slash_or_dot(const char *p) {
@@ -1308,5 +1299,68 @@ bool prefixed_path_strv_contains(char **l, const char *path) {
                         return true;
         }
 
+        return false;
+}
+
+int path_glob_can_match(const char *pattern, const char *prefix, char **ret) {
+        assert(pattern);
+        assert(prefix);
+
+        for (const char *a = pattern, *b = prefix;;) {
+                _cleanup_free_ char *g = NULL, *h = NULL;
+                const char *p, *q;
+                int r, s;
+
+                r = path_find_first_component(&a, /* accept_dot_dot = */ false, &p);
+                if (r < 0)
+                        return r;
+
+                s = path_find_first_component(&b, /* accept_dot_dot = */ false, &q);
+                if (s < 0)
+                        return s;
+
+                if (s == 0) {
+                        /* The pattern matches the prefix. */
+                        if (ret) {
+                                char *t;
+
+                                t = path_join(prefix, p);
+                                if (!t)
+                                        return -ENOMEM;
+
+                                *ret = t;
+                        }
+                        return true;
+                }
+
+                if (r == 0)
+                        break;
+
+                if (r == s && strneq(p, q, r))
+                        continue; /* common component. Check next. */
+
+                g = strndup(p, r);
+                if (!g)
+                        return -ENOMEM;
+
+                if (!string_is_glob(g))
+                        break;
+
+                /* We found a glob component. Check if the glob pattern matches the prefix component. */
+
+                h = strndup(q, s);
+                if (!h)
+                        return -ENOMEM;
+
+                r = fnmatch(g, h, 0);
+                if (r == FNM_NOMATCH)
+                        break;
+                if (r != 0) /* Failure to process pattern? */
+                        return -EINVAL;
+        }
+
+        /* The pattern does not match the prefix. */
+        if (ret)
+                *ret = NULL;
         return false;
 }

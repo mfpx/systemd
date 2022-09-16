@@ -46,7 +46,6 @@ int device_new_aux(sd_device **ret) {
 
         *device = (sd_device) {
                 .n_ref = 1,
-                .watch_handle = -1,
                 .devmode = MODE_INVALID,
                 .devuid = UID_INVALID,
                 .devgid = GID_INVALID,
@@ -145,15 +144,12 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
         assert(device);
         assert(_syspath);
 
-        /* must be a subdirectory of /sys */
-        if (!path_startswith(_syspath, "/sys/"))
-                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "sd-device: Syspath '%s' is not a subdirectory of /sys",
-                                       _syspath);
-
         if (verify) {
                 _cleanup_close_ int fd = -1;
 
+                /* The input path maybe a symlink located outside of /sys. Let's try to chase the symlink at first.
+                 * The primary usecase is that e.g. /proc/device-tree is a symlink to /sys/firmware/devicetree/base.
+                 * By chasing symlinks in the path at first, we can call sd_device_new_from_path() with such path. */
                 r = chase_symlinks(_syspath, NULL, 0, &syspath, &fd);
                 if (r == -ENOENT)
                          /* the device does not exist (any more?) */
@@ -230,6 +226,12 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
                                                        "sd-device: the syspath \"%s\" is outside of sysfs, refusing.", syspath);
                 }
         } else {
+                /* must be a subdirectory of /sys */
+                if (!path_startswith(_syspath, "/sys/"))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "sd-device: Syspath '%s' is not a subdirectory of /sys",
+                                               _syspath);
+
                 syspath = strdup(_syspath);
                 if (!syspath)
                         return log_oom_debug();
@@ -250,12 +252,15 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
         return 0;
 }
 
-_public_ int sd_device_new_from_syspath(sd_device **ret, const char *syspath) {
+static int device_new_from_syspath(sd_device **ret, const char *syspath, bool strict) {
         _cleanup_(sd_device_unrefp) sd_device *device = NULL;
         int r;
 
         assert_return(ret, -EINVAL);
         assert_return(syspath, -EINVAL);
+
+        if (strict && !path_startswith(syspath, "/sys/"))
+                return -EINVAL;
 
         r = device_new_aux(&device);
         if (r < 0)
@@ -269,7 +274,11 @@ _public_ int sd_device_new_from_syspath(sd_device **ret, const char *syspath) {
         return 0;
 }
 
-static int device_new_from_mode_and_devnum(sd_device **ret, mode_t mode, dev_t devnum) {
+_public_ int sd_device_new_from_syspath(sd_device **ret, const char *syspath) {
+        return device_new_from_syspath(ret, syspath, /* strict = */ true);
+}
+
+int device_new_from_mode_and_devnum(sd_device **ret, mode_t mode, dev_t devnum) {
         _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
         _cleanup_free_ char *syspath = NULL;
         const char *t, *subsystem;
@@ -516,7 +525,7 @@ _public_ int sd_device_new_from_path(sd_device **ret, const char *path) {
         if (path_startswith(path, "/dev"))
                 return sd_device_new_from_devname(ret, path);
 
-        return sd_device_new_from_syspath(ret, path);
+        return device_new_from_syspath(ret, path, /* strict = */ false);
 }
 
 int device_set_devtype(sd_device *device, const char *devtype) {
@@ -2118,8 +2127,8 @@ int device_get_cached_sysattr_value(sd_device *device, const char *key, const ch
 /* We cache all sysattr lookups. If an attribute does not exist, it is stored
  * with a NULL value in the cache, otherwise the returned string is stored */
 _public_ int sd_device_get_sysattr_value(sd_device *device, const char *sysattr, const char **ret_value) {
-        _cleanup_free_ char *value = NULL;
-        const char *path, *syspath;
+        _cleanup_free_ char *value = NULL, *path = NULL;
+        const char *syspath;
         struct stat statbuf;
         int r;
 
@@ -2135,7 +2144,10 @@ _public_ int sd_device_get_sysattr_value(sd_device *device, const char *sysattr,
         if (r < 0)
                 return r;
 
-        path = prefix_roota(syspath, sysattr);
+        path = path_join(syspath, sysattr);
+        if (!path)
+                return -ENOMEM;
+
         if (lstat(path, &statbuf) < 0) {
                 int k;
 
@@ -2193,6 +2205,25 @@ _public_ int sd_device_get_sysattr_value(sd_device *device, const char *sysattr,
         return 0;
 }
 
+int device_get_sysattr_unsigned(sd_device *device, const char *sysattr, unsigned *ret_value) {
+        const char *value;
+        int r;
+
+        r = sd_device_get_sysattr_value(device, sysattr, &value);
+        if (r < 0)
+                return r;
+
+        unsigned v;
+        r = safe_atou(value, &v);
+        if (r < 0)
+                return log_device_debug_errno(device, r, "Failed to parse '%s' attribute: %m", sysattr);
+
+        if (ret_value)
+                *ret_value = v;
+        /* We return "true" if the value is positive. */
+        return v > 0;
+}
+
 int device_get_sysattr_bool(sd_device *device, const char *sysattr) {
         const char *value;
         int r;
@@ -2217,8 +2248,8 @@ static void device_remove_cached_sysattr_value(sd_device *device, const char *_k
 }
 
 _public_ int sd_device_set_sysattr_value(sd_device *device, const char *sysattr, const char *_value) {
-        _cleanup_free_ char *value = NULL;
-        const char *syspath, *path;
+        _cleanup_free_ char *value = NULL, *path = NULL;
+        const char *syspath;
         size_t len;
         int r;
 
@@ -2237,7 +2268,9 @@ _public_ int sd_device_set_sysattr_value(sd_device *device, const char *sysattr,
         if (r < 0)
                 return r;
 
-        path = prefix_roota(syspath, sysattr);
+        path = path_join(syspath, sysattr);
+        if (!path)
+                return -ENOMEM;
 
         len = strlen(_value);
 
@@ -2388,13 +2421,20 @@ _public_ int sd_device_open(sd_device *device, int flags) {
         if (FLAGS_SET(flags, O_PATH))
                 return TAKE_FD(fd);
 
-        r = device_get_property_bool(device, "ID_IGNORE_DISKSEQ");
-        if (r < 0 && r != -ENOENT)
+        /* If the device is not initialized, then we cannot determine if we should check diskseq through
+         * ID_IGNORE_DISKSEQ property. Let's skip to check diskseq in that case. */
+        r = sd_device_get_is_initialized(device);
+        if (r < 0)
                 return r;
-        if (r <= 0) {
-                r = sd_device_get_diskseq(device, &diskseq);
+        if (r > 0) {
+                r = device_get_property_bool(device, "ID_IGNORE_DISKSEQ");
                 if (r < 0 && r != -ENOENT)
                         return r;
+                if (r <= 0) {
+                        r = sd_device_get_diskseq(device, &diskseq);
+                        if (r < 0 && r != -ENOENT)
+                                return r;
+                }
         }
 
         fd2 = open(FORMAT_PROC_FD_PATH(fd), flags);

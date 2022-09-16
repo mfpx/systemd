@@ -2746,7 +2746,7 @@ static int load_credential(
                 _cleanup_free_ void *plaintext = NULL;
                 size_t plaintext_size = 0;
 
-                r = decrypt_credential_and_warn(id, now(CLOCK_REALTIME), NULL, data, size, &plaintext, &plaintext_size);
+                r = decrypt_credential_and_warn(id, now(CLOCK_REALTIME), NULL, NULL, data, size, &plaintext, &plaintext_size);
                 if (r < 0)
                         return r;
 
@@ -2920,7 +2920,7 @@ static int acquire_credentials(
                         return log_debug_errno(errno, "Failed to test if credential %s exists: %m", sc->id);
 
                 if (sc->encrypted) {
-                        r = decrypt_credential_and_warn(sc->id, now(CLOCK_REALTIME), NULL, sc->data, sc->size, &plaintext, &size);
+                        r = decrypt_credential_and_warn(sc->id, now(CLOCK_REALTIME), NULL, NULL, sc->data, sc->size, &plaintext, &size);
                         if (r < 0)
                                 return r;
 
@@ -3104,9 +3104,9 @@ static int setup_credentials_internal(
                 /* If we do not have our own mount put used the plain directory fallback, then we need to
                  * open access to the top-level credential directory and the per-service directory now */
 
-                parent = dirname_malloc(final);
-                if (!parent)
-                        return -ENOMEM;
+                r = path_extract_directory(final, &parent);
+                if (r < 0)
+                        return r;
                 if (chmod(parent, 0755) < 0)
                         return -errno;
         }
@@ -6869,11 +6869,10 @@ int exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds) {
         _cleanup_free_ char *tmp_dir = NULL, *var_tmp_dir = NULL;
         char *id = NULL;
         int r, netns_fdpair[] = {-1, -1}, ipcns_fdpair[] = {-1, -1};
-        const char *p, *v = value;
+        const char *p, *v = ASSERT_PTR(value);
         size_t n;
 
         assert(m);
-        assert(value);
         assert(fds);
 
         n = strcspn(v, " ");

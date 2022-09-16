@@ -660,7 +660,7 @@
         <listitem><para>Set a unit property on the scope unit to register for the machine. This applies only if the
         machine is run in its own scope unit, i.e. if <option>--keep-unit</option> isn't used. Takes unit property
         assignments in the same format as <command>systemctl set-property</command>. This is useful to set memory
-        limits and similar for container.</para>
+        limits and similar for the container.</para>
         </listitem>
       </varlistentry>
 
@@ -737,9 +737,9 @@
           the UID/GID range is automatically chosen. As first step, the file owner UID/GID of the root
           directory of the container's directory tree is read, and it is checked that no other container is
           currently using it. If this check is successful, the UID/GID range determined this way is used,
-          similar to the behavior if <literal>yes</literal> is specified. If the check is not successful (and
-          thus the UID/GID range indicated in the root directory's file owner is already used elsewhere) a
-          new – currently unused – UID/GID range of 65536 UIDs/GIDs is randomly chosen between the host
+          similarly to the behavior if <literal>yes</literal> is specified. If the check is not successful
+          (and thus the UID/GID range indicated in the root directory's file owner is already used elsewhere)
+          a new – currently unused – UID/GID range of 65536 UIDs/GIDs is randomly chosen between the host
           UID/GIDs of 524288 and 1878982656, always starting at a multiple of 65536, and, if possible,
           consistently hashed from the machine name. This setting implies
           <option>--private-users-ownership=auto</option> (see below), which possibly has the effect that the
@@ -1235,8 +1235,8 @@ After=sys-subsystem-net-devices-ens1.device</programlisting>
 
         <para>If set to <literal>copy-host</literal>, the <filename>/etc/resolv.conf</filename> file from the
         host is copied into the container, unless the file exists already and is not a regular file (e.g. a
-        symlink). Similar, if <literal>replace-host</literal> is used the file is copied, replacing any
-        existing inode, including symlinks. Similar, if <literal>bind-host</literal> is used, the file is
+        symlink). Similarly, if <literal>replace-host</literal> is used the file is copied, replacing any
+        existing inode, including symlinks. Similarly, if <literal>bind-host</literal> is used, the file is
         bind mounted from the host into the container.</para>
 
         <para>If set to <literal>copy-static</literal>, <literal>replace-static</literal> or
@@ -1363,16 +1363,37 @@ After=sys-subsystem-net-devices-ens1.device</programlisting>
         multiple times for creating multiple independent bind mount points.</para>
 
         <para>Mount options are comma-separated. <option>rbind</option> and <option>norbind</option> control whether
-        to create a recursive or a regular bind mount. Defaults to "rbind". <option>idmap</option> and <option>noidmap</option>
-        control if the bind mount should use filesystem id mappings. Using this option requires support by the source filesystem
-        for id mappings. Defaults to "noidmap".</para>
+        to create a recursive or a regular bind mount. Defaults to "rbind". <option>noidmap</option>,
+        <option>idmap</option>, and <option>rootidmap</option> control ID mapping.</para>
+
+        <para>Using <option>idmap</option> or <option>rootidmap</option> requires support by the source filesystem
+        for user/group ID mapped mounts. Defaults to "noidmap". With <option>x</option> being the container's UID range
+        offset, <option>y</option> being the length of the container's UID range, and <option>p</option> being the
+        owner UID of the bind mount source inode on the host:
+
+        <itemizedlist>
+          <listitem><para>If <option>noidmap</option> is used, any user <option>z</option> in the range
+          <option>0 … y</option> seen from inside of the container is mapped to <option>x + z</option> in the
+          <option>x … x + y</option> range on the host. All host users outside of that range are mapped to
+          <option>nobody</option> inside the container.</para></listitem>
+          <listitem><para>If <option>idmap</option> is used, any user <option>z</option> in the UID range
+          <option>0 … y</option> as seen from inside the container is mapped to the same <option>z</option>
+          in the same <option>0 … y</option> range on the host. All host users outside of that range are
+          mapped to <option>nobody</option> inside the container.</para></listitem>
+          <listitem><para>If <option>rootidmap</option> is used, the user <option>0</option> seen from inside
+          of the container is mapped to <option>p</option> on the host. All host users outside of that range
+          are mapped to <option>nobody</option> inside the container.</para></listitem>
+        </itemizedlist></para>
+
+        <para>Whichever ID mapping option is used, the same mapping will be used for users and groups IDs. If
+        <option>rootidmap</option> is used, the group owning the bind mounted directory will have no effect</para>
 
         <para>Note that when this option is used in combination with <option>--private-users</option>, the resulting
         mount points will be owned by the <constant>nobody</constant> user. That's because the mount and its files and
         directories continue to be owned by the relevant host users and groups, which do not exist in the container,
         and thus show up under the wildcard UID 65534 (nobody). If such bind mounts are created, it is recommended to
         make them read-only, using <option>--bind-ro=</option>. Alternatively you can use the "idmap" mount option to
-        map the filesystem ids.</para></listitem>
+        map the filesystem IDs.</para></listitem>
       </varlistentry>
 
       <varlistentry>

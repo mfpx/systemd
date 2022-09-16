@@ -3082,6 +3082,14 @@ static int parse_line(
         if (r < 0)
                 return r;
 
+        if (!path_is_absolute(i.path)) {
+                *invalid_config = true;
+                return log_syntax(NULL, LOG_ERR, fname, line, SYNTHETIC_ERRNO(EBADMSG),
+                                  "Path '%s' not absolute.", i.path);
+        }
+
+        path_simplify(i.path);
+
         switch (i.type) {
 
         case CREATE_DIRECTORY:
@@ -3099,7 +3107,13 @@ static int parse_line(
         case RELABEL_PATH:
         case RECURSIVE_RELABEL_PATH:
                 if (i.argument)
-                        log_syntax(NULL, LOG_WARNING, fname, line, 0, "%c lines don't take argument fields, ignoring.", i.type);
+                        log_syntax(NULL,
+                                   LOG_WARNING,
+                                   fname,
+                                   line,
+                                   0,
+                                   "%c lines don't take argument fields, ignoring.",
+                                   (char) i.type);
 
                 break;
 
@@ -3153,6 +3167,13 @@ static int parse_line(
                 }
 
                 path_simplify(i.argument);
+
+                if (laccess(i.argument, F_OK) == -ENOENT) {
+                        /* Silently skip over lines where the source file is missing. */
+                        log_syntax(NULL, LOG_INFO, fname, line, 0, "Copy source path '%s' does not exist, skipping line.", i.argument);
+                        return 0;
+                }
+
                 break;
 
         case CREATE_CHAR_DEVICE:
@@ -3230,14 +3251,6 @@ static int parse_line(
                 return log_syntax(NULL, LOG_ERR, fname, line, SYNTHETIC_ERRNO(EBADMSG),
                                   "Unknown command type '%c'.", (char) i.type);
         }
-
-        if (!path_is_absolute(i.path)) {
-                *invalid_config = true;
-                return log_syntax(NULL, LOG_ERR, fname, line, SYNTHETIC_ERRNO(EBADMSG),
-                                  "Path '%s' not absolute.", i.path);
-        }
-
-        path_simplify(i.path);
 
         if (!should_include_path(i.path))
                 return 0;

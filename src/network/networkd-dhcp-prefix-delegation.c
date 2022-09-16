@@ -412,6 +412,10 @@ static int dhcp_pd_request_address(
 
                 log_dhcp_pd_address(link, address);
 
+                r = free_and_strdup_warn(&address->netlabel, link->network->dhcp_pd_netlabel);
+                if (r < 0)
+                        return r;
+
                 if (address_get(link, address, &existing) < 0)
                         link->dhcp_pd_configured = false;
                 else
@@ -473,7 +477,7 @@ static int dhcp_pd_get_preferred_subnet_prefix(
                 r = dhcp_pd_calculate_subnet_prefix(pd_prefix, pd_prefix_len, link->network->dhcp_pd_subnet_id, &prefix);
                 if (r < 0)
                         return log_link_warning_errno(link, r,
-                                                      "subnet id %" PRIu64 " is out of range. Only have %" PRIu64 " subnets.",
+                                                      "subnet id %" PRIi64 " is out of range. Only have %" PRIu64 " subnets.",
                                                       link->network->dhcp_pd_subnet_id, UINT64_C(1) << (64 - pd_prefix_len));
 
                 *ret = prefix;
@@ -1257,14 +1261,13 @@ int config_parse_dhcp_pd_subnet_id(
                 void *data,
                 void *userdata) {
 
-        int64_t *p = data;
+        int64_t *p = ASSERT_PTR(data);
         uint64_t t;
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(data);
 
         if (isempty(rvalue) || streq(rvalue, "auto")) {
                 *p = -1;

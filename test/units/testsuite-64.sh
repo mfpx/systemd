@@ -41,6 +41,48 @@ helper_check_device_symlinks() {(
     done < <(find "${paths[@]}" -type l)
 )}
 
+helper_check_udev_watch() {(
+    set +x
+
+    local link target id dev
+
+    while read -r link; do
+        target="$(readlink "$link")"
+        echo "$link -> $target"
+
+        if [[ ! -L "/run/udev/watch/$target" ]]; then
+            echo >&2 "ERROR: symlink /run/udev/watch/$target does not exist"
+            return 1
+        fi
+        if [[ "$(readlink "/run/udev/watch/$target")" != "$(basename "$link")" ]]; then
+            echo >&2 "ERROR: symlink target of /run/udev/watch/$target is inconsistent with $link"
+            return 1
+        fi
+
+        if [[ "$target" =~ ^[0-9]+$ ]]; then
+            # $link is ID -> wd
+            id="$(basename "$link")"
+        else
+            # $link is wd -> ID
+            id="$target"
+        fi
+
+        if [[ "${id:0:1}" == "b" ]]; then
+            dev="/dev/block/${id:1}"
+        elif [[ "${id:0:1}" == "c" ]]; then
+            dev="/dev/char/${id:1}"
+        else
+            echo >&2 "ERROR: unexpected device ID '$id'"
+            return 1
+        fi
+
+        if [[ ! -e "$dev" ]]; then
+            echo >&2 "ERROR: device '$dev' corresponding to symlink '$link' does not exist"
+            return 1
+        fi
+    done < <(find /run/udev/watch -type l)
+)}
+
 testcase_megasas2_basic() {
     lsblk -S
     [[ "$(lsblk --scsi --noheadings | wc -l)" -ge 128 ]]
@@ -52,8 +94,16 @@ testcase_nvme_basic() {
 }
 
 testcase_virtio_scsi_identically_named_partitions() {
+    local num
+
+    if [[ -n "${ASAN_OPTIONS:-}" ]] || [[ "$(systemd-detect-virt -v)" == "qemu" ]]; then
+        num=$((4 * 4))
+    else
+        num=$((16 * 8))
+    fi
+
     lsblk --noheadings -a -o NAME,PARTLABEL
-    [[ "$(lsblk --noheadings -a -o NAME,PARTLABEL | grep -c "Hello world")" -eq $((16 * 8)) ]]
+    [[ "$(lsblk --noheadings -a -o NAME,PARTLABEL | grep -c "Hello world")" -eq "$num" ]]
 }
 
 testcase_multipath_basic_failover() {
@@ -82,7 +132,7 @@ EOF
     udevadm settle
     ls -l /dev/disk/by-id/
 
-    for i in {0..63}; do
+    for i in {0..15}; do
         wwid="deaddeadbeef$(printf "%.4d" "$i")"
         path="/dev/disk/by-id/wwn-0x$wwid"
         dmpath="$(readlink -f "$path")"
@@ -153,7 +203,7 @@ EOF
 }
 
 testcase_simultaneous_events() {
-    local blockdev iterations part partscript timeout
+    local blockdev iterations num_part part partscript timeout
 
     blockdev="$(readlink -f /dev/disk/by-id/scsi-*_deadbeeftest)"
     partscript="$(mktemp)"
@@ -163,8 +213,18 @@ testcase_simultaneous_events() {
         return 1
     fi
 
+    if [[ -n "${ASAN_OPTIONS:-}" ]] || [[ "$(systemd-detect-virt -v)" == "qemu" ]]; then
+        num_part=10
+        iterations=10
+        timeout=240
+    else
+        num_part=50
+        iterations=100
+        timeout=30
+    fi
+
     cat >"$partscript" <<EOF
-$(printf 'name="test%d", size=2M\n' {1..50})
+$(for ((i = 1; i <= num_part; i++)); do printf 'name="test%d", size=2M\n' "$i"; done)
 EOF
 
     # Initial partition table
@@ -176,13 +236,6 @@ EOF
     #
     # On unpatched udev versions the delete-recreate cycle may trigger a race
     # leading to dead symlinks in /dev/disk/
-    iterations=100
-    timeout=30
-    if [[ -n "${ASAN_OPTIONS:-}" ]]; then
-        iterations=10
-        timeout=180
-    fi
-
     for ((i = 1; i <= iterations; i++)); do
         udevadm lock --device="$blockdev" sfdisk -q --delete "$blockdev"
         udevadm lock --device="$blockdev" sfdisk -q -X gpt "$blockdev" <"$partscript"
@@ -190,6 +243,7 @@ EOF
         if ((i % 10 == 0)); then
             udevadm wait --settle --timeout="$timeout" "$blockdev"
             helper_check_device_symlinks
+            helper_check_udev_watch
         fi
     done
 
