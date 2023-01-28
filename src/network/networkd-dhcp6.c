@@ -163,8 +163,7 @@ static int verify_dhcp6_address(Link *link, const Address *address) {
 
         const char *pretty = IN6_ADDR_TO_STRING(&address->in_addr.in6);
 
-        if (address_get(link, address, &existing) < 0 &&
-            link_get_address(link, AF_INET6, &address->in_addr, 0, &existing) < 0) {
+        if (address_get(link, address, &existing) < 0) {
                 /* New address. */
                 log_level = LOG_INFO;
                 goto simple_log;
@@ -304,8 +303,8 @@ static int dhcp6_lease_ip_acquired(sd_dhcp6_client *client, Link *link) {
         sd_dhcp6_lease *lease;
         int r;
 
-        link_mark_addresses(link, NETWORK_CONFIG_SOURCE_DHCP6, NULL);
-        link_mark_routes(link, NETWORK_CONFIG_SOURCE_DHCP6, NULL);
+        link_mark_addresses(link, NETWORK_CONFIG_SOURCE_DHCP6);
+        link_mark_routes(link, NETWORK_CONFIG_SOURCE_DHCP6);
 
         r = sd_dhcp6_client_get_lease(client, &lease);
         if (r < 0)
@@ -594,6 +593,10 @@ static int dhcp6_configure(Link *link) {
         if (r < 0)
                 return log_link_debug_errno(link, r, "DHCPv6 CLIENT: Failed to attach event: %m");
 
+        r = sd_dhcp6_client_attach_device(client, link->dev);
+        if (r < 0)
+                return log_link_debug_errno(link, r, "DHCPv6 CLIENT: Failed to attach device: %m");
+
         r = dhcp6_set_identifier(link, client);
         if (r < 0)
                 return log_link_debug_errno(link, r, "DHCPv6 CLIENT: Failed to set identifier: %m");
@@ -703,6 +706,12 @@ static int dhcp6_configure(Link *link) {
                 return log_link_debug_errno(link, r,
                                             "DHCPv6 CLIENT: Failed to %s rapid commit: %m",
                                             enable_disable(link->network->dhcp6_use_rapid_commit));
+
+        r = sd_dhcp6_client_set_send_release(client, link->network->dhcp6_send_release);
+        if (r < 0)
+                return log_link_debug_errno(link, r,
+                                            "DHCPv6 CLIENT: Failed to %s sending release message on stop: %m",
+                                            enable_disable(link->network->dhcp6_send_release));
 
         link->dhcp6_client = TAKE_PTR(client);
 

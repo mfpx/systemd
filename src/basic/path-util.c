@@ -202,7 +202,17 @@ int path_make_relative_parent(const char *from_child, const char *to, char **ret
         assert(ret);
 
         /* Similar to path_make_relative(), but provides the relative path from the parent directory of
-         * 'from_child'. This may be useful when creating relative symlink. */
+         * 'from_child'. This may be useful when creating relative symlink.
+         *
+         * E.g.
+         * - from = "/path/to/aaa", to = "/path/to/bbb"
+         *      path_make_relative(from, to) = "../bbb"
+         *      path_make_relative_parent(from, to) = "bbb"
+         *
+         * - from = "/path/to/aaa/bbb", to = "/path/to/ccc/ddd"
+         *      path_make_relative(from, to) = "../../ccc/ddd"
+         *      path_make_relative_parent(from, to) = "../ccc/ddd"
+         */
 
         r = path_extract_directory(from_child, &from);
         if (r < 0)
@@ -577,7 +587,7 @@ char* path_extend_internal(char **x, ...) {
 }
 
 static int check_x_access(const char *path, int *ret_fd) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         int r;
 
         /* We need to use O_PATH because there may be executables for which we have only exec
@@ -605,7 +615,7 @@ static int check_x_access(const char *path, int *ret_fd) {
 }
 
 static int find_executable_impl(const char *name, const char *root, char **ret_filename, int *ret_fd) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         _cleanup_free_ char *path_name = NULL;
         int r;
 
@@ -772,13 +782,22 @@ static int executable_is_good(const char *executable) {
                                "/dev/null");
 }
 
-int fsck_exists(const char *fstype) {
+int fsck_exists(void) {
+        return executable_is_good("fsck");
+}
+
+int fsck_exists_for_fstype(const char *fstype) {
         const char *checker;
+        int r;
 
         assert(fstype);
 
         if (streq(fstype, "auto"))
                 return -EINVAL;
+
+        r = fsck_exists();
+        if (r <= 0)
+                return r;
 
         checker = strjoina("fsck.", fstype);
         return executable_is_good(checker);
@@ -1145,31 +1164,35 @@ bool path_is_normalized(const char *p) {
         return true;
 }
 
-char *file_in_same_dir(const char *path, const char *filename) {
-        char *e, *ret;
-        size_t k;
+int file_in_same_dir(const char *path, const char *filename, char **ret) {
+        _cleanup_free_ char *b = NULL;
+        int r;
 
         assert(path);
         assert(filename);
+        assert(ret);
 
-        /* This removes the last component of path and appends
-         * filename, unless the latter is absolute anyway or the
-         * former isn't */
+        /* This removes the last component of path and appends filename, unless the latter is absolute anyway
+         * or the former isn't */
 
         if (path_is_absolute(filename))
-                return strdup(filename);
+                b = strdup(filename);
+        else {
+                _cleanup_free_ char *dn = NULL;
 
-        e = strrchr(path, '/');
-        if (!e)
-                return strdup(filename);
+                r = path_extract_directory(path, &dn);
+                if (r == -EDESTADDRREQ) /* no path prefix */
+                        b = strdup(filename);
+                else if (r < 0)
+                        return r;
+                else
+                        b = path_join(dn, filename);
+        }
+        if (!b)
+                return -ENOMEM;
 
-        k = strlen(filename);
-        ret = new(char, (e + 1 - path) + k + 1);
-        if (!ret)
-                return NULL;
-
-        memcpy(mempcpy(ret, path, e + 1 - path), filename, k + 1);
-        return ret;
+        *ret = TAKE_PTR(b);
+        return 0;
 }
 
 bool hidden_or_backup_file(const char *filename) {

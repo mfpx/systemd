@@ -433,7 +433,19 @@ static int on_mdns_packet(sd_event_source *s, int fd, uint32_t revents, void *us
                         }
                 }
 
-                dns_cache_put(&scope->cache, scope->manager->enable_cache, NULL, DNS_PACKET_RCODE(p), p->answer, NULL, false, _DNSSEC_RESULT_INVALID, UINT32_MAX, p->family, &p->sender);
+                dns_cache_put(
+                        &scope->cache,
+                        scope->manager->enable_cache,
+                        DNS_PROTOCOL_MDNS,
+                        NULL,
+                        DNS_PACKET_RCODE(p),
+                        p->answer,
+                        NULL,
+                        false,
+                        _DNSSEC_RESULT_INVALID,
+                        UINT32_MAX,
+                        p->family,
+                        &p->sender);
 
         } else if (dns_packet_validate_query(p) > 0)  {
                 log_debug("Got mDNS query packet for id %u", DNS_PACKET_ID(p));
@@ -454,7 +466,7 @@ int manager_mdns_ipv4_fd(Manager *m) {
                 .in.sin_family = AF_INET,
                 .in.sin_port = htobe16(MDNS_PORT),
         };
-        _cleanup_close_ int s = -1;
+        _cleanup_close_ int s = -EBADF;
         int r;
 
         assert(m);
@@ -529,7 +541,7 @@ int manager_mdns_ipv6_fd(Manager *m) {
                 .in6.sin6_family = AF_INET6,
                 .in6.sin6_port = htobe16(MDNS_PORT),
         };
-        _cleanup_close_ int s = -1;
+        _cleanup_close_ int s = -EBADF;
         int r;
 
         assert(m);

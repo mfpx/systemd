@@ -5,6 +5,7 @@
 #include "sd-bus.h"
 
 #include "alloc-util.h"
+#include "build.h"
 #include "bus-dump.h"
 #include "bus-internal.h"
 #include "bus-message.h"
@@ -209,9 +210,7 @@ static int list_bus_names(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Failed to set alignment: %m");
 
-        r = table_set_empty_string(table, "-");
-        if (r < 0)
-                return log_error_errno(r, "Failed to set empty string: %m");
+        table_set_ersatz_string(table, TABLE_ERSATZ_DASH);
 
         r = table_set_sort(table, (size_t) COLUMN_NAME);
         if (r < 0)
@@ -1023,16 +1022,16 @@ static int introspect(int argc, char **argv, void *userdata) {
                         return bus_log_parse_error(r);
 
                 for (;;) {
-                        Member *z;
-                        _cleanup_free_ char *buf = NULL;
                         _cleanup_fclose_ FILE *mf = NULL;
+                        _cleanup_free_ char *buf = NULL;
+                        const char *name, *contents;
                         size_t sz = 0;
-                        const char *name;
+                        Member *z;
+                        char type;
 
                         r = sd_bus_message_enter_container(reply, 'e', "sv");
                         if (r < 0)
                                 return bus_log_parse_error(r);
-
                         if (r == 0)
                                 break;
 
@@ -1040,7 +1039,13 @@ static int introspect(int argc, char **argv, void *userdata) {
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
-                        r = sd_bus_message_enter_container(reply, 'v', NULL);
+                        r = sd_bus_message_peek_type(reply, &type, &contents);
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+                        if (type != 'v')
+                                return bus_log_parse_error(EINVAL);
+
+                        r = sd_bus_message_enter_container(reply, 'v', contents);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
@@ -1057,6 +1062,7 @@ static int introspect(int argc, char **argv, void *userdata) {
                         z = set_get(members, &((Member) {
                                                 .type = "property",
                                                 .interface = m->interface,
+                                                .signature = (char*) contents,
                                                 .name = (char*) name }));
                         if (z)
                                 free_and_replace(z->value, buf);

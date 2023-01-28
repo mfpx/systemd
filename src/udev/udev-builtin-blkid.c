@@ -117,17 +117,18 @@ static void print_property(sd_device *dev, bool test, const char *name, const ch
 
 static int find_gpt_root(sd_device *dev, blkid_probe pr, bool test) {
 
-#if defined(GPT_ROOT_NATIVE) && ENABLE_EFI
+#if defined(SD_GPT_ROOT_NATIVE) && ENABLE_EFI
 
-        _cleanup_free_ char *root_id = NULL, *root_label = NULL;
-        bool found_esp = false;
+        _cleanup_free_ char *root_label = NULL;
+        bool found_esp_or_xbootldr = false;
+        sd_id128_t root_id = SD_ID128_NULL;
         int r;
 
         assert(pr);
 
-        /* Iterate through the partitions on this disk, and see if the
-         * EFI ESP we booted from is on it. If so, find the first root
-         * disk, and add a property indicating its partition UUID. */
+        /* Iterate through the partitions on this disk, and see if the UEFI ESP or XBOOTLDR partition we
+         * booted from is on it. If so, find the first root disk, and add a property indicating its partition
+         * UUID. */
 
         errno = 0;
         blkid_partlist pl = blkid_probe_get_partitions(pr);
@@ -137,56 +138,51 @@ static int find_gpt_root(sd_device *dev, blkid_probe pr, bool test) {
         int nvals = blkid_partlist_numof_partitions(pl);
         for (int i = 0; i < nvals; i++) {
                 blkid_partition pp;
-                const char *stype, *sid, *label;
-                sd_id128_t type;
+                const char *label;
+                sd_id128_t type, id;
 
                 pp = blkid_partlist_get_partition(pl, i);
                 if (!pp)
                         continue;
 
-                sid = blkid_partition_get_uuid(pp);
-                if (!sid)
+                r = blkid_partition_get_uuid_id128(pp, &id);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to get partition UUID, ignoring: %m");
                         continue;
+                }
+
+                r = blkid_partition_get_type_id128(pp, &type);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to get partition type UUID, ignoring: %m");
+                        continue;
+                }
 
                 label = blkid_partition_get_name(pp); /* returns NULL if empty */
 
-                stype = blkid_partition_get_type_string(pp);
-                if (!stype)
-                        continue;
+                if (sd_id128_in_set(type, SD_GPT_ESP, SD_GPT_XBOOTLDR)) {
+                        sd_id128_t esp_or_xbootldr;
 
-                if (sd_id128_from_string(stype, &type) < 0)
-                        continue;
+                        /* We found an ESP or XBOOTLDR, let's see if it matches the ESP/XBOOTLDR we booted from. */
 
-                if (sd_id128_equal(type, GPT_ESP)) {
-                        sd_id128_t id, esp;
-
-                        /* We found an ESP, let's see if it matches
-                         * the ESP we booted from. */
-
-                        if (sd_id128_from_string(sid, &id) < 0)
-                                continue;
-
-                        r = efi_loader_get_device_part_uuid(&esp);
+                        r = efi_loader_get_device_part_uuid(&esp_or_xbootldr);
                         if (r < 0)
                                 return r;
 
-                        if (sd_id128_equal(id, esp))
-                                found_esp = true;
+                        if (sd_id128_equal(id, esp_or_xbootldr))
+                                found_esp_or_xbootldr = true;
 
-                } else if (sd_id128_equal(type, GPT_ROOT_NATIVE)) {
+                } else if (sd_id128_equal(type, SD_GPT_ROOT_NATIVE)) {
                         unsigned long long flags;
 
                         flags = blkid_partition_get_flags(pp);
-                        if (flags & GPT_FLAG_NO_AUTO)
+                        if (flags & SD_GPT_FLAG_NO_AUTO)
                                 continue;
 
                         /* We found a suitable root partition, let's remember the first one, or the one with
                          * the newest version, as determined by comparing the partition labels. */
 
-                        if (!root_id || strverscmp_improved(label, root_label) > 0) {
-                                r = free_and_strdup(&root_id, sid);
-                                if (r < 0)
-                                        return r;
+                        if (sd_id128_is_null(root_id) || strverscmp_improved(label, root_label) > 0) {
+                                root_id = id;
 
                                 r = free_and_strdup(&root_label, label);
                                 if (r < 0)
@@ -195,10 +191,10 @@ static int find_gpt_root(sd_device *dev, blkid_probe pr, bool test) {
                 }
         }
 
-        /* We found the ESP on this disk, and also found a root
-         * partition, nice! Let's export its UUID */
-        if (found_esp && root_id)
-                udev_builtin_add_property(dev, test, "ID_PART_GPT_AUTO_ROOT_UUID", root_id);
+        /* We found the ESP/XBOOTLDR on this disk, and also found a root partition, nice! Let's export its
+         * UUID */
+        if (found_esp_or_xbootldr && !sd_id128_is_null(root_id))
+                udev_builtin_add_property(dev, test, "ID_PART_GPT_AUTO_ROOT_UUID", SD_ID128_TO_UUID_STRING(root_id));
 #endif
 
         return 0;
@@ -242,7 +238,7 @@ static int builtin_blkid(sd_device *dev, sd_netlink **rtnl, int argc, char *argv
         const char *devnode, *root_partition = NULL, *data, *name;
         _cleanup_(blkid_free_probep) blkid_probe pr = NULL;
         bool noraid = false, is_gpt = false;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         int64_t offset = 0;
         int r;
 
@@ -310,7 +306,7 @@ static int builtin_blkid(sd_device *dev, sd_netlink **rtnl, int argc, char *argv
         if (r < 0)
                 return log_device_debug_errno(dev, r, "Failed to get device name: %m");
 
-        fd = sd_device_open(dev, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+        fd = sd_device_open(dev, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
         if (fd < 0) {
                 bool ignore = ERRNO_IS_DEVICE_ABSENT(fd);
                 log_device_debug_errno(dev, fd, "Failed to open block device %s%s: %m",

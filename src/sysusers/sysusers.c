@@ -4,11 +4,12 @@
 #include <utmp.h>
 
 #include "alloc-util.h"
+#include "build.h"
 #include "chase-symlinks.h"
 #include "conf-files.h"
+#include "constants.h"
 #include "copy.h"
 #include "creds-util.h"
-#include "def.h"
 #include "dissect-image.h"
 #include "env-util.h"
 #include "fd-util.h"
@@ -38,7 +39,6 @@
 #include "uid-range.h"
 #include "user-util.h"
 #include "utf8.h"
-#include "util.h"
 
 typedef enum ItemType {
         ADD_USER =   'u',
@@ -107,7 +107,6 @@ static Set *database_users = NULL, *database_groups = NULL;
 
 static uid_t search_uid = UID_INVALID;
 static UidRange *uid_range = NULL;
-static size_t n_uid_range = 0;
 
 static UGIDAllocationRange login_defs = {};
 static bool login_defs_need_warning = false;
@@ -123,7 +122,7 @@ STATIC_DESTRUCTOR_REGISTER(database_users, set_free_freep);
 STATIC_DESTRUCTOR_REGISTER(database_by_gid, hashmap_freep);
 STATIC_DESTRUCTOR_REGISTER(database_by_groupname, hashmap_freep);
 STATIC_DESTRUCTOR_REGISTER(database_groups, set_free_freep);
-STATIC_DESTRUCTOR_REGISTER(uid_range, freep);
+STATIC_DESTRUCTOR_REGISTER(uid_range, uid_range_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_root, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image, freep);
 
@@ -252,7 +251,7 @@ static int load_group_database(void) {
 static int make_backup(const char *target, const char *x) {
         _cleanup_(unlink_and_freep) char *dst_tmp = NULL;
         _cleanup_fclose_ FILE *dst = NULL;
-        _cleanup_close_ int src = -1;
+        _cleanup_close_ int src = -EBADF;
         const char *backup;
         struct stat st;
         int r;
@@ -1113,7 +1112,7 @@ static int add_user(Item *i) {
 
                 if (read_id_from_file(i, &c, NULL) > 0) {
 
-                        if (c <= 0 || !uid_range_contains(uid_range, n_uid_range, c))
+                        if (c <= 0 || !uid_range_contains(uid_range, c))
                                 log_debug("User ID " UID_FMT " of file not suitable for %s.", c, i->name);
                         else {
                                 r = uid_is_ok(c, i->name, true);
@@ -1144,7 +1143,7 @@ static int add_user(Item *i) {
                 maybe_emit_login_defs_warning();
 
                 for (;;) {
-                        r = uid_range_next_lower(uid_range, n_uid_range, &search_uid);
+                        r = uid_range_next_lower(uid_range, &search_uid);
                         if (r < 0)
                                 return log_error_errno(r, "No free user ID available for %s.", i->name);
 
@@ -1176,22 +1175,32 @@ static int add_user(Item *i) {
         return 0;
 }
 
-static int gid_is_ok(gid_t gid, bool check_with_uid) {
+static int gid_is_ok(gid_t gid, const char *groupname, bool check_with_uid) {
         struct group *g;
         struct passwd *p;
+        Item *user;
+        char *username;
+
+        assert(groupname);
 
         if (ordered_hashmap_get(todo_gids, GID_TO_PTR(gid)))
                 return 0;
 
         /* Avoid reusing gids that are already used by a different user */
-        if (check_with_uid && ordered_hashmap_get(todo_uids, UID_TO_PTR(gid)))
-                return 0;
+        if (check_with_uid) {
+                user = ordered_hashmap_get(todo_uids, UID_TO_PTR(gid));
+                if (user && !streq(user->name, groupname))
+                        return 0;
+        }
 
         if (hashmap_contains(database_by_gid, GID_TO_PTR(gid)))
                 return 0;
 
-        if (check_with_uid && hashmap_contains(database_by_uid, UID_TO_PTR(gid)))
-                return 0;
+        if (check_with_uid) {
+                username = hashmap_get(database_by_uid, UID_TO_PTR(gid));
+                if (username && !streq(username, groupname))
+                        return 0;
+        }
 
         if (!arg_root) {
                 errno = 0;
@@ -1259,7 +1268,7 @@ static int add_group(Item *i) {
 
         /* Try to use the suggested numeric GID */
         if (i->gid_set) {
-                r = gid_is_ok(i->gid, false);
+                r = gid_is_ok(i->gid, i->name, false);
                 if (r < 0)
                         return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                 if (i->id_set_strict) {
@@ -1282,7 +1291,7 @@ static int add_group(Item *i) {
 
         /* Try to reuse the numeric uid, if there's one */
         if (!i->gid_set && i->uid_set) {
-                r = gid_is_ok((gid_t) i->uid, true);
+                r = gid_is_ok((gid_t) i->uid, i->name, true);
                 if (r < 0)
                         return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                 if (r > 0) {
@@ -1297,10 +1306,10 @@ static int add_group(Item *i) {
 
                 if (read_id_from_file(i, NULL, &c) > 0) {
 
-                        if (c <= 0 || !uid_range_contains(uid_range, n_uid_range, c))
+                        if (c <= 0 || !uid_range_contains(uid_range, c))
                                 log_debug("Group ID " GID_FMT " of file not suitable for %s.", c, i->name);
                         else {
-                                r = gid_is_ok(c, true);
+                                r = gid_is_ok(c, i->name, true);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                                 else if (r > 0) {
@@ -1318,11 +1327,11 @@ static int add_group(Item *i) {
 
                 for (;;) {
                         /* We look for new GIDs in the UID pool! */
-                        r = uid_range_next_lower(uid_range, n_uid_range, &search_uid);
+                        r = uid_range_next_lower(uid_range, &search_uid);
                         if (r < 0)
                                 return log_error_errno(r, "No free group ID available for %s.", i->name);
 
-                        r = gid_is_ok(search_uid, true);
+                        r = gid_is_ok(search_uid, i->name, true);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to verify GID " GID_FMT ": %m", i->gid);
                         else if (r > 0)
@@ -1668,7 +1677,7 @@ static int parse_line(const char *fname, unsigned line, const char *buffer) {
                                           action[0],
                                           description ? "GECOS" : home ? "home directory" : "login shell");
 
-                r = uid_range_add_str(&uid_range, &n_uid_range, resolved_id);
+                r = uid_range_add_str(&uid_range, resolved_id);
                 if (r < 0)
                         return log_syntax(NULL, LOG_ERR, fname, line, SYNTHETIC_ERRNO(EINVAL),
                                           "Invalid UID range %s.", resolved_id);
@@ -2082,10 +2091,9 @@ static int read_credential_lines(void) {
 static int run(int argc, char *argv[]) {
 #ifndef STANDALONE
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *unlink_dir = NULL;
 #endif
-        _cleanup_close_ int lock = -1;
+        _cleanup_close_ int lock = -EBADF;
         Item *i;
         int r;
 
@@ -2117,8 +2125,7 @@ static int run(int argc, char *argv[]) {
                                 DISSECT_IMAGE_FSCK |
                                 DISSECT_IMAGE_GROWFS,
                                 &unlink_dir,
-                                &loop_device,
-                                &decrypted_image);
+                                &loop_device);
                 if (r < 0)
                         return r;
 
@@ -2169,7 +2176,7 @@ static int run(int argc, char *argv[]) {
                 uid_t begin = login_defs.system_alloc_uid_min,
                       end = MIN3((uid_t) SYSTEM_UID_MAX, login_defs.system_uid_max, login_defs.system_gid_max);
                 if (begin < end) {
-                        r = uid_range_add(&uid_range, &n_uid_range, begin, end - begin + 1);
+                        r = uid_range_add(&uid_range, begin, end - begin + 1);
                         if (r < 0)
                                 return log_oom();
                 }

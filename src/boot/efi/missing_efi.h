@@ -124,7 +124,7 @@ struct _EFI_DT_FIXUP_PROTOCOL {
 #ifndef EFI_TCG_GUID
 
 #define EFI_TCG_GUID \
-        &(const EFI_GUID) { 0xf541796d, 0xa62e, 0x4954, { 0xa7, 0x75, 0x95, 0x84, 0xf6, 0x1b, 0x9c, 0xdd } }
+        { 0xf541796d, 0xa62e, 0x4954, { 0xa7, 0x75, 0x95, 0x84, 0xf6, 0x1b, 0x9c, 0xdd } }
 
 typedef struct _TCG_VERSION {
         UINT8 Major;
@@ -224,7 +224,7 @@ typedef struct _EFI_TCG {
 #ifndef EFI_TCG2_GUID
 
 #define EFI_TCG2_GUID \
-        &(const EFI_GUID) { 0x607f766c, 0x7455, 0x42be, { 0x93, 0x0b, 0xe4, 0xd7, 0x6d, 0xb2, 0x72, 0x0f } }
+        { 0x607f766c, 0x7455, 0x42be, { 0x93, 0x0b, 0xe4, 0xd7, 0x6d, 0xb2, 0x72, 0x0f } }
 
 typedef struct tdEFI_TCG2_PROTOCOL EFI_TCG2_PROTOCOL;
 
@@ -309,41 +309,34 @@ typedef struct tdEFI_TCG2_PROTOCOL {
         {0x5568e427, 0x68fc, 0x4f3d, {0xac, 0x74, 0xca, 0x55, 0x52, 0x31, 0xcc, 0x68} }
 
 /* UEFI Platform Initialization (Vol2: DXE) */
-#ifndef SECURITY_PROTOCOL_GUID
+#ifndef EFI_SECURITY_ARCH_PROTOCOL_GUID
 
-#define SECURITY_PROTOCOL_GUID \
-        &(const EFI_GUID) { 0xa46423e3, 0x4617, 0x49f1, { 0xb9, 0xff, 0xd1, 0xbf, 0xa9, 0x11, 0x58, 0x39 } }
-#define SECURITY_PROTOCOL2_GUID \
-        &(const EFI_GUID) { 0x94ab2f58, 0x1438, 0x4ef1, { 0x91, 0x52, 0x18, 0x94, 0x1a, 0x3a, 0x0e, 0x68 } }
+#define EFI_SECURITY_ARCH_PROTOCOL_GUID \
+        { 0xa46423e3, 0x4617, 0x49f1, { 0xb9, 0xff, 0xd1, 0xbf, 0xa9, 0x11, 0x58, 0x39 } }
+#define EFI_SECURITY2_ARCH_PROTOCOL_GUID \
+        { 0x94ab2f58, 0x1438, 0x4ef1, { 0x91, 0x52, 0x18, 0x94, 0x1a, 0x3a, 0x0e, 0x68 } }
 
-struct _EFI_SECURITY2_PROTOCOL;
-struct _EFI_SECURITY_PROTOCOL;
-struct _EFI_DEVICE_PATH_PROTOCOL;
+typedef struct EFI_SECURITY_ARCH_PROTOCOL EFI_SECURITY_ARCH_PROTOCOL;
+typedef struct EFI_SECURITY2_ARCH_PROTOCOL EFI_SECURITY2_ARCH_PROTOCOL;
 
-typedef struct _EFI_SECURITY2_PROTOCOL EFI_SECURITY2_PROTOCOL;
-typedef struct _EFI_SECURITY_PROTOCOL EFI_SECURITY_PROTOCOL;
-typedef struct _EFI_DEVICE_PATH_PROTOCOL EFI_DEVICE_PATH_PROTOCOL;
+typedef EFI_STATUS (EFIAPI *EFI_SECURITY_FILE_AUTHENTICATION_STATE)(
+                const EFI_SECURITY_ARCH_PROTOCOL *This,
+                uint32_t AuthenticationStatus,
+                const EFI_DEVICE_PATH *File);
 
-typedef EFI_STATUS (EFIAPI *EFI_SECURITY_FILE_AUTHENTICATION_STATE) (
-        const EFI_SECURITY_PROTOCOL *This,
-        UINT32 AuthenticationStatus,
-        const EFI_DEVICE_PATH_PROTOCOL *File
-);
-
-typedef EFI_STATUS (EFIAPI *EFI_SECURITY2_FILE_AUTHENTICATION) (
-        const EFI_SECURITY2_PROTOCOL *This,
-        const EFI_DEVICE_PATH_PROTOCOL *DevicePath,
-        VOID *FileBuffer,
-        UINTN FileSize,
-        BOOLEAN  BootPolicy
-);
-
-struct _EFI_SECURITY2_PROTOCOL {
-        EFI_SECURITY2_FILE_AUTHENTICATION FileAuthentication;
+struct EFI_SECURITY_ARCH_PROTOCOL {
+        EFI_SECURITY_FILE_AUTHENTICATION_STATE FileAuthenticationState;
 };
 
-struct _EFI_SECURITY_PROTOCOL {
-        EFI_SECURITY_FILE_AUTHENTICATION_STATE  FileAuthenticationState;
+typedef EFI_STATUS (EFIAPI *EFI_SECURITY2_FILE_AUTHENTICATION)(
+                const EFI_SECURITY2_ARCH_PROTOCOL *This,
+                const EFI_DEVICE_PATH *DevicePath,
+                void *FileBuffer,
+                UINTN FileSize,
+                BOOLEAN BootPolicy);
+
+struct EFI_SECURITY2_ARCH_PROTOCOL {
+        EFI_SECURITY2_FILE_AUTHENTICATION FileAuthentication;
 };
 
 #endif
@@ -351,7 +344,7 @@ struct _EFI_SECURITY_PROTOCOL {
 #ifndef EFI_CONSOLE_CONTROL_GUID
 
 #define EFI_CONSOLE_CONTROL_GUID \
-        &(const EFI_GUID) { 0xf42f7782, 0x12e, 0x4c12, { 0x99, 0x56, 0x49, 0xf9, 0x43, 0x4, 0xf7, 0x21 } }
+        { 0xf42f7782, 0x12e, 0x4c12, { 0x99, 0x56, 0x49, 0xf9, 0x43, 0x4, 0xf7, 0x21 } }
 
 struct _EFI_CONSOLE_CONTROL_PROTOCOL;
 
@@ -391,4 +384,29 @@ typedef struct _EFI_CONSOLE_CONTROL_PROTOCOL {
 #define EFI_IMAGE_SECURITY_DATABASE_VARIABLE \
         { 0xd719b2cb, 0x3d3a, 0x4596, {0xa3, 0xbc, 0xda, 0xd0,  0xe, 0x67, 0x65, 0x6f }}
 
+#endif
+
+#ifndef EFI_SHELL_PARAMETERS_PROTOCOL_GUID
+#  define EFI_SHELL_PARAMETERS_PROTOCOL_GUID \
+        { 0x752f3136, 0x4e16, 0x4fdc, { 0xa2, 0x2a, 0xe5, 0xf4, 0x68, 0x12, 0xf4, 0xca } }
+
+typedef struct {
+        CHAR16 **Argv;
+        UINTN Argc;
+        void *StdIn;
+        void *StdOut;
+        void *StdErr;
+} EFI_SHELL_PARAMETERS_PROTOCOL;
+#endif
+
+#ifndef EFI_WARN_UNKNOWN_GLYPH
+#  define EFI_WARN_UNKNOWN_GLYPH 1
+#endif
+
+#ifndef EFI_WARN_RESET_REQUIRED
+#  define EFI_WARN_STALE_DATA 5
+#  define EFI_WARN_FILE_SYSTEM 6
+#  define EFI_WARN_RESET_REQUIRED 7
+#  define EFI_IP_ADDRESS_CONFLICT EFIERR(34)
+#  define EFI_HTTP_ERROR EFIERR(35)
 #endif

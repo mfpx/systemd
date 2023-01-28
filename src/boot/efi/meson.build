@@ -55,6 +55,7 @@ if not cc.has_header_symbol('efi.h', 'EFI_IMAGE_MACHINE_X64',
 endif
 
 objcopy = run_command(cc.cmd_array(), '-print-prog-name=objcopy', check: true).stdout().strip()
+objcopy_2_38 = find_program('objcopy', version: '>=2.38', required: false)
 
 efi_ld = get_option('efi-ld')
 if efi_ld == 'auto'
@@ -120,7 +121,6 @@ conf.set_quoted('EFI_MACHINE_TYPE_NAME', efi_arch[0])
 efi_conf = configuration_data()
 efi_conf.set_quoted('EFI_MACHINE_TYPE_NAME', efi_arch[0])
 efi_conf.set10('ENABLE_TPM', get_option('tpm'))
-efi_conf.set10('EFI_TPM_PCR_COMPAT', get_option('efi-tpm-pcr-compat'))
 
 foreach ctype : ['color-normal', 'color-entry', 'color-highlight', 'color-edit']
         c = get_option('efi-' + ctype).split(',')
@@ -176,7 +176,7 @@ efi_config_h = configure_file(
 
 efi_cflags = [
         '-DGNU_EFI_USE_MS_ABI',
-        '-DSD_BOOT',
+        '-DSD_BOOT=1',
         '-ffreestanding',
         '-fshort-wchar',
         '-fvisibility=hidden',
@@ -199,12 +199,6 @@ efi_cflags = [
         ]
 )
 
-# On some distros, sd-boot/-stub may trigger some bug somewhere that will cause
-# kernel execution to fail. The cause seems to be purely based on code size and
-# always compiling with at least -O1 will work around that.
-# https://github.com/systemd/systemd/issues/24202
-efi_cflags += '-O1'
-
 efi_cflags += cc.get_supported_arguments({
         'ia32':   ['-mno-sse', '-mno-mmx'],
         'x86_64': ['-mno-red-zone', '-mno-sse', '-mno-mmx'],
@@ -220,7 +214,7 @@ endif
 if get_option('debug') and get_option('mode') == 'developer'
         efi_cflags += ['-ggdb', '-DEFI_DEBUG']
 endif
-if get_option('optimization') != '0'
+if get_option('optimization') in ['1', '2', '3', 's', 'g']
         efi_cflags += ['-O' + get_option('optimization')]
 endif
 if get_option('b_ndebug') == 'true' or (
@@ -280,9 +274,17 @@ foreach arg : ['-Wl,--no-warn-execstack',
         endif
 endforeach
 
-if efi_arch[1] in ['aarch64', 'arm', 'riscv64']
+# If using objcopy, crt0 must not include the PE/COFF header
+if run_command('grep', '-q', 'coff_header', efi_crt0, check: false).returncode() == 0
+        coff_header_in_crt0 = true
+else
+        coff_header_in_crt0 = false
+endif
+
+if efi_arch[1] in ['arm', 'riscv64'] or (efi_arch[1] == 'aarch64' and (not objcopy_2_38.found() or coff_header_in_crt0))
         efi_ldflags += ['-shared']
-        # Aarch64, ARM32 and 64bit RISC-V don't have an EFI capable objcopy.
+        # ARM32 and 64bit RISC-V don't have an EFI capable objcopy.
+        # Older objcopy doesn't support Aarch64 either.
         # Use 'binary' instead, and add required symbols manually.
         efi_ldflags += ['-Wl,--defsym=EFI_SUBSYSTEM=0xa']
         efi_format = ['-O', 'binary']
@@ -300,23 +302,6 @@ if efi_arch[1] == 'arm'
         # have any occurrences of wchar_t in its sources or the documentation, so
         # it is safe to assume that we can ignore this warning.
         efi_ldflags += ['-Wl,--no-wchar-size-warning']
-endif
-
-if run_command('grep', '-q', '__CTOR_LIST__', efi_lds, check: false).returncode() == 0
-        # fedora has a patched gnu-efi that adds support for ELF constructors.
-        # If ld is called by gcc something about these symbols breaks, resulting
-        # in sd-boot freezing when gnu-efi runs the constructors. Force defining
-        # them seems to work around this.
-        efi_ldflags += [
-                '-Wl,--defsym=_init_array=0',
-                '-Wl,--defsym=_init_array_end=0',
-                '-Wl,--defsym=_fini_array=0',
-                '-Wl,--defsym=_fini_array_end=0',
-                '-Wl,--defsym=__CTOR_LIST__=0',
-                '-Wl,--defsym=__CTOR_END__=0',
-                '-Wl,--defsym=__DTOR_LIST__=0',
-                '-Wl,--defsym=__DTOR_END__=0',
-        ]
 endif
 
 if cc.get_id() == 'clang' and cc.version().split('.')[0].to_int() <= 10
@@ -355,8 +340,10 @@ efi_headers = files(
         'graphics.h',
         'initrd.h',
         'linux.h',
+        'log.h',
         'measure.h',
         'missing_efi.h',
+        'part-discovery.h',
         'pe.h',
         'random-seed.h',
         'secure-boot.h',
@@ -364,42 +351,41 @@ efi_headers = files(
         'splash.h',
         'ticks.h',
         'util.h',
-        'xbootldr.h',
 )
 
 common_sources = files(
-        'assert.c',
         'console.c',
         'devicetree.c',
+        'drivers.c',
         'disk.c',
         'efi-string.c',
         'graphics.c',
         'initrd.c',
+        'log.c',
         'measure.c',
+        'part-discovery.c',
         'pe.c',
+        'random-seed.c',
         'secure-boot.c',
         'ticks.c',
         'util.c',
+        'vmm.c',
 )
 
 systemd_boot_sources = files(
         'boot.c',
-        'drivers.c',
-        'random-seed.c',
         'shim.c',
-        'xbootldr.c',
 )
 
 stub_sources = files(
         'cpio.c',
+        'linux.c',
         'splash.c',
         'stub.c',
 )
 
 if efi_arch[1] in ['ia32', 'x86_64']
         stub_sources += files('linux_x86.c')
-else
-        stub_sources += files('linux.c')
 endif
 
 tests += [
@@ -417,7 +403,9 @@ if efi_arch[1] in ['ia32', 'x86_64', 'arm', 'aarch64']
                  'HAVE_ZSTD'],
         ]
         fuzzers += [
-                [files('fuzz-bcd.c', 'efi-string.c')],
+                [files('fuzz-bcd.c', 'bcd.c', 'efi-string.c')],
+                [files('fuzz-efi-string.c', 'efi-string.c')],
+                [files('fuzz-efi-printf.c', 'efi-string.c')],
         ]
 endif
 
@@ -449,7 +437,6 @@ foreach tuple : [['systemd-boot@0@.@1@', systemd_boot_objects, false, 'systemd-b
                            efi_cflags,
                            efi_ldflags,
                            '@INPUT@',
-                           '-lefi',
                            '-lgnuefi',
                            '-lgcc'],
                 install : tuple[2],
@@ -471,6 +458,7 @@ foreach tuple : [['systemd-boot@0@.@1@', systemd_boot_objects, false, 'systemd-b
                            '-j', '.sdata',
                            '-j', '.sdmagic',
                            '-j', '.text',
+                           '--strip-all',
                            '--section-alignment=512',
                            efi_format,
                            '@INPUT@', '@OUTPUT@'],

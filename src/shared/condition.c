@@ -35,10 +35,12 @@
 #include "glob-util.h"
 #include "hostname-util.h"
 #include "ima-util.h"
+#include "initrd-util.h"
 #include "limits-util.h"
 #include "list.h"
 #include "macro.h"
 #include "mountpoint-util.h"
+#include "nulstr-util.h"
 #include "os-util.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -338,31 +340,36 @@ static int condition_test_cpus(Condition *c, char **env) {
 static int condition_test_user(Condition *c, char **env) {
         uid_t id;
         int r;
-        _cleanup_free_ char *username = NULL;
-        const char *u;
 
         assert(c);
         assert(c->parameter);
         assert(c->type == CONDITION_USER);
 
+        /* Do the quick&easy comparisons first, and only parse the UID later. */
+        if (streq(c->parameter, "root"))
+                return getuid() == 0 || geteuid() == 0;
+        if (streq(c->parameter, NOBODY_USER_NAME))
+                return getuid() == UID_NOBODY || geteuid() == UID_NOBODY;
+        if (streq(c->parameter, "@system"))
+                return uid_is_system(getuid()) || uid_is_system(geteuid());
+
         r = parse_uid(c->parameter, &id);
         if (r >= 0)
                 return id == getuid() || id == geteuid();
 
-        if (streq("@system", c->parameter))
-                return uid_is_system(getuid()) || uid_is_system(geteuid());
+        if (getpid_cached() == 1)  /* We already checked for "root" above, and we know that
+                                    * PID 1 is running as root, hence we know it cannot match. */
+                return false;
 
-        username = getusername_malloc();
+        /* getusername_malloc() may do an nss lookup, which is not allowed in PID 1. */
+        _cleanup_free_ char *username = getusername_malloc();
         if (!username)
                 return -ENOMEM;
 
         if (streq(username, c->parameter))
                 return 1;
 
-        if (getpid_cached() == 1)
-                return streq(c->parameter, "root");
-
-        u = c->parameter;
+        const char *u = c->parameter;
         r = get_user_creds(&u, &id, NULL, NULL, NULL, USER_CREDS_ALLOW_MISSING);
         if (r < 0)
                 return 0;
@@ -659,14 +666,13 @@ static int condition_test_ac_power(Condition *c, char **env) {
 }
 
 static int has_tpm2(void) {
-        /* Checks whether the system has at least one TPM2 resource manager device, i.e. at least one "tpmrm"
-         * class device. Alternatively, we are also happy if the firmware reports support (this is to cover
-         * for cases where we simply haven't loaded the driver for it yet, i.e. during early boot where we
-         * very likely want to use this condition check).
+        /* Checks whether the kernel has the TPM subsystem enabled and the firmware reports support. Note
+         * we don't check for actual TPM devices, since we might not have loaded the driver for it yet, i.e.
+         * during early boot where we very likely want to use this condition check).
          *
          * Note that we don't check if we ourselves are built with TPM2 support here! */
 
-        return (tpm2_support() & (TPM2_SUPPORT_DRIVER|TPM2_SUPPORT_FIRMWARE)) != 0;
+        return FLAGS_SET(tpm2_support(), TPM2_SUPPORT_SUBSYSTEM|TPM2_SUPPORT_FIRMWARE);
 }
 
 static int condition_test_security(Condition *c, char **env) {
@@ -824,17 +830,10 @@ static int condition_test_needs_update(Condition *c, char **env) {
 
 static int condition_test_first_boot(Condition *c, char **env) {
         int r, q;
-        bool b;
 
         assert(c);
         assert(c->parameter);
         assert(c->type == CONDITION_FIRST_BOOT);
-
-        r = proc_cmdline_get_bool("systemd.condition-first-boot", &b);
-        if (r < 0)
-                log_debug_errno(r, "Failed to parse systemd.condition-first-boot= kernel command line argument, ignoring: %m");
-        if (r > 0)
-                return b == !!r;
 
         r = parse_boolean(c->parameter);
         if (r < 0)
@@ -842,9 +841,9 @@ static int condition_test_first_boot(Condition *c, char **env) {
 
         q = access("/run/systemd/first-boot", F_OK);
         if (q < 0 && errno != ENOENT)
-                log_debug_errno(errno, "Failed to check if /run/systemd/first-boot exists, ignoring: %m");
+                log_debug_errno(errno, "Failed to check if /run/systemd/first-boot exists, assuming no: %m");
 
-        return (q >= 0) == !!r;
+        return (q >= 0) == r;
 }
 
 static int condition_test_environment(Condition *c, char **env) {

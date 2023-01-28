@@ -53,9 +53,13 @@ static inline const char* enable_disable(bool b) {
         return b ? "enable" : "disable";
 }
 
-static inline const char *empty_to_null(const char *p) {
-        return isempty(p) ? NULL : p;
-}
+/* This macro's return pointer will have the "const" qualifier set or unset the same way as the input
+ * pointer. */
+#define empty_to_null(p)                                \
+        ({                                              \
+                const char *_p = (p);                   \
+                (typeof(p)) (isempty(_p) ? NULL : _p);  \
+        })
 
 static inline const char *empty_to_na(const char *p) {
         return isempty(p) ? "n/a" : p;
@@ -74,6 +78,11 @@ static inline bool empty_or_dash(const char *str) {
 static inline const char *empty_or_dash_to_null(const char *p) {
         return empty_or_dash(p) ? NULL : p;
 }
+#define empty_or_dash_to_null(p)                                \
+        ({                                                      \
+                const char *_p = (p);                           \
+                (typeof(p)) (empty_or_dash(_p) ? NULL : _p);    \
+        })
 
 char *first_word(const char *s, const char *word) _pure_;
 
@@ -152,6 +161,8 @@ char *cellescape(char *buf, size_t len, const char *s);
 
 char* strshorten(char *s, size_t l);
 
+int strgrowpad0(char **s, size_t l);
+
 char *strreplace(const char *text, const char *old_string, const char *new_string);
 
 char *strip_tab_ansi(char **ibuf, size_t *_isz, size_t highlight[2]);
@@ -169,9 +180,12 @@ int split_pair(const char *s, const char *sep, char **l, char **r);
 
 int free_and_strdup(char **p, const char *s);
 static inline int free_and_strdup_warn(char **p, const char *s) {
-        if (free_and_strdup(p, s) < 0)
+        int r;
+
+        r = free_and_strdup(p, s);
+        if (r < 0)
                 return log_oom();
-        return 0;
+        return r;
 }
 int free_and_strndup(char **p, const char *s, size_t l);
 
@@ -225,4 +239,17 @@ bool streq_skip_trailing_chars(const char *s1, const char *s2, const char *ok);
 
 char *string_replace_char(char *str, char old_char, char new_char);
 
+typedef enum MakeCStringMode {
+        MAKE_CSTRING_REFUSE_TRAILING_NUL,
+        MAKE_CSTRING_ALLOW_TRAILING_NUL,
+        MAKE_CSTRING_REQUIRE_TRAILING_NUL,
+        _MAKE_CSTRING_MODE_MAX,
+        _MAKE_CSTRING_MODE_INVALID = -1,
+} MakeCStringMode;
+
+int make_cstring(const char *s, size_t n, MakeCStringMode mode, char **ret);
+
 size_t strspn_from_end(const char *str, const char *accept);
+
+char *strdupspn(const char *a, const char *accept);
+char *strdupcspn(const char *a, const char *reject);

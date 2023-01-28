@@ -5,76 +5,143 @@
 set -eux
 set -o pipefail
 
+# shellcheck source=test/units/assert.sh
+. "$(dirname "$0")"/assert.sh
+
 : >/failed
 
 RUN_OUT="$(mktemp)"
-NOTIFICATION_SUBSCRIPTION_SCRIPT="/tmp/subscribe.sh"
-NOTIFICATION_LOGS="/tmp/notifications.txt"
-
-at_exit() {
-    set +e
-    cat "$NOTIFICATION_LOGS"
-}
-
-trap at_exit EXIT
 
 run() {
     "$@" |& tee "$RUN_OUT"
 }
 
-run_retry() {
-    local ntries="${1:?}"
-    local i
+monitor_check_rr() (
+    set +x
+    set +o pipefail
+    local since="${1:?}"
+    local match="${2:?}"
 
-    shift
+    # Wait until the first mention of the specified log message is
+    # displayed. We turn off pipefail for this, since we don't care about the
+    # lhs of this pipe expression, we only care about the rhs' result to be
+    # clean
+    journalctl -u resmontest.service --since "$since" -f --full | grep -m1 "$match"
+)
 
-    for ((i = 0; i < ntries; i++)); do
-        "$@" && return 0
-        sleep .5
-    done
+# Test for resolvectl, resolvconf
+systemctl unmask systemd-resolved.service
+systemctl start systemd-resolved.service
+systemctl service-log-level systemd-resolved.service debug
+ip link add hoge type dummy
+ip link add hoge.foo type dummy
+resolvectl dns hoge 10.0.0.1 10.0.0.2
+resolvectl dns hoge.foo 10.0.0.3 10.0.0.4
+assert_in '10.0.0.1 10.0.0.2' "$(resolvectl dns hoge)"
+assert_in '10.0.0.3 10.0.0.4' "$(resolvectl dns hoge.foo)"
+resolvectl dns hoge 10.0.1.1 10.0.1.2
+resolvectl dns hoge.foo 10.0.1.3 10.0.1.4
+assert_in '10.0.1.1 10.0.1.2' "$(resolvectl dns hoge)"
+assert_in '10.0.1.3 10.0.1.4' "$(resolvectl dns hoge.foo)"
+if ! RESOLVCONF=$(command -v resolvconf 2>/dev/null); then
+    TMPDIR=$(mktemp -d -p /tmp resolvconf-tests.XXXXXX)
+    RESOLVCONF="$TMPDIR"/resolvconf
+    ln -s "$(command -v resolvectl 2>/dev/null)" "$RESOLVCONF"
+fi
+echo nameserver 10.0.2.1 10.0.2.2 | "$RESOLVCONF" -a hoge
+echo nameserver 10.0.2.3 10.0.2.4 | "$RESOLVCONF" -a hoge.foo
+assert_in '10.0.2.1 10.0.2.2' "$(resolvectl dns hoge)"
+assert_in '10.0.2.3 10.0.2.4' "$(resolvectl dns hoge.foo)"
+echo nameserver 10.0.3.1 10.0.3.2 | "$RESOLVCONF" -a hoge.inet.ipsec.192.168.35
+echo nameserver 10.0.3.3 10.0.3.4 | "$RESOLVCONF" -a hoge.foo.dhcp
+assert_in '10.0.3.1 10.0.3.2' "$(resolvectl dns hoge)"
+assert_in '10.0.3.3 10.0.3.4' "$(resolvectl dns hoge.foo)"
 
-    return 1
-}
+# Tests for _localdnsstub and _localdnsproxy
+assert_in '127.0.0.53' "$(resolvectl query _localdnsstub)"
+assert_in '_localdnsstub' "$(resolvectl query 127.0.0.53)"
+assert_in '127.0.0.54' "$(resolvectl query _localdnsproxy)"
+assert_in '_localdnsproxy' "$(resolvectl query 127.0.0.54)"
 
-notification_check_host() {
-    local host="${1:?}"
-    local address="${2:?}"
+assert_in '127.0.0.53' "$(dig @127.0.0.53 _localdnsstub)"
+assert_in '_localdnsstub' "$(dig @127.0.0.53 -x 127.0.0.53)"
+assert_in '127.0.0.54' "$(dig @127.0.0.53 _localdnsproxy)"
+assert_in '_localdnsproxy' "$(dig @127.0.0.53 -x 127.0.0.54)"
 
-    # Attempt to parse the notification JSON returned over varlink and check
-    # if it contains the requested record. As this is an async operation, let's
-    # retry it a couple of times in case it fails.
-    #
-    # Example JSON:
-    # {
-    #   "parameters": {
-    #     "addresses": [
-    #       {
-    #         "ifindex": 2,
-    #         "family": 2,
-    #         "address": [
-    #           10,
-    #           0,
-    #           0,
-    #           121
-    #         ],
-    #         "type": "A"
-    #       }
-    #     ],
-    #     "name": "untrusted.test"
-    #   },
-    #   "continues": true
-    # }
-    #
-    # Note: we need to do some post-processing of the $NOTIFICATION_LOGS file,
-    #       since the JSON objects are concatenated with \0 instead of a newline
-    # shellcheck disable=SC2016
-    run_retry 10 jq --slurp \
-                    --exit-status \
-                    --arg host "$host" \
-                    --arg address "$address" \
-                    '.[] | select(.parameters.name == $host) | .parameters.addresses[] | select(.address | join(".") == $address) | true' \
-                    <(tr '\0' '\n' <"$NOTIFICATION_LOGS")
-}
+# Tests for mDNS and LLMNR settings
+mkdir -p /run/systemd/resolved.conf.d
+{
+    echo "[Resolve]"
+    echo "MulticastDNS=yes"
+    echo "LLMNR=yes"
+} >/run/systemd/resolved.conf.d/mdns-llmnr.conf
+systemctl restart systemd-resolved.service
+systemctl service-log-level systemd-resolved.service debug
+# make sure networkd is not running.
+systemctl stop systemd-networkd.service
+# defaults to yes (both the global and per-link settings are yes)
+assert_in 'yes' "$(resolvectl mdns hoge)"
+assert_in 'yes' "$(resolvectl llmnr hoge)"
+# set per-link setting
+resolvectl mdns hoge yes
+resolvectl llmnr hoge yes
+assert_in 'yes' "$(resolvectl mdns hoge)"
+assert_in 'yes' "$(resolvectl llmnr hoge)"
+resolvectl mdns hoge resolve
+resolvectl llmnr hoge resolve
+assert_in 'resolve' "$(resolvectl mdns hoge)"
+assert_in 'resolve' "$(resolvectl llmnr hoge)"
+resolvectl mdns hoge no
+resolvectl llmnr hoge no
+assert_in 'no' "$(resolvectl mdns hoge)"
+assert_in 'no' "$(resolvectl llmnr hoge)"
+# downgrade global setting to resolve
+{
+    echo "[Resolve]"
+    echo "MulticastDNS=resolve"
+    echo "LLMNR=resolve"
+} >/run/systemd/resolved.conf.d/mdns-llmnr.conf
+systemctl restart systemd-resolved.service
+systemctl service-log-level systemd-resolved.service debug
+# set per-link setting
+resolvectl mdns hoge yes
+resolvectl llmnr hoge yes
+assert_in 'resolve' "$(resolvectl mdns hoge)"
+assert_in 'resolve' "$(resolvectl llmnr hoge)"
+resolvectl mdns hoge resolve
+resolvectl llmnr hoge resolve
+assert_in 'resolve' "$(resolvectl mdns hoge)"
+assert_in 'resolve' "$(resolvectl llmnr hoge)"
+resolvectl mdns hoge no
+resolvectl llmnr hoge no
+assert_in 'no' "$(resolvectl mdns hoge)"
+assert_in 'no' "$(resolvectl llmnr hoge)"
+# downgrade global setting to no
+{
+    echo "[Resolve]"
+    echo "MulticastDNS=no"
+    echo "LLMNR=no"
+} >/run/systemd/resolved.conf.d/mdns-llmnr.conf
+systemctl restart systemd-resolved.service
+systemctl service-log-level systemd-resolved.service debug
+# set per-link setting
+resolvectl mdns hoge yes
+resolvectl llmnr hoge yes
+assert_in 'no' "$(resolvectl mdns hoge)"
+assert_in 'no' "$(resolvectl llmnr hoge)"
+resolvectl mdns hoge resolve
+resolvectl llmnr hoge resolve
+assert_in 'no' "$(resolvectl mdns hoge)"
+assert_in 'no' "$(resolvectl llmnr hoge)"
+resolvectl mdns hoge no
+resolvectl llmnr hoge no
+assert_in 'no' "$(resolvectl mdns hoge)"
+assert_in 'no' "$(resolvectl llmnr hoge)"
+
+# Cleanup
+rm -f /run/systemd/resolved.conf.d/mdns-llmnr.conf
+ip link del hoge
+ip link del hoge.foo
 
 ### SETUP ###
 # Configure network
@@ -97,23 +164,13 @@ DNSSEC=allow-downgrade
 DNS=10.0.0.1
 EOF
 
-# Script to dump DNS notifications to a txt file
-cat >$NOTIFICATION_SUBSCRIPTION_SCRIPT <<EOF
-#!/bin/sh
-printf '
+mkdir -p /run/systemd/resolved.conf.d
 {
-  "method": "io.systemd.Resolve.Monitor.SubscribeDnsResolves",
-  "more": true
-}\0' | nc -U /run/systemd/resolve/io.systemd.Resolve.Monitor > $NOTIFICATION_LOGS
-EOF
-chmod a+x $NOTIFICATION_SUBSCRIPTION_SCRIPT
-
-{
+    echo "[Resolve]"
     echo "FallbackDNS="
     echo "DNSSEC=allow-downgrade"
     echo "DNSOverTLS=opportunistic"
-    echo "Monitor=yes"
-} >>/etc/systemd/resolved.conf
+} >/run/systemd/resolved.conf.d/test.conf
 ln -svf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 # Override the default NTA list, which turns off DNSSEC validation for (among
 # others) the test. domain
@@ -137,8 +194,9 @@ mkdir -p /etc/bind
 ln -svf /etc/bind.keys /etc/bind/bind.keys
 
 # Start the services
-systemctl unmask systemd-networkd systemd-resolved
-systemctl start systemd-networkd systemd-resolved
+systemctl unmask systemd-networkd
+systemctl start systemd-networkd
+systemctl restart systemd-resolved
 # Create knot's runtime dir, since from certain version it's provided only by
 # the package and not created by tmpfiles/systemd
 if [[ ! -d /run/knot ]]; then
@@ -153,12 +211,8 @@ networkctl status
 resolvectl status
 resolvectl log-level debug
 
-# Verify that DNS notifications are enabled (Monitor=yes)
-run busctl get-property org.freedesktop.resolve1 /org/freedesktop/resolve1 org.freedesktop.resolve1.Manager Monitor
-grep -qF 'b true' "$RUN_OUT"
-
-# Start monitoring DNS notifications
-systemd-run $NOTIFICATION_SUBSCRIPTION_SCRIPT
+# Start monitoring queries
+systemd-run -u resmontest.service -p Type=notify resolvectl monitor
 
 # We need to manually propagate the DS records of onlinesign.test. to the parent
 # zone, since they're generated online
@@ -179,9 +233,10 @@ knotc reload
 
 : "--- nss-resolve/nss-myhostname tests"
 # Sanity check
+TIMESTAMP=$(date '+%F %T')
 run getent -s resolve hosts ns1.unsigned.test
 grep -qE "^10\.0\.0\.1\s+ns1\.unsigned\.test" "$RUN_OUT"
-notification_check_host "ns1.unsigned.test" "10.0.0.1"
+monitor_check_rr "$TIMESTAMP" "ns1.unsigned.test IN A 10.0.0.1"
 
 # Issue: https://github.com/systemd/systemd/issues/18812
 # PR: https://github.com/systemd/systemd/pull/18896
@@ -271,10 +326,17 @@ run delv dupe.signed.test
 grep -qF "; fully validated" "$RUN_OUT"
 
 # Test resolution of CNAME chains
+TIMESTAMP=$(date '+%F %T')
 run resolvectl query -t A cname-chain.signed.test
 grep -qF "follow14.final.signed.test IN A 10.0.0.14" "$RUN_OUT"
 grep -qF "authenticated: yes" "$RUN_OUT"
-notification_check_host "cname-chain.signed.test" "10.0.0.14"
+
+monitor_check_rr "$TIMESTAMP" "follow10.so.close.signed.test IN CNAME follow11.yet.so.far.signed.test"
+monitor_check_rr "$TIMESTAMP" "follow11.yet.so.far.signed.test IN CNAME follow12.getting.hot.signed.test"
+monitor_check_rr "$TIMESTAMP" "follow12.getting.hot.signed.test IN CNAME follow13.almost.final.signed.test"
+monitor_check_rr "$TIMESTAMP" "follow13.almost.final.signed.test IN CNAME follow14.final.signed.test"
+monitor_check_rr "$TIMESTAMP" "follow14.final.signed.test IN A 10.0.0.14"
+
 # Non-existing RR + CNAME chain
 run dig +dnssec AAAA cname-chain.signed.test
 grep -qF "status: NOERROR" "$RUN_OUT"
@@ -311,9 +373,10 @@ grep -qF 'this.should.be.authenticated.wild.onlinesign.test IN TXT "this is an o
 grep -qF "authenticated: yes" "$RUN_OUT"
 
 # Resolve via dbus method
+TIMESTAMP=$(date '+%F %T')
 run busctl call org.freedesktop.resolve1 /org/freedesktop/resolve1 org.freedesktop.resolve1.Manager ResolveHostname 'isit' 0 secondsub.onlinesign.test 0 0
 grep -qF '10 0 0 134 "secondsub.onlinesign.test"' "$RUN_OUT"
-notification_check_host "secondsub.onlinesign.test" "10.0.0.134"
+monitor_check_rr "$TIMESTAMP" "secondsub.onlinesign.test IN A 10.0.0.134"
 
 : "--- ZONE: untrusted.test (DNSSEC without propagated DS records) ---"
 run dig +short untrusted.test
@@ -331,6 +394,8 @@ grep -qF "authenticated: no" "$RUN_OUT"
 ## 2) Query for a non-existing name should return NXDOMAIN, not SERVFAIL
 #run dig +dnssec this.does.not.exist.untrusted.test
 #grep -qF "status: NXDOMAIN" "$RUN_OUT"
+
+systemctl stop resmontest.service
 
 touch /testok
 rm /failed

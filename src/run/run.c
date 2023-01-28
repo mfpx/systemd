@@ -10,6 +10,7 @@
 #include "sd-event.h"
 
 #include "alloc-util.h"
+#include "build.h"
 #include "bus-error.h"
 #include "bus-locator.h"
 #include "bus-map-properties.h"
@@ -1106,7 +1107,7 @@ static int start_transient_service(
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(bus_wait_for_jobs_freep) BusWaitForJobs *w = NULL;
         _cleanup_free_ char *service = NULL, *pty_path = NULL;
-        _cleanup_close_ int master = -1;
+        _cleanup_close_ int master = -EBADF;
         int r;
 
         assert(bus);
@@ -1528,6 +1529,9 @@ static int start_transient_scope(sd_bus *bus) {
                 if (setresuid(uid, uid, uid) < 0)
                         return log_error_errno(errno, "Failed to change UID to " UID_FMT ": %m", uid);
         }
+
+        if (arg_working_directory && chdir(arg_working_directory) < 0)
+                return log_error_errno(errno, "Failed to change directory to '%s': %m", arg_working_directory);
 
         env = strv_env_merge(environ, user_env, arg_environment);
         if (!env)

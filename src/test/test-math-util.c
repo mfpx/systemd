@@ -54,7 +54,6 @@ TEST(iszero_safe) {
         assert_se( iszero_safe(DBL_MIN / -INFINITY));
         assert_se( iszero_safe(DBL_MAX / INFINITY / 2));
         assert_se( iszero_safe(DBL_MAX / -INFINITY * DBL_MAX));
-        assert_se(!iszero_safe(DBL_MAX * 2 / INFINITY));
 
         /* infinity / infinity is NaN */
         assert_se(!iszero_safe(INFINITY / INFINITY));

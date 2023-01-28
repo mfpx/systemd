@@ -119,6 +119,44 @@ systemctl start silent-success
 journalctl --sync
 [[ -z "$(journalctl -b -q -u silent-success.service)" ]]
 
+# Exercise the matching machinery
+SYSTEMD_LOG_LEVEL=debug journalctl -b -n 1 /dev/null /dev/zero /dev/null /dev/null /dev/null
+journalctl -b -n 1 /bin/true /bin/false
+journalctl -b -n 1 /bin/true + /bin/false
+journalctl -b -n 1 -r --unit "systemd*"
+
+systemd-run --user -M "testuser@.host" /bin/echo hello
+journalctl --sync
+journalctl -b -n 1 -r --user-unit "*"
+
+(! journalctl -b /dev/lets-hope-this-doesnt-exist)
+(! journalctl -b /dev/null /dev/zero /dev/this-also-shouldnt-exist)
+(! journalctl -b --unit "this-unit-should-not-exist*")
+
+# Facilities & priorities
+journalctl --facility help
+journalctl --facility kern -n 1
+journalctl --facility syslog --priority 0..3 -n 1
+journalctl --facility syslog --priority 3..0 -n 1
+journalctl --facility user --priority 0..0 -n 1
+journalctl --facility daemon --priority warning -n 1
+journalctl --facility daemon --priority warning..info -n 1
+journalctl --facility daemon --priority notice..crit -n 1
+journalctl --facility daemon --priority 5..crit -n 1
+
+(! journalctl --facility hopefully-an-unknown-facility)
+(! journalctl --priority hello-world)
+(! journalctl --priority 0..128)
+(! journalctl --priority 0..systemd)
+
+# Other options
+journalctl --disk-usage
+journalctl --dmesg -n 1
+journalctl --fields
+journalctl --list-boots
+journalctl --update-catalog
+journalctl --list-catalog
+
 # Add new tests before here, the journald restarts below
 # may make tests flappy.
 
@@ -140,5 +178,85 @@ sleep 3
 
 # https://github.com/systemd/systemd/issues/15528
 journalctl --follow --file=/var/log/journal/*/* | head -n1 || [[ $? -eq 1 ]]
+
+function add_logs_filtering_override() {
+    UNIT=${1:?}
+    OVERRIDE_NAME=${2:?}
+    LOG_FILTER=${3:-""}
+
+    mkdir -p /etc/systemd/system/"$UNIT".d/
+    echo "[Service]" >/etc/systemd/system/logs-filtering.service.d/"${OVERRIDE_NAME}".conf
+    echo "LogFilterPatterns=$LOG_FILTER" >>/etc/systemd/system/logs-filtering.service.d/"${OVERRIDE_NAME}".conf
+    systemctl daemon-reload
+}
+
+function run_service_and_fetch_logs() {
+    UNIT=$1
+
+    START=$(date '+%Y-%m-%d %T.%6N')
+    systemctl restart "$UNIT"
+    sleep .5
+    journalctl --sync
+    END=$(date '+%Y-%m-%d %T.%6N')
+
+    journalctl -q -u "$UNIT" -S "$START" -U "$END" | grep -Pv "systemd\[[0-9]+\]"
+    systemctl stop "$UNIT"
+}
+
+function is_xattr_supported() {
+    START=$(date '+%Y-%m-%d %T.%6N')
+    systemd-run --unit text_xattr --property LogFilterPatterns=log sh -c "sleep .5"
+    sleep .5
+    journalctl --sync
+    END=$(date '+%Y-%m-%d %T.%6N')
+    systemctl stop text_xattr
+
+    if journalctl -q -u "text_xattr" -S "$START" -U "$END" --grep "Failed to set 'user.journald_log_filter_patterns' xattr.*not supported$"; then
+        return 1
+    fi
+
+    return 0
+}
+
+if is_xattr_supported; then
+    # Accept all log messages
+    add_logs_filtering_override "logs-filtering.service" "00-reset" ""
+    [[ -n $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    add_logs_filtering_override "logs-filtering.service" "01-allow-all" ".*"
+    [[ -n $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    # Discard all log messages
+    add_logs_filtering_override "logs-filtering.service" "02-discard-all" "~.*"
+    [[ -z $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    # Accept all test messages
+    add_logs_filtering_override "logs-filtering.service" "03-reset" ""
+    [[ -n $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    # Discard all test messages
+    add_logs_filtering_override "logs-filtering.service" "04-discard-gg" "~.*gg.*"
+    [[ -z $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    # Deny filter takes precedence
+    add_logs_filtering_override "logs-filtering.service" "05-allow-all-but-too-late" ".*"
+    [[ -z $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    # Use tilde in a deny pattern
+    add_logs_filtering_override "logs-filtering.service" "06-reset" ""
+    add_logs_filtering_override "logs-filtering.service" "07-prevent-tilde" "~~more~"
+    [[ -z $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    # Only allow a pattern that won't be matched
+    add_logs_filtering_override "logs-filtering.service" "08-reset" ""
+    add_logs_filtering_override "logs-filtering.service" "09-allow-only-non-existing" "non-existing string"
+    [[ -z $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    # Allow a pattern starting with a tilde
+    add_logs_filtering_override "logs-filtering.service" "10-allow-with-escape-char" "\x7emore~"
+    [[ -n $(run_service_and_fetch_logs "logs-filtering.service") ]]
+
+    rm -rf /etc/systemd/system/logs-filtering.service.d
+fi
 
 touch /testok

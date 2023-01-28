@@ -50,6 +50,8 @@ static Virtualization detect_vm_cpuid(void) {
                 { "QNXQVMBSQG",   VIRTUALIZATION_QNX       },
                 /* https://projectacrn.org */
                 { "ACRNACRNACRN", VIRTUALIZATION_ACRN      },
+                /* https://www.lockheedmartin.com/en-us/products/Hardened-Security-for-Intel-Processors.html */
+                { "SRESRESRESRE", VIRTUALIZATION_SRE       },
         };
 
         uint32_t eax, ebx, ecx, edx;
@@ -776,7 +778,7 @@ translate_name:
                 /* Some images hardcode container=oci, but OCI is not a specific container manager.
                  * Try to detect one based on well-known files. */
                 v = detect_container_files();
-                if (v != VIRTUALIZATION_NONE)
+                if (v == VIRTUALIZATION_NONE)
                         v = VIRTUALIZATION_CONTAINER_OTHER;
                 goto finish;
         }
@@ -867,10 +869,26 @@ int running_in_userns(void) {
 int running_in_chroot(void) {
         int r;
 
+        /* If we're PID1, /proc may not be mounted (and most likely we're not in a chroot). But PID1 will
+         * mount /proc, so all other programs can assume that if /proc is *not* available, we're in some
+         * chroot. */
+
         if (getenv_bool("SYSTEMD_IGNORE_CHROOT") > 0)
                 return 0;
 
+        if (getpid_cached() == 1)
+                return false;  /* We're PID 1, we can't be in a chroot. */
+
         r = files_same("/proc/1/root", "/", 0);
+        if (r == -ENOENT) {
+                r = proc_mounted();
+                if (r == 0) {
+                        log_debug("/proc is not mounted, assuming we're in a chroot.");
+                        return 1;
+                }
+                if (r > 0)  /* If we have fake /proc/, we can't do the check properly. */
+                        return -ENOSYS;
+        }
         if (r < 0)
                 return r;
 
@@ -1020,6 +1038,7 @@ static const char *const virtualization_table[_VIRTUALIZATION_MAX] = {
         [VIRTUALIZATION_ACRN]            = "acrn",
         [VIRTUALIZATION_POWERVM]         = "powervm",
         [VIRTUALIZATION_APPLE]           = "apple",
+        [VIRTUALIZATION_SRE]             = "sre",
         [VIRTUALIZATION_VM_OTHER]        = "vm-other",
 
         [VIRTUALIZATION_SYSTEMD_NSPAWN]  = "systemd-nspawn",

@@ -188,8 +188,13 @@
     <citerefentry><refentrytitle>systemd.special</refentrytitle><manvolnum>7</manvolnum></citerefentry>
     for details about these target units.</para>
 
-    <para>systemd only keeps a minimal set of units loaded into memory. Specifically, the only units that are kept
-    loaded into memory are those for which at least one of the following conditions is true:</para>
+    <para>On first boot, <command>systemd</command> will enable or disable units according to preset policy.
+    See <citerefentry><refentrytitle>systemd.preset</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+    and "First Boot Semantics" in
+    <citerefentry><refentrytitle>machine-id</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
+
+    <para>systemd only keeps a minimal set of units loaded into memory. Specifically, the only units that are
+    kept loaded into memory are those for which at least one of the following conditions is true:</para>
 
     <orderedlist>
       <listitem><para>It is in an active, activating, deactivating or failed state (i.e. in any unit state except for <literal>inactive</literal>)</para></listitem>
@@ -752,16 +757,12 @@
         <term><varname>systemd.unit=</varname></term>
         <term><varname>rd.systemd.unit=</varname></term>
 
-        <listitem><para>Overrides the unit to activate on boot.
-        Defaults to <filename>default.target</filename>. This may be
-        used to temporarily boot into a different boot unit, for
-        example <filename>rescue.target</filename> or
-        <filename>emergency.service</filename>. See
+        <listitem><para>Overrides the unit to activate on boot.  Defaults to
+        <filename>default.target</filename>. This may be used to temporarily boot into a different boot unit,
+        for example <filename>rescue.target</filename> or <filename>emergency.service</filename>. See
         <citerefentry><refentrytitle>systemd.special</refentrytitle><manvolnum>7</manvolnum></citerefentry>
-        for details about these units. The option prefixed with
-        <literal>rd.</literal> is honored only in the initial RAM disk
-        (initrd), while the one that is not prefixed only in the main
-        system.</para></listitem>
+        for details about these units. The option prefixed with <literal>rd.</literal> is honored only in the
+        initrd, while the one that is not prefixed only in the main system.</para></listitem>
       </varlistentry>
 
       <varlistentry>

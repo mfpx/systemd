@@ -26,6 +26,7 @@
 #include "list.h"
 #include "loop-util.h"
 #include "loopback-setup.h"
+#include "missing_syscall.h"
 #include "mkdir-label.h"
 #include "mount-util.h"
 #include "mountpoint-util.h"
@@ -103,7 +104,7 @@ static const MountEntry apivfs_table[] = {
         { "/proc",               PROCFS,       false },
         { "/dev",                BIND_DEV,     false },
         { "/sys",                SYSFS,        false },
-        { "/run",                RUN,          false, .options_const = "mode=755" TMPFS_LIMITS_RUN, .flags = MS_NOSUID|MS_NODEV|MS_STRICTATIME },
+        { "/run",                RUN,          false, .options_const = "mode=0755" TMPFS_LIMITS_RUN, .flags = MS_NOSUID|MS_NODEV|MS_STRICTATIME },
 };
 
 /* ProtectKernelTunables= option and the related filesystem APIs */
@@ -365,7 +366,7 @@ static int append_empty_dir_mounts(MountEntry **p, char **strv) {
                         .mode = EMPTY_DIR,
                         .ignore = false,
                         .read_only = true,
-                        .options_const = "mode=755" TMPFS_LIMITS_EMPTY_OR_ALMOST,
+                        .options_const = "mode=0755" TMPFS_LIMITS_EMPTY_OR_ALMOST,
                         .flags = MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_STRICTATIME,
                 };
         }
@@ -915,7 +916,7 @@ static int mount_private_dev(MountEntry *m) {
                 "/dev/tty\0";
 
         char temporary_mount[] = "/tmp/namespace-dev-XXXXXX";
-        const char *d, *dev = NULL, *devpts = NULL, *devshm = NULL, *devhugepages = NULL, *devmqueue = NULL, *devlog = NULL, *devptmx = NULL;
+        const char *dev = NULL, *devpts = NULL, *devshm = NULL, *devhugepages = NULL, *devmqueue = NULL, *devlog = NULL, *devptmx = NULL;
         bool can_mknod = true;
         int r;
 
@@ -926,7 +927,7 @@ static int mount_private_dev(MountEntry *m) {
 
         dev = strjoina(temporary_mount, "/dev");
         (void) mkdir(dev, 0755);
-        r = mount_nofollow_verbose(LOG_DEBUG, "tmpfs", dev, "tmpfs", DEV_MOUNT_OPTIONS, "mode=755" TMPFS_LIMITS_PRIVATE_DEV);
+        r = mount_nofollow_verbose(LOG_DEBUG, "tmpfs", dev, "tmpfs", DEV_MOUNT_OPTIONS, "mode=0755" TMPFS_LIMITS_PRIVATE_DEV);
         if (r < 0)
                 goto fail;
 
@@ -1073,6 +1074,27 @@ static int mount_sysfs(const MountEntry *m) {
         return 1;
 }
 
+static bool mount_option_supported(const char *fstype, const char *key, const char *value) {
+        _cleanup_close_ int fd = -EBADF;
+        int r;
+
+        /* This function assumes support by default. Only if the fsconfig() call fails with -EINVAL/-EOPNOTSUPP
+         * will it report that the option/value is not supported. */
+
+        fd = fsopen(fstype, FSOPEN_CLOEXEC);
+        if (fd < 0) {
+                if (errno != ENOSYS)
+                        log_debug_errno(errno, "Failed to open superblock context for '%s': %m", fstype);
+                return true; /* If fsopen() fails for whatever reason, assume the value is supported. */
+        }
+
+        r = fsconfig(fd, FSCONFIG_SET_STRING, key, value, 0);
+        if (r < 0 && !IN_SET(errno, EINVAL, EOPNOTSUPP, ENOSYS))
+                log_debug_errno(errno, "Failed to set '%s=%s' on '%s' superblock context: %m", key, value, fstype);
+
+        return r >= 0 || !IN_SET(errno, EINVAL, EOPNOTSUPP);
+}
+
 static int mount_procfs(const MountEntry *m, const NamespaceInfo *ns_info) {
         _cleanup_free_ char *opts = NULL;
         const char *entry_path;
@@ -1090,12 +1112,25 @@ static int mount_procfs(const MountEntry *m, const NamespaceInfo *ns_info) {
                  * per-instance, we'll exclusively use the textual value for hidepid=, since support was
                  * added in the same commit: if it's supported it is thus also per-instance. */
 
-                opts = strjoin("hidepid=",
-                               ns_info->protect_proc == PROTECT_PROC_DEFAULT ? "off" :
-                               protect_proc_to_string(ns_info->protect_proc),
-                               ns_info->proc_subset == PROC_SUBSET_PID ? ",subset=pid" : "");
-                if (!opts)
-                        return -ENOMEM;
+                const char *hpv = ns_info->protect_proc == PROTECT_PROC_DEFAULT ?
+                                  "off" :
+                                  protect_proc_to_string(ns_info->protect_proc);
+
+                /* hidepid= support was added in 5.8, so we can use fsconfig()/fsopen() (which were added in
+                 * 5.2) to check if hidepid= is supported. This avoids a noisy dmesg log by the kernel when
+                 * trying to use hidepid= on systems where it isn't supported. The same applies for subset=.
+                 * fsopen()/fsconfig() was also backported on some distros which allows us to detect
+                 * hidepid=/subset= support in even more scenarios. */
+
+                if (mount_option_supported("proc", "hidepid", hpv)) {
+                        opts = strjoin("hidepid=", hpv);
+                        if (!opts)
+                                return -ENOMEM;
+                }
+
+                if (ns_info->proc_subset == PROC_SUBSET_PID && mount_option_supported("proc", "subset", "pid"))
+                        if (!strextend_with_separator(&opts, ",", "subset=pid"))
+                                return -ENOMEM;
         }
 
         entry_path = mount_entry_path(m);
@@ -1221,8 +1256,8 @@ static int mount_image(const MountEntry *m, const char *root_directory) {
         }
 
         r = verity_dissect_and_mount(
-                                /* src_fd= */ -1, mount_entry_source(m), mount_entry_path(m), m->image_options,
-                                host_os_release_id, host_os_release_version_id, host_os_release_sysext_level, NULL);
+                        /* src_fd= */ -1, mount_entry_source(m), mount_entry_path(m), m->image_options,
+                        host_os_release_id, host_os_release_version_id, host_os_release_sysext_level, NULL);
         if (r == -ENOENT && m->ignore)
                 return 0;
         if (r == -ESTALE && host_os_release_id)
@@ -1382,7 +1417,7 @@ static int apply_one_mount(
                 if (isempty(host_os_release_id))
                         return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "'ID' field not found or empty in 'os-release' data of OS tree '%s': %m", empty_to_root(root_directory));
 
-                r = load_extension_release_pairs(mount_entry_source(m), extension_name, &extension_release);
+                r = load_extension_release_pairs(mount_entry_source(m), extension_name, /* relax_extension_release_check= */ false, &extension_release);
                 if (r == -ENOENT && m->ignore)
                         return 0;
                 if (r < 0)
@@ -1669,7 +1704,7 @@ static size_t namespace_calculate_mounts(
                 n_bind_mounts +
                 n_mount_images +
                 (n_extension_images > 0 || n_extension_directories > 0 ? /* Mount each image and directory plus an overlay per hierarchy */
-                        n_hierarchies + n_extension_images + n_extension_directories: 0) +
+                 n_hierarchies + n_extension_images + n_extension_directories: 0) +
                 n_temporary_filesystems +
                 ns_info->private_dev +
                 (ns_info->protect_kernel_tunables ?
@@ -2003,7 +2038,6 @@ int setup_namespace(
                 char **error_path) {
 
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(dissected_image_unrefp) DissectedImage *dissected_image = NULL;
         _cleanup_(verity_settings_done) VeritySettings verity = VERITY_SETTINGS_DEFAULT;
         _cleanup_strv_free_ char **hierarchies = NULL;
@@ -2017,7 +2051,9 @@ int setup_namespace(
                 DISSECT_IMAGE_RELAX_VAR_CHECK |
                 DISSECT_IMAGE_FSCK |
                 DISSECT_IMAGE_USR_NO_ROOT |
-                DISSECT_IMAGE_GROWFS;
+                DISSECT_IMAGE_GROWFS |
+                DISSECT_IMAGE_ADD_PARTITION_DEVICES |
+                DISSECT_IMAGE_PIN_PARTITION_DEVICES;
         size_t n_mounts;
         int r;
 
@@ -2057,6 +2093,7 @@ int setup_namespace(
                 r = loop_device_make_by_path(
                                 root_image,
                                 FLAGS_SET(dissect_image_flags, DISSECT_IMAGE_DEVICE_READ_ONLY) ? O_RDONLY : -1 /* < 0 means writable if possible, read-only as fallback */,
+                                /* sector_size= */ UINT32_MAX,
                                 FLAGS_SET(dissect_image_flags, DISSECT_IMAGE_NO_PARTITION_TABLE) ? 0 : LO_FLAGS_PARTSCAN,
                                 LOCK_SH,
                                 &loop_device);
@@ -2083,8 +2120,7 @@ int setup_namespace(
                                 dissected_image,
                                 NULL,
                                 &verity,
-                                dissect_image_flags,
-                                &decrypted_image);
+                                dissect_image_flags);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to decrypt dissected image: %m");
         }
@@ -2416,15 +2452,11 @@ int setup_namespace(
                         goto finish;
                 }
 
-                if (decrypted_image) {
-                        r = decrypted_image_relinquish(decrypted_image);
-                        if (r < 0) {
-                                log_debug_errno(r, "Failed to relinquish decrypted image: %m");
-                                goto finish;
-                        }
+                r = dissected_image_relinquish(dissected_image);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to relinquish dissected image: %m");
+                        goto finish;
                 }
-
-                loop_device_relinquish(loop_device);
 
         } else if (root_directory) {
 
@@ -2457,7 +2489,7 @@ int setup_namespace(
                 goto finish;
 
         /* MS_MOVE does not work on MS_SHARED so the remount MS_SHARED will be done later */
-        r = mount_move_root(root);
+        r = mount_switch_root(root, /* mount_propagation_flag = */ 0);
         if (r == -EINVAL && root_directory) {
                 /* If we are using root_directory and we don't have privileges (ie: user manager in a user
                  * namespace) and the root_directory is already a mount point in the parent namespace,
@@ -2467,7 +2499,7 @@ int setup_namespace(
                 r = mount_nofollow_verbose(LOG_DEBUG, root, root, NULL, MS_BIND|MS_REC, NULL);
                 if (r < 0)
                         goto finish;
-                r = mount_move_root(root);
+                r = mount_switch_root(root, /* mount_propagation_flag = */ 0);
         }
         if (r < 0) {
                 log_debug_errno(r, "Failed to mount root with MS_MOVE: %m");
@@ -2667,7 +2699,7 @@ int temporary_filesystem_add(
 
 static int make_tmp_prefix(const char *prefix) {
         _cleanup_free_ char *t = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         int r;
 
         /* Don't do anything unless we know the dir is actually missing */
@@ -2677,7 +2709,7 @@ static int make_tmp_prefix(const char *prefix) {
         if (errno != ENOENT)
                 return -errno;
 
-        RUN_WITH_UMASK(000)
+        WITH_UMASK(000)
                 r = mkdir_parents(prefix, 0755);
         if (r < 0)
                 return r;
@@ -2734,7 +2766,7 @@ static int setup_one_tmp_dir(const char *id, const char *prefix, char **path, ch
         if (r < 0)
                 return r;
 
-        RUN_WITH_UMASK(0077)
+        WITH_UMASK(0077)
                 if (!mkdtemp(x)) {
                         if (errno == EROFS || ERRNO_IS_DISK_SPACE(errno))
                                 rw = false;
@@ -2747,9 +2779,9 @@ static int setup_one_tmp_dir(const char *id, const char *prefix, char **path, ch
                 if (!y)
                         return -ENOMEM;
 
-                RUN_WITH_UMASK(0000)
+                WITH_UMASK(0000)
                         if (mkdir(y, 0777 | S_ISVTX) < 0)
-                                    return -errno;
+                                return -errno;
 
                 r = label_fix_full(AT_FDCWD, y, prefix, 0);
                 if (r < 0)
@@ -2761,7 +2793,7 @@ static int setup_one_tmp_dir(const char *id, const char *prefix, char **path, ch
                 /* Trouble: we failed to create the directory. Instead of failing, let's simulate /tmp being
                  * read-only. This way the service will get the EROFS result as if it was writing to the real
                  * file system. */
-                RUN_WITH_UMASK(0000)
+                WITH_UMASK(0000)
                         r = mkdir_p(RUN_SYSTEMD_EMPTY, 0500);
                 if (r < 0)
                         return r;
@@ -2801,7 +2833,7 @@ int setup_tmp_dirs(const char *id, char **tmp_dir, char **var_tmp_dir) {
 }
 
 int setup_shareable_ns(const int ns_storage_socket[static 2], unsigned long nsflag) {
-        _cleanup_close_ int ns = -1;
+        _cleanup_close_ int ns = -EBADF;
         int r, q;
         const char *ns_name, *ns_path;
 
@@ -2869,7 +2901,7 @@ fail:
 }
 
 int open_shareable_ns_path(const int ns_storage_socket[static 2], const char *path, unsigned long nsflag) {
-        _cleanup_close_ int ns = -1;
+        _cleanup_close_ int ns = -EBADF;
         int q, r;
 
         assert(ns_storage_socket);
@@ -2958,6 +2990,7 @@ static const char* const namespace_type_table[] = {
         [NAMESPACE_USER]   = "user",
         [NAMESPACE_PID]    = "pid",
         [NAMESPACE_NET]    = "net",
+        [NAMESPACE_TIME]   = "time",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(namespace_type, NamespaceType);

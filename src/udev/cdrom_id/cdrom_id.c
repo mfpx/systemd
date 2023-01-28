@@ -103,7 +103,7 @@ typedef struct Context {
 } Context;
 
 #define CONTEXT_EMPTY {                                 \
-                .fd = -1,                               \
+                .fd = -EBADF,                           \
                 .media_feature = _FEATURE_INVALID,      \
                 .media_state = _MEDIA_STATE_INVALID,    \
         }
@@ -743,7 +743,7 @@ static int open_drive(Context *c) {
         assert(c->fd < 0);
 
         for (int cnt = 0;; cnt++) {
-                fd = open(arg_node, O_RDONLY|O_NONBLOCK|O_CLOEXEC);
+                fd = open(arg_node, O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOCTTY);
                 if (fd >= 0)
                         break;
                 if (++cnt >= 20 || errno != EBUSY)

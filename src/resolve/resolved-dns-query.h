@@ -52,6 +52,11 @@ struct DnsQuery {
          * here, and use that instead. */
         DnsPacket *question_bypass;
 
+        /* When we follow a CNAME redirect, we save the original question here, for informational/monitoring
+         * purposes. We'll keep adding to this whenever we go one step in the redirect, so that in the end
+         * this will contain the complete set of CNAME questions. */
+        DnsQuestion *collected_questions;
+
         uint64_t flags;
         int ifindex;
 
@@ -95,7 +100,6 @@ struct DnsQuery {
         union in_addr_union request_address;
         unsigned block_all_complete;
         char *request_address_string;
-        char *request_name;
 
         /* DNS stub information */
         DnsPacket *request_packet;

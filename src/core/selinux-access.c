@@ -23,7 +23,6 @@
 #include "selinux-util.h"
 #include "stdio-util.h"
 #include "strv.h"
-#include "util.h"
 
 static bool initialized = false;
 
@@ -113,9 +112,9 @@ _printf_(2, 3) static int log_callback(int type, const char *fmt, ...) {
 
                 if (r >= 0) {
                         if (type == SELINUX_AVC)
-                                audit_log_user_avc_message(get_audit_fd(), AUDIT_USER_AVC, buf, NULL, NULL, NULL, 0);
+                                audit_log_user_avc_message(get_audit_fd(), AUDIT_USER_AVC, buf, NULL, NULL, NULL, getuid());
                         else if (type == SELINUX_ERROR)
-                                audit_log_user_avc_message(get_audit_fd(), AUDIT_USER_SELINUX_ERR, buf, NULL, NULL, NULL, 0);
+                                audit_log_user_avc_message(get_audit_fd(), AUDIT_USER_SELINUX_ERR, buf, NULL, NULL, NULL, getuid());
 
                         return 0;
                 }
@@ -137,6 +136,7 @@ _printf_(2, 3) static int log_callback(int type, const char *fmt, ...) {
 }
 
 static int access_init(sd_bus_error *error) {
+        int r;
 
         if (!mac_selinux_use())
                 return 0;
@@ -145,23 +145,20 @@ static int access_init(sd_bus_error *error) {
                 return 1;
 
         if (avc_open(NULL, 0) != 0) {
-                int saved_errno = errno;
-                bool enforce;
+                r = -errno;  /* Save original errno for later */
 
-                enforce = security_getenforce() != 0;
-                log_full_errno(enforce ? LOG_ERR : LOG_WARNING, saved_errno, "Failed to open the SELinux AVC: %m");
+                bool enforce = security_getenforce() != 0;
+                log_full_errno(enforce ? LOG_ERR : LOG_WARNING, r, "Failed to open the SELinux AVC: %m");
 
-                /* If enforcement isn't on, then let's suppress this
-                 * error, and just don't do any AVC checks. The
-                 * warning we printed is hence all the admin will
-                 * see. */
+                /* If enforcement isn't on, then let's suppress this error, and just don't do any AVC checks.
+                 * The warning we printed is hence all the admin will see. */
                 if (!enforce)
                         return 0;
 
-                /* Return an access denied error, if we couldn't load
-                 * the AVC but enforcing mode was on, or we couldn't
-                 * determine whether it is one. */
-                return sd_bus_error_setf(error, SD_BUS_ERROR_ACCESS_DENIED, "Failed to open the SELinux AVC: %s", strerror_safe(saved_errno));
+                /* Return an access denied error based on the original errno, if we couldn't load the AVC but
+                 * enforcing mode was on, or we couldn't determine whether it is one. */
+                errno = -r;
+                return sd_bus_error_setf(error, SD_BUS_ERROR_ACCESS_DENIED, "Failed to open the SELinux AVC: %m");
         }
 
         selinux_set_callback(SELINUX_CB_AUDIT, (union selinux_callback) { .func_audit = audit_callback });
@@ -232,15 +229,19 @@ int mac_selinux_access_check_internal(
         } else {
                 /* If no unit context is known, use our own */
                 if (getcon_raw(&fcon) < 0) {
-                        r = -errno;
-
-                        log_warning_errno(r, "SELinux getcon_raw() failed%s (perm=%s): %m",
+                        log_warning_errno(errno, "SELinux getcon_raw() failed%s (perm=%s): %m",
                                           enforce ? "" : ", ignoring",
                                           permission);
                         if (!enforce)
                                 return 0;
 
                         return sd_bus_error_setf(error, SD_BUS_ERROR_ACCESS_DENIED, "Failed to get current context: %m");
+                }
+                if (!fcon) {
+                        if (!enforce)
+                                return 0;
+
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_ACCESS_DENIED, "We appear not to have any SELinux context: %m");
                 }
 
                 acon = fcon;

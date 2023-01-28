@@ -176,11 +176,11 @@ static int lock_device(
                 dev_t devno,
                 usec_t deadline) {
 
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         struct stat st;
         int r;
 
-        fd = open(path, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+        fd = open(path, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
         if (fd < 0)
                 return log_error_errno(errno, "Failed to open '%s': %m", path);
 
@@ -328,7 +328,7 @@ int lock_main(int argc, char *argv[], void *userdata) {
                 if (arg_print)
                         printf("%s\n", node);
                 else {
-                        _cleanup_close_ int fd = -1;
+                        _cleanup_close_ int fd = -EBADF;
 
                         fd = lock_device(node, devnos[i], deadline);
                         if (fd < 0)

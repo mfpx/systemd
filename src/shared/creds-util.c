@@ -9,9 +9,10 @@
 #include "sd-id128.h"
 
 #include "blockdev-util.h"
+#include "capability-util.h"
 #include "chattr-util.h"
+#include "constants.h"
 #include "creds-util.h"
-#include "def.h"
 #include "efi-api.h"
 #include "env-util.h"
 #include "fd-util.h"
@@ -84,6 +85,56 @@ int read_credential(const char *name, void **ret, size_t *ret_size) {
                         READ_FULL_FILE_SECURE,
                         NULL,
                         (char**) ret, ret_size);
+}
+
+int read_credential_strings_many_internal(
+                const char *first_name, char **first_value,
+                ...) {
+
+        _cleanup_free_ void *b = NULL;
+        int r, ret = 0;
+
+        /* Reads a bunch of credentials into the specified buffers. If the specified buffers are already
+         * non-NULL frees them if a credential is found. Only supports string-based credentials
+         * (i.e. refuses embedded NUL bytes) */
+
+        if (!first_name)
+                return 0;
+
+        r = read_credential(first_name, &b, NULL);
+        if (r == -ENXIO) /* no creds passed at all? propagate this */
+                return r;
+        if (r < 0)
+                ret = r;
+        else
+                free_and_replace(*first_value, b);
+
+        va_list ap;
+        va_start(ap, first_value);
+
+        for (;;) {
+                _cleanup_free_ void *bb = NULL;
+                const char *name;
+                char **value;
+
+                name = va_arg(ap, const char *);
+                if (!name)
+                        break;
+
+                value = va_arg(ap, char **);
+                if (*value)
+                        continue;
+
+                r = read_credential(name, &bb, NULL);
+                if (r < 0) {
+                        if (ret >= 0)
+                                ret = r;
+                } else
+                        free_and_replace(*value, bb);
+        }
+
+        va_end(ap);
+        return ret;
 }
 
 int get_credential_user_password(const char *username, char **ret_password, bool *ret_is_hashed) {
@@ -165,18 +216,22 @@ static int make_credential_host_secret(
                 void **ret_data,
                 size_t *ret_size) {
 
-        struct credential_host_secret_format buf;
         _cleanup_free_ char *t = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         int r;
 
         assert(dfd >= 0);
         assert(fn);
 
-        fd = openat(dfd, ".", O_CLOEXEC|O_WRONLY|O_TMPFILE, 0400);
+        /* For non-root users creating a temporary file using the openat(2) over "." will fail later, in the
+         * linkat(2) step at the end.  The reason is that linkat(2) requires the CAP_DAC_READ_SEARCH
+         * capability when it uses the AT_EMPTY_PATH flag. */
+        if (have_effective_cap(CAP_DAC_READ_SEARCH) > 0) {
+                fd = openat(dfd, ".", O_CLOEXEC|O_WRONLY|O_TMPFILE, 0400);
+                if (fd < 0)
+                        log_debug_errno(errno, "Failed to create temporary credential file with O_TMPFILE, proceeding without: %m");
+        }
         if (fd < 0) {
-                log_debug_errno(errno, "Failed to create temporary credential file with O_TMPFILE, proceeding without: %m");
-
                 if (asprintf(&t, "credential.secret.%016" PRIx64, random_u64()) < 0)
                         return -ENOMEM;
 
@@ -189,21 +244,23 @@ static int make_credential_host_secret(
         if (r < 0)
                 log_debug_errno(r, "Failed to set file attributes for secrets file, ignoring: %m");
 
-        buf = (struct credential_host_secret_format) {
+        struct credential_host_secret_format buf = {
                 .machine_id = machine_id,
         };
 
+        CLEANUP_ERASE(buf);
+
         r = crypto_random_bytes(buf.data, sizeof(buf.data));
         if (r < 0)
-                goto finish;
+                goto fail;
 
         r = loop_write(fd, &buf, sizeof(buf), false);
         if (r < 0)
-                goto finish;
+                goto fail;
 
         if (fsync(fd) < 0) {
                 r = -errno;
-                goto finish;
+                goto fail;
         }
 
         warn_not_encrypted(fd, flags, dirname, fn);
@@ -211,17 +268,17 @@ static int make_credential_host_secret(
         if (t) {
                 r = rename_noreplace(dfd, t, dfd, fn);
                 if (r < 0)
-                        goto finish;
+                        goto fail;
 
                 t = mfree(t);
         } else if (linkat(fd, "", dfd, fn, AT_EMPTY_PATH) < 0) {
                 r = -errno;
-                goto finish;
+                goto fail;
         }
 
         if (fsync(dfd) < 0) {
                 r = -errno;
-                goto finish;
+                goto fail;
         }
 
         if (ret_data) {
@@ -230,7 +287,7 @@ static int make_credential_host_secret(
                 copy = memdup(buf.data, sizeof(buf.data));
                 if (!copy) {
                         r = -ENOMEM;
-                        goto finish;
+                        goto fail;
                 }
 
                 *ret_data = copy;
@@ -239,19 +296,18 @@ static int make_credential_host_secret(
         if (ret_size)
                 *ret_size = sizeof(buf.data);
 
-        r = 0;
+        return 0;
 
-finish:
+fail:
         if (t && unlinkat(dfd, t, 0) < 0)
                 log_debug_errno(errno, "Failed to remove temporary credential key: %m");
 
-        explicit_bzero_safe(&buf, sizeof(buf));
         return r;
 }
 
 int get_credential_host_secret(CredentialSecretFlags flags, void **ret, size_t *ret_size) {
         _cleanup_free_ char *_dirname = NULL, *_filename = NULL;
-        _cleanup_close_ int dfd = -1;
+        _cleanup_close_ int dfd = -EBADF;
         sd_id128_t machine_id;
         const char *dirname, *filename;
         int r;
@@ -298,7 +354,7 @@ int get_credential_host_secret(CredentialSecretFlags flags, void **ret, size_t *
 
         for (unsigned attempt = 0;; attempt++) {
                 _cleanup_(erase_and_freep) struct credential_host_secret_format *f = NULL;
-                _cleanup_close_ int fd = -1;
+                _cleanup_close_ int fd = -EBADF;
                 size_t l = 0;
                 ssize_t n = 0;
                 struct stat st;
@@ -602,24 +658,14 @@ int encrypt_credential_and_warn(
 
 #if HAVE_TPM2
         bool try_tpm2;
-        if (sd_id128_equal(with_key, _CRED_AUTO)) {
-                /* If automatic mode is selected and we are running in a container, let's not try TPM2. OTOH
-                 * if user picks TPM2 explicitly, let's always honour the request and try. */
+        if (sd_id128_in_set(with_key, _CRED_AUTO, _CRED_AUTO_INITRD)) {
+                /* If automatic mode is selected lets see if a TPM2 it is present. If we are running in a
+                 * container tpm2_support will detect this, and will return a different flag combination of
+                 * TPM2_SUPPORT_FULL, effectively skipping the use of TPM2 when inside one. */
 
-                r = detect_container();
-                if (r < 0)
-                        log_debug_errno(r, "Failed to determine whether we are running in a container, ignoring: %m");
-                else if (r > 0)
-                        log_debug("Running in container, not attempting to use TPM2.");
-
-                try_tpm2 = r <= 0;
-        } else if (sd_id128_equal(with_key, _CRED_AUTO_INITRD)) {
-                /* If automatic mode for initrds is selected, we'll use the TPM2 key if the firmware does it,
-                 * otherwise we'll use a fixed key */
-
-                try_tpm2 = efi_has_tpm2();
+                try_tpm2 = tpm2_support() == TPM2_SUPPORT_FULL;
                 if (!try_tpm2)
-                        log_debug("Firmware lacks TPM2 support, not attempting to use TPM2.");
+                        log_debug("System lacks TPM2 support or running in a container, not attempting to use TPM2.");
         } else
                 try_tpm2 = sd_id128_in_set(with_key,
                                            CRED_AES256_GCM_BY_TPM2_HMAC,
@@ -660,7 +706,7 @@ int encrypt_credential_and_warn(
                               &tpm2_primary_alg);
                 if (r < 0) {
                         if (sd_id128_equal(with_key, _CRED_AUTO_INITRD))
-                                log_warning("Firmware reported a TPM2 being present and used, but we didn't manage to talk to it. Credential will be refused if SecureBoot is enabled.");
+                                log_warning("TPM2 present and used, but we didn't manage to talk to it. Credential will be refused if SecureBoot is enabled.");
                         else if (!sd_id128_equal(with_key, _CRED_AUTO))
                                 return r;
 
@@ -1100,12 +1146,9 @@ int decrypt_credential_and_warn(
         if (le32toh(m->name_size) > 0) {
                 _cleanup_free_ char *embedded_name = NULL;
 
-                if (memchr(m->name, 0, le32toh(m->name_size)))
-                        return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "Embedded credential name contains NUL byte, refusing.");
-
-                embedded_name = memdup_suffix0(m->name, le32toh(m->name_size));
-                if (!embedded_name)
-                        return log_oom();
+                r = make_cstring(m->name, le32toh(m->name_size), MAKE_CSTRING_REFUSE_TRAILING_NUL, &embedded_name);
+                if (r < 0)
+                        return log_error_errno(r, "Unable to convert embedded credential name to C string: %m");
 
                 if (!credential_name_valid(embedded_name))
                         return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "Embedded credential name is not valid, refusing.");

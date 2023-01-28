@@ -32,7 +32,6 @@
 #include "socket-util.h"
 #include "special.h"
 #include "stdio-util.h"
-#include "util.h"
 
 static bool arg_skip = false;
 static bool arg_force = false;
@@ -226,7 +225,7 @@ static int process_progress(int fd, FILE* console) {
 }
 
 static int fsck_progress_socket(void) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         int r;
 
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -242,7 +241,7 @@ static int fsck_progress_socket(void) {
 }
 
 static int run(int argc, char *argv[]) {
-        _cleanup_close_pair_ int progress_pipe[2] = { -1, -1 };
+        _cleanup_close_pair_ int progress_pipe[2] = PIPE_EBADF;
         _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
         _cleanup_free_ char *dpath = NULL;
         _cleanup_fclose_ FILE *console = NULL;
@@ -324,11 +323,19 @@ static int run(int argc, char *argv[]) {
         }
 
         if (sd_device_get_property_value(dev, "ID_FS_TYPE", &type) >= 0) {
-                r = fsck_exists(type);
+                r = fsck_exists_for_fstype(type);
                 if (r < 0)
                         log_device_warning_errno(dev, r, "Couldn't detect if fsck.%s may be used, proceeding: %m", type);
                 else if (r == 0) {
                         log_device_info(dev, "fsck.%s doesn't exist, not checking file system.", type);
+                        return 0;
+                }
+        } else {
+                r = fsck_exists();
+                if (r < 0)
+                        log_device_warning_errno(dev, r, "Couldn't detect if the fsck command may be used, proceeding: %m");
+                else if (r == 0) {
+                        log_device_info(dev, "The fsck command does not exist, not checking file system.");
                         return 0;
                 }
         }

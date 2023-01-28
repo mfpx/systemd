@@ -132,7 +132,7 @@ static inline bool verify_pe(const PeFileHeader *pe, bool allow_compatibility) {
                IN_SET(pe->OptionalHeader.Magic, OPTHDR32_MAGIC, OPTHDR64_MAGIC);
 }
 
-static inline UINTN section_table_offset(const DosFileHeader *dos, const PeFileHeader *pe) {
+static inline size_t section_table_offset(const DosFileHeader *dos, const PeFileHeader *pe) {
         assert(dos);
         assert(pe);
         return dos->ExeHeader + offsetof(PeFileHeader, OptionalHeader) + pe->FileHeader.SizeOfOptionalHeader;
@@ -140,34 +140,40 @@ static inline UINTN section_table_offset(const DosFileHeader *dos, const PeFileH
 
 static void locate_sections(
                 const PeSectionHeader section_table[],
-                UINTN n_table,
+                size_t n_table,
                 const char * const sections[],
-                UINTN *addrs,
-                UINTN *offsets,
-                UINTN *sizes) {
+                size_t *offsets,
+                size_t *sizes,
+                bool in_memory) {
 
         assert(section_table);
         assert(sections);
+        assert(offsets);
         assert(sizes);
 
-        for (UINTN i = 0; i < n_table; i++) {
+        size_t prev_section_addr = 0;
+
+        for (size_t i = 0; i < n_table; i++) {
                 const PeSectionHeader *sect = section_table + i;
 
-                for (UINTN j = 0; sections[j]; j++) {
+                if (in_memory) {
+                        if (prev_section_addr > sect->VirtualAddress)
+                                log_error("Overlapping PE sections detected. Boot may fail due to image memory corruption!");
+                        prev_section_addr = sect->VirtualAddress + sect->VirtualSize;
+                }
+
+                for (size_t j = 0; sections[j]; j++) {
                         if (memcmp(sect->Name, sections[j], strlen8(sections[j])) != 0)
                                 continue;
 
-                        if (addrs)
-                                addrs[j] = sect->VirtualAddress;
-                        if (offsets)
-                                offsets[j] = sect->PointerToRawData;
+                        offsets[j] = in_memory ? sect->VirtualAddress : sect->PointerToRawData;
                         sizes[j] = sect->VirtualSize;
                 }
         }
 }
 
 static uint32_t get_compatibility_entry_address(const DosFileHeader *dos, const PeFileHeader *pe) {
-        UINTN addr = 0, size = 0;
+        size_t addr = 0, size = 0;
         static const char *sections[] = { ".compat", NULL };
 
         /* The kernel may provide alternative PE entry points for different PE architectures. This allows
@@ -178,8 +184,8 @@ static uint32_t get_compatibility_entry_address(const DosFileHeader *dos, const 
                         pe->FileHeader.NumberOfSections,
                         sections,
                         &addr,
-                        NULL,
-                        &size);
+                        &size,
+                        /*in_memory=*/true);
 
         if (size == 0)
                 return 0;
@@ -209,48 +215,40 @@ static uint32_t get_compatibility_entry_address(const DosFileHeader *dos, const 
         return 0;
 }
 
-EFI_STATUS pe_alignment_info(
-                const void *base,
-                uint32_t *ret_entry_point_address,
-                uint32_t *ret_size_of_image,
-                uint32_t *ret_section_alignment) {
-
-        const DosFileHeader *dos;
-        const PeFileHeader *pe;
-
+EFI_STATUS pe_kernel_info(const void *base, uint32_t *ret_compat_address) {
         assert(base);
-        assert(ret_entry_point_address);
+        assert(ret_compat_address);
 
-        dos = (const DosFileHeader *) base;
+        const DosFileHeader *dos = (const DosFileHeader *) base;
         if (!verify_dos(dos))
                 return EFI_LOAD_ERROR;
 
-        pe = (const PeFileHeader *) ((const uint8_t *) base + dos->ExeHeader);
+        const PeFileHeader *pe = (const PeFileHeader *) ((const uint8_t *) base + dos->ExeHeader);
         if (!verify_pe(pe, /* allow_compatibility= */ true))
                 return EFI_LOAD_ERROR;
 
-        uint32_t entry_address = pe->OptionalHeader.AddressOfEntryPoint;
+        /* Support for LINUX_INITRD_MEDIA_GUID was added in kernel stub 1.0. */
+        if (pe->OptionalHeader.MajorImageVersion < 1)
+                return EFI_UNSUPPORTED;
 
-        /* Look for a compat entry point. */
-        if (pe->FileHeader.Machine != TARGET_MACHINE_TYPE) {
-                entry_address = get_compatibility_entry_address(dos, pe);
-                if (entry_address == 0)
-                        /* Image type not supported and no compat entry found. */
-                        return EFI_UNSUPPORTED;
+        if (pe->FileHeader.Machine == TARGET_MACHINE_TYPE) {
+                *ret_compat_address = 0;
+                return EFI_SUCCESS;
         }
 
-        *ret_entry_point_address = entry_address;
-        if (ret_size_of_image)
-                *ret_size_of_image = pe->OptionalHeader.SizeOfImage;
-        if (ret_section_alignment)
-                *ret_section_alignment = pe->OptionalHeader.SectionAlignment;
+        uint32_t compat_address = get_compatibility_entry_address(dos, pe);
+        if (compat_address == 0)
+                /* Image type not supported and no compat entry found. */
+                return EFI_UNSUPPORTED;
+
+        *ret_compat_address = compat_address;
         return EFI_SUCCESS;
 }
 
-EFI_STATUS pe_memory_locate_sections(const void *base, const char * const sections[], UINTN *addrs, UINTN *sizes) {
+EFI_STATUS pe_memory_locate_sections(const void *base, const char * const sections[], size_t *addrs, size_t *sizes) {
         const DosFileHeader *dos;
         const PeFileHeader *pe;
-        UINTN offset;
+        size_t offset;
 
         assert(base);
         assert(sections);
@@ -270,8 +268,8 @@ EFI_STATUS pe_memory_locate_sections(const void *base, const char * const sectio
                         pe->FileHeader.NumberOfSections,
                         sections,
                         addrs,
-                        NULL,
-                        sizes);
+                        sizes,
+                        /*in_memory=*/true);
 
         return EFI_SUCCESS;
 }
@@ -280,13 +278,13 @@ EFI_STATUS pe_file_locate_sections(
                 EFI_FILE *dir,
                 const char16_t *path,
                 const char * const sections[],
-                UINTN *offsets,
-                UINTN *sizes) {
+                size_t *offsets,
+                size_t *sizes) {
         _cleanup_free_ PeSectionHeader *section_table = NULL;
         _cleanup_(file_closep) EFI_FILE *handle = NULL;
         DosFileHeader dos;
         PeFileHeader pe;
-        UINTN len, section_table_len;
+        size_t len, section_table_len;
         EFI_STATUS err;
 
         assert(dir);
@@ -334,7 +332,7 @@ EFI_STATUS pe_file_locate_sections(
                 return EFI_LOAD_ERROR;
 
         locate_sections(section_table, pe.FileHeader.NumberOfSections,
-                        sections, NULL, offsets, sizes);
+                        sections, offsets, sizes, /*in_memory=*/false);
 
         return EFI_SUCCESS;
 }

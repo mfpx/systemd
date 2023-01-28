@@ -5,6 +5,7 @@
 
 #include "alloc-util.h"
 #include "dns-domain.h"
+#include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -204,7 +205,7 @@ int manager_save(Manager *m) {
                         const char *domainname;
                         char **domains = NULL;
 
-                        target_domains = (link->network->dhcp_use_domains == DHCP_USE_DOMAINS_YES) ? &search_domains : &route_domains;
+                        target_domains = link->network->dhcp_use_domains == DHCP_USE_DOMAINS_YES ? &search_domains : &route_domains;
                         r = sd_dhcp_lease_get_domainname(link->dhcp_lease, &domainname);
                         if (r >= 0) {
                                 r = ordered_set_put_strdup(target_domains, domainname);
@@ -515,7 +516,7 @@ int link_save(Link *link) {
 
         if (link->network) {
                 const char *online_state;
-                bool space;
+                bool space = false;
 
                 online_state = link_online_state_to_string(link->online_state);
                 if (online_state)
@@ -538,10 +539,19 @@ int link_save(Link *link) {
 
                 fprintf(f, "NETWORK_FILE=%s\n", link->network->filename);
 
-                /************************************************************/
+                fputs("NETWORK_FILE_DROPINS=\"", f);
+                STRV_FOREACH(d, link->network->dropins) {
+                        _cleanup_free_ char *escaped = NULL;
 
-                /* Make sure to flush out old entries before we use the NDisc data */
-                ndisc_vacuum(link);
+                        escaped = xescape(*d, ":");
+                        if (!escaped)
+                                return -ENOMEM;
+
+                        fputs_with_space(f, escaped, ":", &space);
+                }
+                fputs("\"\n", f);
+
+                /************************************************************/
 
                 fputs("DNS=", f);
                 if (link->n_dns != UINT_MAX)

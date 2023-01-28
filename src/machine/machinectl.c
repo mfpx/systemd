@@ -14,6 +14,7 @@
 #include "sd-bus.h"
 
 #include "alloc-util.h"
+#include "build.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
 #include "bus-locator.h"
@@ -24,8 +25,8 @@
 #include "bus-wait-for-jobs.h"
 #include "cgroup-show.h"
 #include "cgroup-util.h"
+#include "constants.h"
 #include "copy.h"
-#include "def.h"
 #include "env-util.h"
 #include "fd-util.h"
 #include "format-table.h"
@@ -60,8 +61,6 @@
 #include "verbs.h"
 #include "web-util.h"
 
-#define ALL_ADDRESSES -1
-
 static char **arg_property = NULL;
 static bool arg_all = false;
 static BusPrintPropertyFlags arg_print_flags = 0;
@@ -78,12 +77,13 @@ static bool arg_quiet = false;
 static bool arg_ask_password = true;
 static unsigned arg_lines = 10;
 static OutputMode arg_output = OUTPUT_SHORT;
+static bool arg_now = false;
 static bool arg_force = false;
 static ImportVerify arg_verify = IMPORT_VERIFY_SIGNATURE;
 static const char* arg_format = NULL;
 static const char *arg_uid = NULL;
 static char **arg_setenv = NULL;
-static int arg_max_addresses = 1;
+static unsigned arg_max_addresses = 1;
 
 STATIC_DESTRUCTOR_REGISTER(arg_property, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_setenv, strv_freep);
@@ -99,7 +99,7 @@ static OutputFlags get_output_flags(void) {
 static int call_get_os_release(sd_bus *bus, const char *method, const char *name, const char *query, ...) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
-        const char *k, *v, *iter, **query_res = NULL;
+        const char *k, *v, **query_res = NULL;
         size_t count = 0, awaited_args = 0;
         va_list ap;
         int r;
@@ -260,7 +260,6 @@ static int show_table(Table *table, const char *word) {
 }
 
 static int list_machines(int argc, char *argv[], void *userdata) {
-
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_(table_unrefp) Table *table = NULL;
@@ -273,12 +272,13 @@ static int list_machines(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Could not get machines: %s", bus_error_message(&error, r));
 
-        table = table_new("machine", "class", "service", "os", "version", "addresses");
+        table = table_new("machine", "class", "service", "os", "version",
+                          arg_max_addresses > 0 ? "addresses" : NULL);
         if (!table)
                 return log_oom();
 
-        table_set_empty_string(table, "-");
-        if (!arg_full && arg_max_addresses != ALL_ADDRESSES)
+        table_set_ersatz_string(table, TABLE_ERSATZ_DASH);
+        if (!arg_full && arg_max_addresses > 0 && arg_max_addresses < UINT_MAX)
                 table_set_cell_height_max(table, arg_max_addresses);
 
         if (arg_full)
@@ -310,23 +310,23 @@ static int list_machines(int argc, char *argv[], void *userdata) {
                                 &os,
                                 &version_id);
 
-                (void) call_get_addresses(
-                                bus,
-                                name,
-                                0,
-                                "",
-                                "\n",
-                                &addresses);
-
                 r = table_add_many(table,
                                    TABLE_STRING, empty_to_null(name),
                                    TABLE_STRING, empty_to_null(class),
                                    TABLE_STRING, empty_to_null(service),
                                    TABLE_STRING, empty_to_null(os),
-                                   TABLE_STRING, empty_to_null(version_id),
-                                   TABLE_STRING, empty_to_null(addresses));
+                                   TABLE_STRING, empty_to_null(version_id));
                 if (r < 0)
                         return table_log_add_error(r);
+
+                if (arg_max_addresses > 0) {
+                        (void) call_get_addresses(bus, name, 0, "", "\n", &addresses);
+
+                        r = table_add_many(table,
+                                           TABLE_STRING, empty_to_null(addresses));
+                        if (r < 0)
+                                return table_log_add_error(r);
+                }
         }
 
         r = sd_bus_message_exit_container(reply);
@@ -1599,9 +1599,9 @@ static int start_machine(int argc, char *argv[], void *userdata) {
 static int enable_machine(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        UnitFileChange *changes = NULL;
+        InstallChange *changes = NULL;
         size_t n_changes = 0;
-        const char *method = NULL;
+        const char *method;
         sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
@@ -1616,6 +1616,12 @@ static int enable_machine(int argc, char *argv[], void *userdata) {
         r = sd_bus_message_open_container(m, 'a', "s");
         if (r < 0)
                 return bus_log_create_error(r);
+
+        if (streq(argv[0], "enable")) {
+                r = sd_bus_message_append(m, "s", "machines.target");
+                if (r < 0)
+                        return bus_log_create_error(r);
+        }
 
         for (int i = 1; i < argc; i++) {
                 _cleanup_free_ char *unit = NULL;
@@ -1668,10 +1674,29 @@ static int enable_machine(int argc, char *argv[], void *userdata) {
                 goto finish;
         }
 
-        r = 0;
+        if (arg_now) {
+                _cleanup_strv_free_ char **new_args = NULL;
+
+                new_args = strv_new(streq(argv[0], "enable") ? "start" : "poweroff");
+                if (!new_args) {
+                        r = log_oom();
+                        goto finish;
+                }
+
+                r = strv_extend_strv(&new_args, argv + 1, /* filter_duplicates = */ false);
+                if (r < 0) {
+                        log_oom();
+                        goto finish;
+                }
+
+                if (streq(argv[0], "enable"))
+                        r = start_machine(strv_length(new_args), new_args, userdata);
+                else
+                        r = poweroff_machine(strv_length(new_args), new_args, userdata);
+        }
 
 finish:
-        unit_file_changes_free(changes, n_changes);
+        install_changes_free(changes, n_changes);
 
         return r;
 }
@@ -1801,7 +1826,7 @@ static int import_tar(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
         _cleanup_free_ char *ll = NULL, *fn = NULL;
         const char *local = NULL, *path = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
@@ -1862,7 +1887,7 @@ static int import_raw(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
         _cleanup_free_ char *ll = NULL, *fn = NULL;
         const char *local = NULL, *path = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
@@ -1923,7 +1948,7 @@ static int import_fs(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
         const char *local = NULL, *path = NULL;
         _cleanup_free_ char *fn = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         sd_bus *bus = ASSERT_PTR(userdata);
         int r;
 
@@ -1988,7 +2013,7 @@ static void determine_compression_from_filename(const char *p) {
 
 static int export_tar(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *local = NULL, *path = NULL;
         sd_bus *bus = ASSERT_PTR(userdata);
         int r;
@@ -2028,7 +2053,7 @@ static int export_tar(int argc, char *argv[], void *userdata) {
 
 static int export_raw(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *local = NULL, *path = NULL;
         sd_bus *bus = ASSERT_PTR(userdata);
         int r;
@@ -2462,12 +2487,14 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --max-addresses=INTEGER  Number of internet addresses to show at most\n"
                "  -o --output=STRING          Change journal output mode (short, short-precise,\n"
                "                               short-iso, short-iso-precise, short-full,\n"
-               "                               short-monotonic, short-unix, verbose, export,\n"
+               "                               short-monotonic, short-unix, short-delta,\n"
                "                               json, json-pretty, json-sse, json-seq, cat,\n"
-               "                               with-unit)\n"
+               "                               verbose, export, with-unit)\n"
                "     --verify=MODE            Verification mode for downloaded images (no,\n"
-               "                              checksum, signature)\n"
+               "                               checksum, signature)\n"
                "     --force                  Download image even if already exists\n"
+               "     --now                    Start or power off container after enabling or\n"
+               "                              disabling it\n"
                "\nSee the %s for details.\n",
                program_invocation_short_name,
                ansi_highlight(),
@@ -2491,6 +2518,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_MKDIR,
                 ARG_NO_ASK_PASSWORD,
                 ARG_VERIFY,
+                ARG_NOW,
                 ARG_FORCE,
                 ARG_FORMAT,
                 ARG_UID,
@@ -2517,6 +2545,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "output",          required_argument, NULL, 'o'                 },
                 { "no-ask-password", no_argument,       NULL, ARG_NO_ASK_PASSWORD },
                 { "verify",          required_argument, NULL, ARG_VERIFY          },
+                { "now",             no_argument,       NULL, ARG_NOW             },
                 { "force",           no_argument,       NULL, ARG_FORCE           },
                 { "format",          required_argument, NULL, ARG_FORMAT          },
                 { "uid",             required_argument, NULL, ARG_UID             },
@@ -2693,6 +2722,10 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_verify = r;
                         break;
 
+                case ARG_NOW:
+                        arg_now = true;
+                        break;
+
                 case ARG_FORCE:
                         arg_force = true;
                         break;
@@ -2717,13 +2750,10 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_MAX_ADDRESSES:
                         if (streq(optarg, "all"))
-                                arg_max_addresses = ALL_ADDRESSES;
-                        else if (safe_atoi(optarg, &arg_max_addresses) < 0)
+                                arg_max_addresses = UINT_MAX;
+                        else if (safe_atou(optarg, &arg_max_addresses) < 0)
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                        "Invalid number of addresses: %s", optarg);
-                        else if (arg_max_addresses <= 0)
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                                       "Number of IPs cannot be negative or zero: %s", optarg);
                         break;
 
                 case '?':

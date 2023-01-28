@@ -17,10 +17,10 @@
 #include "time-util.h"
 #include "watchdog.h"
 
-static int watchdog_fd = -1;
-static char *watchdog_device;
-static usec_t watchdog_timeout; /* 0 → close device and USEC_INFINITY → don't change timeout */
-static usec_t watchdog_pretimeout; /* 0 → disable pretimeout and USEC_INFINITY → don't change pretimeout */
+static int watchdog_fd = -EBADF;
+static char *watchdog_device = NULL;
+static usec_t watchdog_timeout = 0; /* 0 → close device and USEC_INFINITY → don't change timeout */
+static usec_t watchdog_pretimeout = 0; /* 0 → disable pretimeout and USEC_INFINITY → don't change pretimeout */
 static usec_t watchdog_last_ping = USEC_INFINITY;
 static bool watchdog_supports_pretimeout = false; /* Depends on kernel state that might change at runtime */
 static char *watchdog_pretimeout_governor = NULL;
@@ -119,12 +119,6 @@ static int watchdog_set_enable(bool enable) {
         return 0;
 }
 
-usec_t watchdog_get_timeout(void) {
-        if (watchdog_timeout == USEC_INFINITY)
-                return 0;
-        return watchdog_timeout;
-}
-
 static int watchdog_read_timeout(void) {
         int sec = 0;
 
@@ -154,12 +148,6 @@ static int watchdog_set_timeout(void) {
         watchdog_timeout = sec * USEC_PER_SEC;
 
         return 0;
-}
-
-usec_t watchdog_get_pretimeout(void) {
-        if (watchdog_pretimeout == USEC_INFINITY)
-                return 0;
-        return watchdog_pretimeout;
 }
 
 static int watchdog_read_pretimeout(void) {
@@ -314,7 +302,7 @@ static int update_timeout(void) {
 
 static int open_watchdog(void) {
         struct watchdog_info ident;
-        const char *fn;
+        char **try_order;
         int r;
 
         if (watchdog_fd >= 0)
@@ -324,16 +312,25 @@ static int open_watchdog(void) {
          * has the benefit that we can easily find the matching directory in sysfs from it, as the relevant
          * sysfs attributes can only be found via /sys/dev/char/<major>:<minor> if the new-style device
          * major/minor is used, not the old-style. */
-        fn = !watchdog_device || path_equal(watchdog_device, "/dev/watchdog") ?
-                "/dev/watchdog0" : watchdog_device;
+        try_order = !watchdog_device || PATH_IN_SET(watchdog_device, "/dev/watchdog", "/dev/watchdog0") ?
+                STRV_MAKE("/dev/watchdog0", "/dev/watchdog") : STRV_MAKE(watchdog_device);
 
-        r = free_and_strdup(&watchdog_device, fn);
-        if (r < 0)
-                return log_oom_debug();
+        STRV_FOREACH(wd, try_order) {
+                watchdog_fd = open(*wd, O_WRONLY|O_CLOEXEC);
+                if (watchdog_fd >= 0) {
+                        r = free_and_strdup(&watchdog_device, *wd);
+                        if (r < 0)
+                                return log_oom_debug();
 
-        watchdog_fd = open(watchdog_device, O_WRONLY|O_CLOEXEC);
+                        break;
+                }
+
+                if (errno != ENOENT)
+                        return log_debug_errno(errno, "Failed to open watchdog device %s: %m", *wd);
+        }
+
         if (watchdog_fd < 0)
-                return log_debug_errno(errno, "Failed to open watchdog device %s, ignoring: %m", watchdog_device);
+                return log_debug_errno(SYNTHETIC_ERRNO(ENOENT), "Failed to open watchdog device %s: %m", watchdog_device ?: "auto");
 
         if (ioctl(watchdog_fd, WDIOC_GETSUPPORT, &ident) < 0)
                 log_debug_errno(errno, "Hardware watchdog %s does not support WDIOC_GETSUPPORT ioctl, ignoring: %m", watchdog_device);

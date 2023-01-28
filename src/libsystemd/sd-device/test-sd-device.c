@@ -131,7 +131,7 @@ static void test_sd_device_one(sd_device *d) {
                         assert_se(streq(syspath, val));
                         dev = sd_device_unref(dev);
 
-                        _cleanup_close_ int fd = -1;
+                        _cleanup_close_ int fd = -EBADF;
                         fd = sd_device_open(d, O_CLOEXEC| O_NONBLOCK | (is_block ? O_RDONLY : O_NOCTTY | O_PATH));
                         assert_se(fd >= 0 || ERRNO_IS_PRIVILEGE(fd));
                 } else
@@ -180,15 +180,16 @@ static void test_sd_device_one(sd_device *d) {
         } else
                 assert_se(r == -ENOENT);
 
-        r = sd_device_get_sysattr_value(d, "name_assign_type", &val);
-        assert_se(r >= 0 || ERRNO_IS_PRIVILEGE(r) || IN_SET(r, -ENOENT, -EINVAL));
-
-        if (r > 0) {
+        r = sd_device_get_sysattr_value(d, "nsid", NULL);
+        if (r >= 0) {
                 unsigned x;
 
-                assert_se(device_get_sysattr_unsigned(d, "name_assign_type", NULL) >= 0);
-                assert_se(device_get_sysattr_unsigned(d, "name_assign_type", &x) >= 0);
-        }
+                assert_se(device_get_sysattr_unsigned(d, "nsid", NULL) >= 0);
+                r = device_get_sysattr_unsigned(d, "nsid", &x);
+                assert_se(r >= 0);
+                assert_se((x > 0) == (r > 0));
+        } else
+                assert_se(ERRNO_IS_PRIVILEGE(r) || IN_SET(r, -ENOENT, -EINVAL));
 }
 
 TEST(sd_device_enumerator_devices) {
@@ -342,7 +343,7 @@ TEST(sd_device_enumerator_filter_subsystem) {
         /* The test test_sd_device_enumerator_filter_subsystem_trial() is quite racy. Let's run the function
          * several times after the udev queue becomes empty. */
 
-        if (!udev_available()) {
+        if (!udev_available() || (access("/run/udev", F_OK) < 0 && errno == ENOENT)) {
                 assert_se(test_sd_device_enumerator_filter_subsystem_trial_many());
                 return;
         }
@@ -472,6 +473,57 @@ TEST(sd_device_enumerator_add_match_parent) {
         }
 }
 
+TEST(sd_device_get_child) {
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        sd_device *dev;
+        int r;
+
+        assert_se(sd_device_enumerator_new(&e) >= 0);
+        assert_se(sd_device_enumerator_allow_uninitialized(e) >= 0);
+        /* See comments in TEST(sd_device_enumerator_devices). */
+        assert_se(sd_device_enumerator_add_match_subsystem(e, "bdi", false) >= 0);
+        assert_se(sd_device_enumerator_add_nomatch_sysname(e, "loop*") >= 0);
+        assert_se(sd_device_enumerator_add_match_subsystem(e, "net", false) >= 0);
+
+        if (!slow_tests_enabled())
+                assert_se(sd_device_enumerator_add_match_subsystem(e, "block", true) >= 0);
+
+        FOREACH_DEVICE(e, dev) {
+                const char *syspath, *parent_syspath, *expected_suffix, *suffix;
+                sd_device *parent, *child;
+                bool found = false;
+
+                assert_se(sd_device_get_syspath(dev, &syspath) >= 0);
+
+                r = sd_device_get_parent(dev, &parent);
+                if (r < 0) {
+                        assert_se(ERRNO_IS_DEVICE_ABSENT(r));
+                        continue;
+                }
+
+                assert_se(sd_device_get_syspath(parent, &parent_syspath) >= 0);
+                assert_se(expected_suffix = path_startswith(syspath, parent_syspath));
+
+                log_debug("> %s", syspath);
+
+                FOREACH_DEVICE_CHILD_WITH_SUFFIX(parent, child, suffix) {
+                        const char *s;
+
+                        assert_se(child);
+                        assert_se(suffix);
+
+                        if (!streq(suffix, expected_suffix))
+                                continue;
+
+                        assert_se(sd_device_get_syspath(child, &s) >= 0);
+                        assert_se(streq(s, syspath));
+                        found = true;
+                        break;
+                }
+                assert_se(found);
+        }
+}
+
 TEST(sd_device_new_from_nulstr) {
         const char *devlinks =
                 "/dev/disk/by-partuuid/1290d63a-42cc-4c71-b87c-xxxxxxxxxxxx\0"
@@ -483,7 +535,7 @@ TEST(sd_device_new_from_nulstr) {
 
         _cleanup_(sd_device_unrefp) sd_device *device = NULL, *from_nulstr = NULL;
         _cleanup_free_ char *nulstr_copy = NULL;
-        const char *devlink, *nulstr;
+        const char *nulstr;
         size_t len;
 
         assert_se(sd_device_new_from_syspath(&device, "/sys/class/net/lo") >= 0);

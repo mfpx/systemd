@@ -21,6 +21,7 @@ ADDITIONAL_DEPS=(
     libzstd-dev
     perl
     python3-libevdev
+    python3-pefile
     python3-pyparsing
     rpm
     zstd
@@ -62,6 +63,11 @@ for phase in "${PHASES[@]}"; do
                     MESON_ARGS+=(-Dman=true)
                 else
                     MESON_ARGS+=(-Dmode=release --optimization=2)
+                fi
+
+                # Some variation: remove machine-id, like on Debian builders to ensure unit tests still work.
+                if [ -w /etc/machine-id ]; then
+                    mv /etc/machine-id /etc/machine-id.bak
                 fi
             fi
             # The install_tag feature introduced in 0.60 causes meson to fail with fatal-meson-warnings
@@ -113,6 +119,9 @@ for phase in "${PHASES[@]}"; do
             ;;
         CLEANUP)
             info "Cleanup phase"
+            if [ ! -f /etc/machine-id ] && [ -w /etc/machine-id.bak ]; then
+                mv /etc/machine-id.bak /etc/machine-id
+            fi
             ;;
         *)
             echo >&2 "Unknown phase '$phase'"

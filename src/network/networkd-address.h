@@ -78,6 +78,7 @@ Address* address_free(Address *address);
 int address_get(Link *link, const Address *in, Address **ret);
 int address_configure_handler_internal(sd_netlink *rtnl, sd_netlink_message *m, Link *link, const char *error_msg);
 int address_remove(Address *address);
+int address_remove_and_drop(Address *address);
 int address_dup(const Address *src, Address **ret);
 bool address_is_ready(const Address *a);
 void address_set_broadcast(Address *a, Link *link);
@@ -117,10 +118,11 @@ int manager_rtnl_process_address(sd_netlink *nl, sd_netlink_message *message, Ma
 int network_drop_invalid_addresses(Network *network);
 
 int address_compare_func(const Address *a1, const Address *a2);
+int address_equal(const Address *a1, const Address *a2);
 
 DEFINE_NETWORK_CONFIG_STATE_FUNCTIONS(Address, address);
 
-void link_mark_addresses(Link *link, NetworkConfigSource source, const struct in6_addr *router);
+void link_mark_addresses(Link *link, NetworkConfigSource source);
 
 CONFIG_PARSER_PROTOTYPE(config_parse_address);
 CONFIG_PARSER_PROTOTYPE(config_parse_broadcast);

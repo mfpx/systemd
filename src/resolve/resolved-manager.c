@@ -189,7 +189,6 @@ fail:
 
 static int manager_rtnl_listen(Manager *m) {
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL, *reply = NULL;
-        sd_netlink_message *i;
         int r;
 
         assert(m);
@@ -232,7 +231,7 @@ static int manager_rtnl_listen(Manager *m) {
         if (r < 0)
                 return r;
 
-        for (i = reply; i; i = sd_netlink_message_next(i)) {
+        for (sd_netlink_message *i = reply; i; i = sd_netlink_message_next(i)) {
                 r = manager_process_link(m->rtnl, i, m);
                 if (r < 0)
                         return r;
@@ -254,7 +253,7 @@ static int manager_rtnl_listen(Manager *m) {
         if (r < 0)
                 return r;
 
-        for (i = reply; i; i = sd_netlink_message_next(i)) {
+        for (sd_netlink_message *i = reply; i; i = sd_netlink_message_next(i)) {
                 r = manager_process_address(m->rtnl, i, m);
                 if (r < 0)
                         return r;
@@ -555,13 +554,13 @@ int manager_new(Manager **ret) {
                 return -ENOMEM;
 
         *m = (Manager) {
-                .llmnr_ipv4_udp_fd = -1,
-                .llmnr_ipv6_udp_fd = -1,
-                .llmnr_ipv4_tcp_fd = -1,
-                .llmnr_ipv6_tcp_fd = -1,
-                .mdns_ipv4_fd = -1,
-                .mdns_ipv6_fd = -1,
-                .hostname_fd = -1,
+                .llmnr_ipv4_udp_fd = -EBADF,
+                .llmnr_ipv6_udp_fd = -EBADF,
+                .llmnr_ipv4_tcp_fd = -EBADF,
+                .llmnr_ipv6_tcp_fd = -EBADF,
+                .mdns_ipv4_fd = -EBADF,
+                .mdns_ipv6_fd = -EBADF,
+                .hostname_fd = -EBADF,
 
                 .llmnr_support = DEFAULT_LLMNR_MODE,
                 .mdns_support = DEFAULT_MDNS_MODE,
@@ -869,48 +868,56 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
 }
 
 static int sendmsg_loop(int fd, struct msghdr *mh, int flags) {
+        usec_t end;
         int r;
 
         assert(fd >= 0);
         assert(mh);
 
+        end = usec_add(now(CLOCK_MONOTONIC), SEND_TIMEOUT_USEC);
+
         for (;;) {
                 if (sendmsg(fd, mh, flags) >= 0)
                         return 0;
-
                 if (errno == EINTR)
                         continue;
-
                 if (errno != EAGAIN)
                         return -errno;
 
-                r = fd_wait_for_event(fd, POLLOUT, SEND_TIMEOUT_USEC);
-                if (r < 0)
+                r = fd_wait_for_event(fd, POLLOUT, LESS_BY(end, now(CLOCK_MONOTONIC)));
+                if (r < 0) {
+                        if (ERRNO_IS_TRANSIENT(r))
+                                continue;
                         return r;
+                }
                 if (r == 0)
                         return -ETIMEDOUT;
         }
 }
 
 static int write_loop(int fd, void *message, size_t length) {
+        usec_t end;
         int r;
 
         assert(fd >= 0);
         assert(message);
 
+        end = usec_add(now(CLOCK_MONOTONIC), SEND_TIMEOUT_USEC);
+
         for (;;) {
                 if (write(fd, message, length) >= 0)
                         return 0;
-
                 if (errno == EINTR)
                         continue;
-
                 if (errno != EAGAIN)
                         return -errno;
 
-                r = fd_wait_for_event(fd, POLLOUT, SEND_TIMEOUT_USEC);
-                if (r < 0)
+                r = fd_wait_for_event(fd, POLLOUT, LESS_BY(end, now(CLOCK_MONOTONIC)));
+                if (r < 0) {
+                        if (ERRNO_IS_TRANSIENT(r))
+                                continue;
                         return r;
+                }
                 if (r == 0)
                         return -ETIMEDOUT;
         }
@@ -1043,62 +1050,100 @@ static int manager_ipv6_send(
         return sendmsg_loop(fd, &mh, 0);
 }
 
-int send_dns_notification(Manager *m, DnsAnswer *answer, const char *query_name) {
-        _cleanup_free_ char *normalized = NULL;
-        DnsResourceRecord *rr;
-        int ifindex, r;
-        _cleanup_(json_variant_unrefp) JsonVariant *array = NULL;
+static int dns_question_to_json(DnsQuestion *q, JsonVariant **ret) {
+        _cleanup_(json_variant_unrefp) JsonVariant *l = NULL;
+        DnsResourceKey *key;
+        int r;
+
+        assert(ret);
+
+        DNS_QUESTION_FOREACH(key, q) {
+                _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
+
+                r = dns_resource_key_to_json(key, &v);
+                if (r < 0)
+                        return r;
+
+                r = json_variant_append_array(&l, v);
+                if (r < 0)
+                        return r;
+        }
+
+        *ret = TAKE_PTR(l);
+        return 0;
+}
+
+int manager_monitor_send(
+                Manager *m,
+                int state,
+                int rcode,
+                int error,
+                DnsQuestion *question_idna,
+                DnsQuestion *question_utf8,
+                DnsQuestion *collected_questions,
+                DnsAnswer *answer) {
+
+        _cleanup_(json_variant_unrefp) JsonVariant *jquestion = NULL, *jcollected_questions = NULL, *janswer = NULL;
+        _cleanup_(dns_question_unrefp) DnsQuestion *merged = NULL;
         Varlink *connection;
+        DnsAnswerItem *rri;
+        int r;
 
         assert(m);
 
         if (set_isempty(m->varlink_subscription))
                 return 0;
 
-        DNS_ANSWER_FOREACH_IFINDEX(rr, ifindex, answer) {
-                _cleanup_(json_variant_unrefp) JsonVariant *entry = NULL;
+        /* Merge both questions format into one */
+        r = dns_question_merge(question_idna, question_utf8, &merged);
+        if (r < 0)
+                return log_error_errno(r, "Failed to merge UTF8/IDNA questions: %m");
 
-                if (rr->key->type == DNS_TYPE_A) {
-                        struct in_addr *addr = &rr->a.in_addr;
-                        r = json_build(&entry,
-                                JSON_BUILD_OBJECT(JSON_BUILD_PAIR_CONDITION(ifindex > 0, "ifindex", JSON_BUILD_INTEGER(ifindex)),
-                                                  JSON_BUILD_PAIR_INTEGER("family", AF_INET),
-                                                  JSON_BUILD_PAIR_IN4_ADDR("address", addr),
-                                                  JSON_BUILD_PAIR_STRING("type", "A")));
-                } else if (rr->key->type == DNS_TYPE_AAAA) {
-                        struct in6_addr *addr6 = &rr->aaaa.in6_addr;
-                        r = json_build(&entry,
-                                JSON_BUILD_OBJECT(JSON_BUILD_PAIR_CONDITION(ifindex > 0, "ifindex", JSON_BUILD_INTEGER(ifindex)),
-                                                  JSON_BUILD_PAIR_INTEGER("family", AF_INET6),
-                                                  JSON_BUILD_PAIR_IN6_ADDR("address", addr6),
-                                                  JSON_BUILD_PAIR_STRING("type", "AAAA")));
-                } else
-                        continue;
-                if (r < 0) {
-                        log_debug_errno(r, "Failed to build json object: %m");
-                        continue;
-                }
+        /* Convert the current primary question to JSON */
+        r = dns_question_to_json(merged, &jquestion);
+        if (r < 0)
+                return log_error_errno(r, "Failed to convert question to JSON: %m");
 
-                r = json_variant_append_array(&array, entry);
+        /* Generate a JSON array of the questions preceding the current one in the CNAME chain */
+        r = dns_question_to_json(collected_questions, &jcollected_questions);
+        if (r < 0)
+                return log_error_errno(r, "Failed to convert question to JSON: %m");
+
+        DNS_ANSWER_FOREACH_ITEM(rri, answer) {
+                _cleanup_(json_variant_unrefp) JsonVariant *v = NULL, *w = NULL;
+
+                r = dns_resource_record_to_json(rri->rr, &v);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to convert answer resource record to JSON: %m");
+
+                r = dns_resource_record_to_wire_format(rri->rr, /* canonical= */ false); /* don't use DNSSEC canonical format, since it removes casing, but we want that for DNS_SD compat */
+                if (r < 0)
+                        return log_error_errno(r, "Failed to generate RR wire format: %m");
+
+                r = json_build(&w, JSON_BUILD_OBJECT(
+                                               JSON_BUILD_PAIR_CONDITION(v, "rr", JSON_BUILD_VARIANT(v)),
+                                               JSON_BUILD_PAIR("raw", JSON_BUILD_BASE64(rri->rr->wire_format, rri->rr->wire_format_size)),
+                                               JSON_BUILD_PAIR_CONDITION(rri->ifindex > 0, "ifindex", JSON_BUILD_INTEGER(rri->ifindex))));
+                if (r < 0)
+                        return log_error_errno(r, "Failed to make answer RR object: %m");
+
+                r = json_variant_append_array(&janswer, w);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to append notification entry to array: %m");
         }
 
-        if (json_variant_is_blank_object(array))
-                return 0;
-
-        r = dns_name_normalize(query_name, 0, &normalized);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to normalize query name: %m");
-
         SET_FOREACH(connection, m->varlink_subscription) {
                 r = varlink_notifyb(connection,
-                                    JSON_BUILD_OBJECT(JSON_BUILD_PAIR("addresses",
-                                                      JSON_BUILD_VARIANT(array)),
-                                                      JSON_BUILD_PAIR("name", JSON_BUILD_STRING(normalized))));
+                                    JSON_BUILD_OBJECT(JSON_BUILD_PAIR("state", JSON_BUILD_STRING(dns_transaction_state_to_string(state))),
+                                                      JSON_BUILD_PAIR_CONDITION(state == DNS_TRANSACTION_RCODE_FAILURE, "rcode", JSON_BUILD_INTEGER(rcode)),
+                                                      JSON_BUILD_PAIR_CONDITION(state == DNS_TRANSACTION_ERRNO, "errno", JSON_BUILD_INTEGER(error)),
+                                                      JSON_BUILD_PAIR("question", JSON_BUILD_VARIANT(jquestion)),
+                                                      JSON_BUILD_PAIR_CONDITION(jcollected_questions, "collectedQuestions", JSON_BUILD_VARIANT(jcollected_questions)),
+                                                      JSON_BUILD_PAIR_CONDITION(janswer, "answer", JSON_BUILD_VARIANT(janswer))));
                 if (r < 0)
-                        log_debug_errno(r, "Failed to send notification, ignoring: %m");
+                        log_debug_errno(r, "Failed to send monitor event, ignoring: %m");
         }
+
         return 0;
 }
 

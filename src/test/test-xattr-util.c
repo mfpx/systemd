@@ -18,7 +18,7 @@
 TEST(getxattr_at_malloc) {
         char t[] = "/var/tmp/xattrtestXXXXXX";
         _cleanup_free_ char *value = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *x;
         int r;
 
@@ -46,7 +46,7 @@ TEST(getxattr_at_malloc) {
         fd = open("/", O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOCTTY);
         assert_se(fd >= 0);
         r = getxattr_at_malloc(fd, "usr", "user.idontexist", 0, &value);
-        assert_se(r == -ENODATA || ERRNO_IS_NOT_SUPPORTED(r));
+        assert_se(r < 0 && ERRNO_IS_XATTR_ABSENT(r));
 
         safe_close(fd);
         fd = open(x, O_PATH|O_CLOEXEC);
@@ -60,7 +60,7 @@ cleanup:
 }
 
 TEST(getcrtime) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *vt;
         usec_t usec, k;
         int r;

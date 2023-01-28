@@ -502,6 +502,14 @@ static int link_is_ready_to_set_link(Link *link, Request *req) {
                         r = link_down_now(link);
                         if (r < 0)
                                 return r;
+
+                        /* If the kind of the link is "bond", we need
+                         * set the slave link down as well. */
+                        if (streq_ptr(link->kind, "bond")) {
+                                r = link_down_slave_links(link);
+                                if (r < 0)
+                                        return r;
+                        }
                 }
                 break;
 
@@ -543,6 +551,12 @@ static int link_is_ready_to_set_link(Link *link, Request *req) {
                         m = link->network->vrf->ifindex;
                 }
 
+                if (m == (uint32_t) link->master_ifindex) {
+                        /* The requested master is already set. */
+                        link->master_set = true;
+                        return -EALREADY; /* indicate to cancel the request. */
+                }
+
                 req->userdata = UINT32_TO_PTR(m);
                 break;
         }
@@ -568,6 +582,8 @@ static int link_process_set_link(Request *req, Link *link, void *userdata) {
         assert(link);
 
         r = link_is_ready_to_set_link(link, req);
+        if (r == -EALREADY)
+                return 1; /* Cancel the request. */
         if (r <= 0)
                 return r;
 
@@ -1215,6 +1231,21 @@ int link_down_now(Link *link) {
 
         link->set_flags_messages++;
         link_ref(link);
+        return 0;
+}
+
+int link_down_slave_links(Link *link) {
+        Link *slave;
+        int r;
+
+        assert(link);
+
+        SET_FOREACH(slave, link->slaves) {
+                r = link_down_now(slave);
+                if (r < 0)
+                        return r;
+        }
+
         return 0;
 }
 

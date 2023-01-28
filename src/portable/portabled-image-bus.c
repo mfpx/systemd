@@ -108,6 +108,7 @@ int bus_image_common_get_metadata(
         _cleanup_hashmap_free_ Hashmap *unit_files = NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_free_ PortableMetadata **sorted = NULL;
+        PortableFlags flags = 0;
         int r;
 
         assert(name_or_path || image);
@@ -142,6 +143,7 @@ int bus_image_common_get_metadata(
                         return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_INVALID_ARGS,
                                                           "Invalid 'flags' parameter '%" PRIu64 "'",
                                                           input_flags);
+                flags |= input_flags;
         }
 
         r = bus_image_acquire(m,
@@ -161,6 +163,7 @@ int bus_image_common_get_metadata(
                         image->path,
                         matches,
                         extension_images,
+                        flags,
                         &os_release,
                         &extension_releases,
                         &unit_files,
@@ -483,7 +486,7 @@ int bus_image_common_remove(
                 Image *image,
                 sd_bus_error *error) {
 
-        _cleanup_close_pair_ int errno_pipe_fd[2] = { -1, -1 };
+        _cleanup_close_pair_ int errno_pipe_fd[2] = PIPE_EBADF;
         _cleanup_(sigkill_waitp) pid_t child = 0;
         PortableState state;
         int r;
@@ -550,7 +553,7 @@ int bus_image_common_remove(
                 return r;
 
         child = 0;
-        errno_pipe_fd[0] = -1;
+        errno_pipe_fd[0] = -EBADF;
 
         return 1;
 }

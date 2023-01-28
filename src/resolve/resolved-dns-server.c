@@ -195,19 +195,19 @@ void dns_server_move_back_and_unmark(DnsServer *s) {
 
         case DNS_SERVER_LINK:
                 assert(s->link);
-                LIST_FIND_TAIL(servers, s, tail);
+                tail = LIST_FIND_TAIL(servers, s);
                 LIST_REMOVE(servers, s->link->dns_servers, s);
                 LIST_INSERT_AFTER(servers, s->link->dns_servers, tail, s);
                 break;
 
         case DNS_SERVER_SYSTEM:
-                LIST_FIND_TAIL(servers, s, tail);
+                tail = LIST_FIND_TAIL(servers, s);
                 LIST_REMOVE(servers, s->manager->dns_servers, s);
                 LIST_INSERT_AFTER(servers, s->manager->dns_servers, tail, s);
                 break;
 
         case DNS_SERVER_FALLBACK:
-                LIST_FIND_TAIL(servers, s, tail);
+                tail = LIST_FIND_TAIL(servers, s);
                 LIST_REMOVE(servers, s->manager->fallback_dns_servers, s);
                 LIST_INSERT_AFTER(servers, s->manager->fallback_dns_servers, tail, s);
                 break;
@@ -648,6 +648,11 @@ int dns_server_adjust_opt(DnsServer *server, DnsPacket *packet, DnsServerFeature
 int dns_server_ifindex(const DnsServer *s) {
         assert(s);
 
+        /* For loopback addresses, go via the loopback interface, regardless which interface this is linked
+         * to. */
+        if (in_addr_is_localhost(s->family, &s->address))
+                return LOOPBACK_IFINDEX;
+
         /* The link ifindex always takes precedence */
         if (s->link)
                 return s->link->ifindex;
@@ -1087,6 +1092,6 @@ static const char* const dns_server_feature_level_table[_DNS_SERVER_FEATURE_LEVE
         [DNS_SERVER_FEATURE_LEVEL_EDNS0]     = "UDP+EDNS0",
         [DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN] = "TLS+EDNS0",
         [DNS_SERVER_FEATURE_LEVEL_DO]        = "UDP+EDNS0+DO",
-        [DNS_SERVER_FEATURE_LEVEL_TLS_DO]    = "TLS+EDNS0+D0",
+        [DNS_SERVER_FEATURE_LEVEL_TLS_DO]    = "TLS+EDNS0+DO",
 };
 DEFINE_STRING_TABLE_LOOKUP(dns_server_feature_level, DnsServerFeatureLevel);

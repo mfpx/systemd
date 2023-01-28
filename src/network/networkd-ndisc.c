@@ -10,6 +10,7 @@
 
 #include "sd-ndisc.h"
 
+#include "event-util.h"
 #include "missing_network.h"
 #include "networkd-address-generation.h"
 #include "networkd-address.h"
@@ -72,72 +73,6 @@ void network_adjust_ipv6_accept_ra(Network *network) {
                 network->ndisc_deny_listed_route_prefix = set_free_free(network->ndisc_deny_listed_route_prefix);
 }
 
-static int ndisc_remove(Link *link, struct in6_addr *router) {
-        bool updated = false;
-        NDiscDNSSL *dnssl;
-        NDiscRDNSS *rdnss;
-        Address *address;
-        Route *route;
-        int k, r = 0;
-
-        assert(link);
-
-        SET_FOREACH(route, link->routes) {
-                if (route->source != NETWORK_CONFIG_SOURCE_NDISC)
-                        continue;
-                if (!route_is_marked(route))
-                        continue;
-                if (router && !in6_addr_equal(router, &route->provider.in6))
-                        continue;
-
-                k = route_remove(route);
-                if (k < 0)
-                        r = k;
-
-                route_cancel_request(route, link);
-        }
-
-        SET_FOREACH(address, link->addresses) {
-                if (address->source != NETWORK_CONFIG_SOURCE_NDISC)
-                        continue;
-                if (!address_is_marked(address))
-                        continue;
-                if (router && !in6_addr_equal(router, &address->provider.in6))
-                        continue;
-
-                k = address_remove(address);
-                if (k < 0)
-                        r = k;
-
-                address_cancel_request(address);
-        }
-
-        SET_FOREACH(rdnss, link->ndisc_rdnss) {
-                if (!rdnss->marked)
-                        continue;
-                if (router && !in6_addr_equal(router, &rdnss->router))
-                        continue;
-
-                free(set_remove(link->ndisc_rdnss, rdnss));
-                updated = true;
-        }
-
-        SET_FOREACH(dnssl, link->ndisc_dnssl) {
-                if (!dnssl->marked)
-                        continue;
-                if (router && !in6_addr_equal(router, &dnssl->router))
-                        continue;
-
-                free(set_remove(link->ndisc_dnssl, dnssl));
-                updated = true;
-        }
-
-        if (updated)
-                link_dirty(link);
-
-        return r;
-}
-
 static int ndisc_check_ready(Link *link);
 
 static int ndisc_address_ready_callback(Address *address) {
@@ -156,7 +91,6 @@ static int ndisc_address_ready_callback(Address *address) {
 static int ndisc_check_ready(Link *link) {
         bool found = false, ready = false;
         Address *address;
-        int r;
 
         assert(link);
 
@@ -189,10 +123,6 @@ static int ndisc_check_ready(Link *link) {
         link->ndisc_configured = true;
         log_link_debug(link, "SLAAC addresses and routes set.");
 
-        r = ndisc_remove(link, NULL);
-        if (r < 0)
-                return r;
-
         link_check_ready(link);
         return 0;
 }
@@ -213,14 +143,37 @@ static int ndisc_route_handler(sd_netlink *rtnl, sd_netlink_message *m, Request 
         return 1;
 }
 
+static void ndisc_set_route_priority(Link *link, Route *route) {
+        assert(link);
+        assert(route);
+
+        if (route->priority_set)
+                return; /* explicitly configured. */
+
+        switch (route->pref) {
+        case SD_NDISC_PREFERENCE_LOW:
+                route->priority = link->network->ipv6_accept_ra_route_metric_low;
+                break;
+        case SD_NDISC_PREFERENCE_MEDIUM:
+                route->priority = link->network->ipv6_accept_ra_route_metric_medium;
+                break;
+        case SD_NDISC_PREFERENCE_HIGH:
+                route->priority = link->network->ipv6_accept_ra_route_metric_high;
+                break;
+        default:
+                assert_not_reached();
+        }
+}
+
 static int ndisc_request_route(Route *in, Link *link, sd_ndisc_router *rt) {
         _cleanup_(route_freep) Route *route = in;
         struct in6_addr router;
-        Route *existing;
+        bool is_new;
         int r;
 
         assert(route);
         assert(link);
+        assert(link->network);
         assert(rt);
 
         r = sd_ndisc_router_get_address(rt, &router);
@@ -231,18 +184,22 @@ static int ndisc_request_route(Route *in, Link *link, sd_ndisc_router *rt) {
         route->provider.in6 = router;
         if (!route->table_set)
                 route->table = link_get_ipv6_accept_ra_route_table(link);
-        if (!route->priority_set)
-                route->priority = link->network->ipv6_accept_ra_route_metric;
+        ndisc_set_route_priority(link, route);
         if (!route->protocol_set)
                 route->protocol = RTPROT_RA;
+        if (route->quickack < 0)
+                route->quickack = link->network->ipv6_accept_ra_quickack;
 
-        if (route_get(NULL, link, route, &existing) < 0)
+        is_new = route_get(NULL, link, route, NULL) < 0;
+
+        r = link_request_route(link, TAKE_PTR(route), true, &link->ndisc_messages,
+                               ndisc_route_handler, NULL);
+        if (r < 0)
+                return r;
+        if (r > 0 && is_new)
                 link->ndisc_configured = false;
-        else
-                route_unmark(existing);
 
-        return link_request_route(link, TAKE_PTR(route), true, &link->ndisc_messages,
-                                  ndisc_route_handler, NULL);
+        return 0;
 }
 
 static int ndisc_address_handler(sd_netlink *rtnl, sd_netlink_message *m, Request *req, Link *link, Address *address) {
@@ -264,7 +221,7 @@ static int ndisc_address_handler(sd_netlink *rtnl, sd_netlink_message *m, Reques
 static int ndisc_request_address(Address *in, Link *link, sd_ndisc_router *rt) {
         _cleanup_(address_freep) Address *address = in;
         struct in6_addr router;
-        Address *existing;
+        bool is_new;
         int r;
 
         assert(address);
@@ -282,13 +239,16 @@ static int ndisc_request_address(Address *in, Link *link, sd_ndisc_router *rt) {
         if (r < 0)
                 return r;
 
-        if (address_get(link, address, &existing) < 0)
-                link->ndisc_configured = false;
-        else
-                address_unmark(existing);
+        is_new = address_get(link, address, NULL) < 0;
 
-        return link_request_address(link, TAKE_PTR(address), true, &link->ndisc_messages,
+        r = link_request_address(link, TAKE_PTR(address), true, &link->ndisc_messages,
                                  ndisc_address_handler, NULL);
+        if (r < 0)
+                return r;
+        if (r > 0 && is_new)
+                link->ndisc_configured = false;
+
+        return 0;
 }
 
 static int ndisc_router_process_default(Link *link, sd_ndisc_router *rt) {
@@ -310,9 +270,6 @@ static int ndisc_router_process_default(Link *link, sd_ndisc_router *rt) {
         r = sd_ndisc_router_get_lifetime(rt, &lifetime_sec);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get gateway lifetime from RA: %m");
-
-        if (lifetime_sec == 0) /* not a default router */
-                return 0;
 
         r = sd_ndisc_router_get_timestamp(rt, CLOCK_BOOTTIME, &timestamp_usec);
         if (r < 0)
@@ -427,11 +384,6 @@ static int ndisc_router_process_autonomous_prefix(Link *link, sd_ndisc_router *r
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get prefix valid lifetime: %m");
 
-        if (lifetime_valid_sec == 0) {
-                log_link_debug(link, "Ignoring prefix as its valid lifetime is zero.");
-                return 0;
-        }
-
         r = sd_ndisc_router_prefix_get_preferred_lifetime(rt, &lifetime_preferred_sec);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get prefix preferred lifetime: %m");
@@ -449,7 +401,6 @@ static int ndisc_router_process_autonomous_prefix(Link *link, sd_ndisc_router *r
 
         SET_FOREACH(a, addresses) {
                 _cleanup_(address_freep) Address *address = NULL;
-                Address *e;
 
                 r = address_new(&address);
                 if (r < 0)
@@ -461,17 +412,6 @@ static int ndisc_router_process_autonomous_prefix(Link *link, sd_ndisc_router *r
                 address->flags = IFA_F_NOPREFIXROUTE|IFA_F_MANAGETEMPADDR;
                 address->lifetime_valid_usec = lifetime_valid_usec;
                 address->lifetime_preferred_usec = lifetime_preferred_usec;
-
-                /* See RFC4862, section 5.5.3.e. But the following logic is deviated from RFC4862 by
-                 * honoring all valid lifetimes to improve the reaction of SLAAC to renumbering events.
-                 * See draft-ietf-6man-slaac-renum-02, section 4.2. */
-                r = address_get(link, address, &e);
-                if (r > 0) {
-                        /* If the address is already assigned, but not valid anymore, then refuse to
-                         * update the address, and it will be removed. */
-                        if (e->lifetime_valid_usec < timestamp_usec)
-                                continue;
-                }
 
                 r = ndisc_request_address(TAKE_PTR(address), link, rt);
                 if (r < 0)
@@ -485,6 +425,7 @@ static int ndisc_router_process_onlink_prefix(Link *link, sd_ndisc_router *rt) {
         _cleanup_(route_freep) Route *route = NULL;
         usec_t timestamp_usec;
         uint32_t lifetime_sec;
+        struct in6_addr prefix;
         unsigned prefixlen;
         int r;
 
@@ -499,12 +440,13 @@ static int ndisc_router_process_onlink_prefix(Link *link, sd_ndisc_router *rt) {
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get prefix lifetime: %m");
 
-        if (lifetime_sec == 0)
-                return 0;
-
         r = sd_ndisc_router_get_timestamp(rt, CLOCK_BOOTTIME, &timestamp_usec);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get RA timestamp: %m");
+
+        r = sd_ndisc_router_prefix_get_address(rt, &prefix);
+        if (r < 0)
+                return log_link_error_errno(link, r, "Failed to get prefix address: %m");
 
         r = sd_ndisc_router_prefix_get_prefixlen(rt, &prefixlen);
         if (r < 0)
@@ -515,13 +457,9 @@ static int ndisc_router_process_onlink_prefix(Link *link, sd_ndisc_router *rt) {
                 return log_oom();
 
         route->family = AF_INET6;
-        route->flags = RTM_F_PREFIX;
+        route->dst.in6 = prefix;
         route->dst_prefixlen = prefixlen;
         route->lifetime_usec = sec_to_usec(lifetime_sec, timestamp_usec);
-
-        r = sd_ndisc_router_prefix_get_address(rt, &route->dst.in6);
-        if (r < 0)
-                return log_link_error_errno(link, r, "Failed to get prefix address: %m");
 
         r = ndisc_request_route(TAKE_PTR(route), link, rt);
         if (r < 0)
@@ -543,6 +481,14 @@ static int ndisc_router_process_prefix(Link *link, sd_ndisc_router *rt) {
         r = sd_ndisc_router_prefix_get_address(rt, &a);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get prefix address: %m");
+
+        /* RFC 4861 Section 4.6.2:
+         * A router SHOULD NOT send a prefix option for the link-local prefix and a host SHOULD ignore such
+         * a prefix option. */
+        if (in6_addr_is_link_local(&a)) {
+                log_link_debug(link, "Received link-local prefix, ignoring autonomous prefix.");
+                return 0;
+        }
 
         r = sd_ndisc_router_prefix_get_prefixlen(rt, &prefixlen);
         if (r < 0)
@@ -592,9 +538,6 @@ static int ndisc_router_process_route(Link *link, sd_ndisc_router *rt) {
         r = sd_ndisc_router_route_get_lifetime(rt, &lifetime_sec);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get route lifetime from RA: %m");
-
-        if (lifetime_sec == 0)
-                return 0;
 
         r = sd_ndisc_router_route_get_address(rt, &dst);
         if (r < 0)
@@ -679,7 +622,7 @@ static int ndisc_router_process_rdnss(Link *link, sd_ndisc_router *rt) {
         uint32_t lifetime_sec;
         const struct in6_addr *a;
         struct in6_addr router;
-        bool updated = false;
+        bool updated = false, logged_about_too_many = false;
         int n, r;
 
         assert(link);
@@ -701,19 +644,11 @@ static int ndisc_router_process_rdnss(Link *link, sd_ndisc_router *rt) {
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get RDNSS lifetime: %m");
 
-        if (lifetime_sec == 0)
-                return 0;
-
         lifetime_usec = sec_to_usec(lifetime_sec, timestamp_usec);
 
         n = sd_ndisc_router_rdnss_get_addresses(rt, &a);
         if (n < 0)
                 return log_link_error_errno(link, n, "Failed to get RDNSS addresses: %m");
-
-        if (n >= (int) NDISC_RDNSS_MAX) {
-                log_link_warning(link, "Too many RDNSS records per link. Only first %u records will be used.", NDISC_RDNSS_MAX);
-                n = NDISC_RDNSS_MAX;
-        }
 
         for (int j = 0; j < n; j++) {
                 _cleanup_free_ NDiscRDNSS *x = NULL;
@@ -721,11 +656,24 @@ static int ndisc_router_process_rdnss(Link *link, sd_ndisc_router *rt) {
                         .address = a[j],
                 };
 
+                if (lifetime_usec == 0) {
+                        /* The entry is outdated. */
+                        free(set_remove(link->ndisc_rdnss, &d));
+                        updated = true;
+                        continue;
+                }
+
                 rdnss = set_get(link->ndisc_rdnss, &d);
                 if (rdnss) {
-                        rdnss->marked = false;
                         rdnss->router = router;
                         rdnss->lifetime_usec = lifetime_usec;
+                        continue;
+                }
+
+                if (set_size(link->ndisc_rdnss) >= NDISC_RDNSS_MAX) {
+                        if (!logged_about_too_many)
+                                log_link_warning(link, "Too many RDNSS records per link. Only first %u records will be used.", NDISC_RDNSS_MAX);
+                        logged_about_too_many = true;
                         continue;
                 }
 
@@ -773,7 +721,7 @@ static int ndisc_router_process_dnssl(Link *link, sd_ndisc_router *rt) {
         usec_t lifetime_usec, timestamp_usec;
         struct in6_addr router;
         uint32_t lifetime_sec;
-        bool updated = false;
+        bool updated = false, logged_about_too_many = false;
         int r;
 
         assert(link);
@@ -795,20 +743,11 @@ static int ndisc_router_process_dnssl(Link *link, sd_ndisc_router *rt) {
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get DNSSL lifetime: %m");
 
-        if (lifetime_sec == 0)
-                return 0;
-
         lifetime_usec = sec_to_usec(lifetime_sec, timestamp_usec);
 
         r = sd_ndisc_router_dnssl_get_domains(rt, &l);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get DNSSL addresses: %m");
-
-        if (strv_length(l) >= NDISC_DNSSL_MAX) {
-                log_link_warning(link, "Too many DNSSL records per link. Only first %u records will be used.", NDISC_DNSSL_MAX);
-                STRV_FOREACH(j, l + NDISC_DNSSL_MAX)
-                        *j = mfree(*j);
-        }
 
         STRV_FOREACH(j, l) {
                 _cleanup_free_ NDiscDNSSL *s = NULL;
@@ -820,11 +759,24 @@ static int ndisc_router_process_dnssl(Link *link, sd_ndisc_router *rt) {
 
                 strcpy(NDISC_DNSSL_DOMAIN(s), *j);
 
+                if (lifetime_usec == 0) {
+                        /* The entry is outdated. */
+                        free(set_remove(link->ndisc_dnssl, s));
+                        updated = true;
+                        continue;
+                }
+
                 dnssl = set_get(link->ndisc_dnssl, s);
                 if (dnssl) {
-                        dnssl->marked = false;
                         dnssl->router = router;
                         dnssl->lifetime_usec = lifetime_usec;
+                        continue;
+                }
+
+                if (set_size(link->ndisc_dnssl) >= NDISC_DNSSL_MAX) {
+                        if (!logged_about_too_many)
+                                log_link_warning(link, "Too many DNSSL records per link. Only first %u records will be used.", NDISC_DNSSL_MAX);
+                        logged_about_too_many = true;
                         continue;
                 }
 
@@ -865,51 +817,150 @@ static int ndisc_router_process_options(Link *link, sd_ndisc_router *rt) {
                         return log_link_error_errno(link, r, "Failed to get RA option type: %m");
 
                 switch (type) {
-
                 case SD_NDISC_OPTION_PREFIX_INFORMATION:
                         r = ndisc_router_process_prefix(link, rt);
-                        if (r < 0)
-                                return r;
                         break;
 
                 case SD_NDISC_OPTION_ROUTE_INFORMATION:
                         r = ndisc_router_process_route(link, rt);
-                        if (r < 0)
-                                return r;
                         break;
 
                 case SD_NDISC_OPTION_RDNSS:
                         r = ndisc_router_process_rdnss(link, rt);
-                        if (r < 0)
-                                return r;
                         break;
 
                 case SD_NDISC_OPTION_DNSSL:
                         r = ndisc_router_process_dnssl(link, rt);
-                        if (r < 0)
-                                return r;
                         break;
                 }
+                if (r < 0 && r != -EBADMSG)
+                        return r;
         }
 }
 
-static void ndisc_mark(Link *link, const struct in6_addr *router) {
-        NDiscRDNSS *rdnss;
+static int ndisc_drop_outdated(Link *link, usec_t timestamp_usec) {
+        bool updated = false;
         NDiscDNSSL *dnssl;
+        NDiscRDNSS *rdnss;
+        Address *address;
+        Route *route;
+        int r = 0, k;
 
         assert(link);
-        assert(router);
 
-        link_mark_addresses(link, NETWORK_CONFIG_SOURCE_NDISC, router);
-        link_mark_routes(link, NETWORK_CONFIG_SOURCE_NDISC, router);
+        /* If an address or friends is already assigned, but not valid anymore, then refuse to update it,
+         * and let's immediately remove it.
+         * See RFC4862, section 5.5.3.e. But the following logic is deviated from RFC4862 by honoring all
+         * valid lifetimes to improve the reaction of SLAAC to renumbering events.
+         * See draft-ietf-6man-slaac-renum-02, section 4.2. */
+
+        SET_FOREACH(route, link->routes) {
+                if (route->source != NETWORK_CONFIG_SOURCE_NDISC)
+                        continue;
+
+                if (route->lifetime_usec >= timestamp_usec)
+                        continue; /* the route is still valid */
+
+                k = route_remove_and_drop(route);
+                if (k < 0)
+                        r = log_link_warning_errno(link, k, "Failed to remove outdated SLAAC route, ignoring: %m");
+        }
+
+        SET_FOREACH(address, link->addresses) {
+                if (address->source != NETWORK_CONFIG_SOURCE_NDISC)
+                        continue;
+
+                if (address->lifetime_valid_usec >= timestamp_usec)
+                        continue; /* the address is still valid */
+
+                k = address_remove_and_drop(address);
+                if (k < 0)
+                        r = log_link_warning_errno(link, k, "Failed to remove outdated SLAAC address, ignoring: %m");
+        }
+
+        SET_FOREACH(rdnss, link->ndisc_rdnss) {
+                if (rdnss->lifetime_usec >= timestamp_usec)
+                        continue; /* the DNS server is still valid */
+
+                free(set_remove(link->ndisc_rdnss, rdnss));
+                updated = true;
+        }
+
+        SET_FOREACH(dnssl, link->ndisc_dnssl) {
+                if (dnssl->lifetime_usec >= timestamp_usec)
+                        continue; /* the DNS domain is still valid */
+
+                free(set_remove(link->ndisc_dnssl, dnssl));
+                updated = true;
+        }
+
+        if (updated)
+                link_dirty(link);
+
+        return r;
+}
+
+static int ndisc_setup_expire(Link *link);
+
+static int ndisc_expire_handler(sd_event_source *s, uint64_t usec, void *userdata) {
+        Link *link = ASSERT_PTR(userdata);
+        usec_t now_usec;
+
+        assert(link->manager);
+
+        assert_se(sd_event_now(link->manager->event, CLOCK_BOOTTIME, &now_usec) >= 0);
+
+        (void) ndisc_drop_outdated(link, now_usec);
+        (void) ndisc_setup_expire(link);
+        return 0;
+}
+
+static int ndisc_setup_expire(Link *link) {
+        usec_t lifetime_usec = USEC_INFINITY;
+        NDiscDNSSL *dnssl;
+        NDiscRDNSS *rdnss;
+        Address *address;
+        Route *route;
+        int r;
+
+        assert(link);
+        assert(link->manager);
+
+        SET_FOREACH(route, link->routes) {
+                if (route->source != NETWORK_CONFIG_SOURCE_NDISC)
+                        continue;
+
+                if (!route_exists(route))
+                        continue;
+
+                lifetime_usec = MIN(lifetime_usec, route->lifetime_usec);
+        }
+
+        SET_FOREACH(address, link->addresses) {
+                if (address->source != NETWORK_CONFIG_SOURCE_NDISC)
+                        continue;
+
+                if (!address_exists(address))
+                        continue;
+
+                lifetime_usec = MIN(lifetime_usec, address->lifetime_valid_usec);
+        }
 
         SET_FOREACH(rdnss, link->ndisc_rdnss)
-                if (in6_addr_equal(&rdnss->router, router))
-                        rdnss->marked = true;
+                lifetime_usec = MIN(lifetime_usec, rdnss->lifetime_usec);
 
         SET_FOREACH(dnssl, link->ndisc_dnssl)
-                if (in6_addr_equal(&dnssl->router, router))
-                        dnssl->marked = true;
+                lifetime_usec = MIN(lifetime_usec, dnssl->lifetime_usec);
+
+        if (lifetime_usec == USEC_INFINITY)
+                return 0;
+
+        r = event_reset_time(link->manager->event, &link->ndisc_expire, CLOCK_BOOTTIME,
+                             lifetime_usec, 0, ndisc_expire_handler, link, 0, "ndisc-expiration", true);
+        if (r < 0)
+                return log_link_warning_errno(link, r, "Failed to update expiration timer for ndisc: %m");
+
+        return 0;
 }
 
 static int ndisc_start_dhcp6_client(Link *link, sd_ndisc_router *rt) {
@@ -957,6 +1008,7 @@ static int ndisc_start_dhcp6_client(Link *link, sd_ndisc_router *rt) {
 
 static int ndisc_router_handler(Link *link, sd_ndisc_router *rt) {
         struct in6_addr router;
+        usec_t timestamp_usec;
         int r;
 
         assert(link);
@@ -965,6 +1017,10 @@ static int ndisc_router_handler(Link *link, sd_ndisc_router *rt) {
         assert(rt);
 
         r = sd_ndisc_router_get_address(rt, &router);
+        if (r == -ENODATA) {
+                log_link_debug(link, "Received RA without router address, ignoring.");
+                return 0;
+        }
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get router address from RA: %m");
 
@@ -978,7 +1034,17 @@ static int ndisc_router_handler(Link *link, sd_ndisc_router *rt) {
                 return 0;
         }
 
-        ndisc_mark(link, &router);
+        r = sd_ndisc_router_get_timestamp(rt, CLOCK_BOOTTIME, &timestamp_usec);
+        if (r == -ENODATA) {
+                log_link_debug(link, "Received RA without timestamp, ignoring.");
+                return 0;
+        }
+        if (r < 0)
+                return r;
+
+        r = ndisc_drop_outdated(link, timestamp_usec);
+        if (r < 0)
+                return r;
 
         r = ndisc_start_dhcp6_client(link, rt);
         if (r < 0)
@@ -992,13 +1058,13 @@ static int ndisc_router_handler(Link *link, sd_ndisc_router *rt) {
         if (r < 0)
                 return r;
 
-        if (link->ndisc_messages == 0) {
-                link->ndisc_configured = true;
+        r = ndisc_setup_expire(link);
+        if (r < 0)
+                return r;
 
-                r = ndisc_remove(link, &router);
-                if (r < 0)
-                        return r;
-        } else
+        if (link->ndisc_messages == 0)
+                link->ndisc_configured = true;
+        else
                 log_link_debug(link, "Setting SLAAC addresses and router.");
 
         if (!link->ndisc_configured)
@@ -1019,7 +1085,7 @@ static void ndisc_handler(sd_ndisc *nd, sd_ndisc_event_t event, sd_ndisc_router 
 
         case SD_NDISC_EVENT_ROUTER:
                 r = ndisc_router_handler(link, rt);
-                if (r < 0) {
+                if (r < 0 && r != -EBADMSG) {
                         link_enter_failed(link);
                         return;
                 }
@@ -1136,26 +1202,14 @@ int link_request_ndisc(Link *link) {
         return 0;
 }
 
-void ndisc_vacuum(Link *link) {
-        NDiscRDNSS *r;
-        NDiscDNSSL *d;
-        usec_t now_usec;
-
+int ndisc_stop(Link *link) {
         assert(link);
-        assert(link->manager);
 
-        /* Removes all RDNSS and DNSSL entries whose validity time has passed */
+        link->ndisc_expire = sd_event_source_disable_unref(link->ndisc_expire);
 
-        assert_se(sd_event_now(link->manager->event, CLOCK_BOOTTIME, &now_usec) >= 0);
-
-        SET_FOREACH(r, link->ndisc_rdnss)
-                if (r->lifetime_usec < now_usec)
-                        free(set_remove(link->ndisc_rdnss, r));
-
-        SET_FOREACH(d, link->ndisc_dnssl)
-                if (d->lifetime_usec < now_usec)
-                        free(set_remove(link->ndisc_dnssl, d));
+        return sd_ndisc_stop(link->ndisc);
 }
+
 
 void ndisc_flush(Link *link) {
         assert(link);

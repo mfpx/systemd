@@ -37,6 +37,7 @@
 #include "analyze-unit-paths.h"
 #include "analyze-compare-versions.h"
 #include "analyze-verify.h"
+#include "build.h"
 #include "bus-error.h"
 #include "bus-locator.h"
 #include "bus-map-properties.h"
@@ -46,7 +47,7 @@
 #include "capability-util.h"
 #include "conf-files.h"
 #include "copy.h"
-#include "def.h"
+#include "constants.h"
 #include "exit-status.h"
 #include "extract-word.h"
 #include "fd-util.h"
@@ -79,7 +80,6 @@
 #include "time-util.h"
 #include "tmpfile-util.h"
 #include "unit-name.h"
-#include "util.h"
 #include "verb-log-control.h"
 #include "verbs.h"
 #include "version.h"
@@ -105,6 +105,8 @@ char *arg_unit = NULL;
 JsonFormatFlags arg_json_format_flags = JSON_FORMAT_OFF;
 bool arg_quiet = false;
 char *arg_profile = NULL;
+bool arg_legend = true;
+bool arg_table = false;
 
 STATIC_DESTRUCTOR_REGISTER(arg_dot_from_patterns, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_dot_to_patterns, strv_freep);
@@ -190,7 +192,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "  plot                       Output SVG graphic showing service\n"
                "                             initialization\n"
                "  dot [UNIT...]              Output dependency graph in %s format\n"
-               "  dump                       Output state serialization of service\n"
+               "  dump [PATTERN...]          Output state serialization of service\n"
                "                             manager\n"
                "  cat-config                 Show configuration file and drop-ins\n"
                "  unit-files                 List files and symlinks for units\n"
@@ -217,8 +219,10 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --security-policy=PATH  Use custom JSON security policy instead\n"
                "                             of built-in one\n"
                "     --json=pretty|short|off Generate JSON output of the security\n"
-               "                             analysis table\n"
+               "                             analysis table, or plot's raw time data\n"
                "     --no-pager              Do not pipe output into a pager\n"
+               "     --no-legend             Disable column headers and hints in plot\n"
+               "                             with either --table or --json=\n"
                "     --system                Operate on system systemd instance\n"
                "     --user                  Operate on user systemd instance\n"
                "     --global                Operate on global user configuration\n"
@@ -238,9 +242,12 @@ static int help(int argc, char *argv[], void *userdata) {
                "                             specified time\n"
                "     --profile=name|PATH     Include the specified profile in the\n"
                "                             security review of the unit(s)\n"
+               "     --table                 Output plot's raw time data as a table\n"
                "  -h --help                  Show this help\n"
                "     --version               Show package version\n"
                "  -q --quiet                 Do not emit hints\n"
+               "     --root=PATH             Operate on an alternate filesystem root\n"
+               "     --image=PATH            Operate on disk image as filesystem root\n"
                "\nSee the %s for details.\n",
                program_invocation_short_name,
                ansi_highlight(),
@@ -278,6 +285,8 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_SECURITY_POLICY,
                 ARG_JSON,
                 ARG_PROFILE,
+                ARG_TABLE,
+                ARG_NO_LEGEND,
         };
 
         static const struct option options[] = {
@@ -308,6 +317,8 @@ static int parse_argv(int argc, char *argv[]) {
                 { "unit",             required_argument, NULL, 'U'                  },
                 { "json",             required_argument, NULL, ARG_JSON             },
                 { "profile",          required_argument, NULL, ARG_PROFILE          },
+                { "table",            optional_argument, NULL, ARG_TABLE            },
+                { "no-legend",        optional_argument, NULL, ARG_NO_LEGEND        },
                 {}
         };
 
@@ -446,14 +457,12 @@ static int parse_argv(int argc, char *argv[]) {
                         r = safe_atou(optarg, &arg_iterations);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse iterations: %s", optarg);
-
                         break;
 
                 case ARG_BASE_TIME:
                         r = parse_timestamp(optarg, &arg_base_time);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to parse --base-time= parameter: %s", optarg);
-
                         break;
 
                 case ARG_PROFILE:
@@ -484,6 +493,15 @@ static int parse_argv(int argc, char *argv[]) {
                         free_and_replace(arg_unit, mangled);
                         break;
                 }
+
+                case ARG_TABLE:
+                        arg_table = true;
+                        break;
+
+                case ARG_NO_LEGEND:
+                        arg_legend = false;
+                        break;
+
                 case '?':
                         return -EINVAL;
 
@@ -495,9 +513,9 @@ static int parse_argv(int argc, char *argv[]) {
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Option --offline= is only supported for security right now.");
 
-        if (arg_json_format_flags != JSON_FORMAT_OFF && !STRPTR_IN_SET(argv[optind], "security", "inspect-elf"))
+        if (arg_json_format_flags != JSON_FORMAT_OFF && !STRPTR_IN_SET(argv[optind], "security", "inspect-elf", "plot"))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Option --json= is only supported for security and inspect-elf right now.");
+                                       "Option --json= is only supported for security, inspect-elf, and plot right now.");
 
         if (arg_threshold != 100 && !streq_ptr(argv[optind], "security"))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -534,12 +552,21 @@ static int parse_argv(int argc, char *argv[]) {
         if (streq_ptr(argv[optind], "condition") && arg_unit && optind < argc - 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "No conditions can be passed if --unit= is used.");
 
+        if ((!arg_legend && !streq_ptr(argv[optind], "plot")) ||
+           (streq_ptr(argv[optind], "plot") && !arg_legend && !arg_table && FLAGS_SET(arg_json_format_flags, JSON_FORMAT_OFF)))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Option --no-legend is only supported for plot with either --table or --json=.");
+
+        if (arg_table && !streq_ptr(argv[optind], "plot"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Option --table is only supported for plot right now.");
+
+        if (arg_table && !FLAGS_SET(arg_json_format_flags, JSON_FORMAT_OFF))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "--table and --json= are mutually exclusive.");
+
         return 1; /* work to do */
 }
 
 static int run(int argc, char *argv[]) {
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *unlink_dir = NULL;
 
         static const Verb verbs[] = {
@@ -558,7 +585,7 @@ static int run(int argc, char *argv[]) {
                 { "get-log-target",    VERB_ANY, 1,        0,            verb_log_control       },
                 { "service-watchdogs", VERB_ANY, 2,        0,            verb_service_watchdogs },
                 /* ↑ … until here ↑ */
-                { "dump",              VERB_ANY, 1,        0,            verb_dump              },
+                { "dump",              VERB_ANY, VERB_ANY, 0,            verb_dump              },
                 { "cat-config",        2,        VERB_ANY, 0,            verb_cat_config        },
                 { "unit-files",        VERB_ANY, VERB_ANY, 0,            verb_unit_files        },
                 { "unit-paths",        1,        1,        0,            verb_unit_paths        },
@@ -598,8 +625,7 @@ static int run(int argc, char *argv[]) {
                                 DISSECT_IMAGE_RELAX_VAR_CHECK |
                                 DISSECT_IMAGE_READ_ONLY,
                                 &unlink_dir,
-                                &loop_device,
-                                &decrypted_image);
+                                &loop_device);
                 if (r < 0)
                         return r;
 

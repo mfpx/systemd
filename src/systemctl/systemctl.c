@@ -6,18 +6,23 @@
 
 #include "sd-daemon.h"
 
+#include "build.h"
 #include "bus-util.h"
+#include "dissect-image.h"
 #include "install.h"
 #include "main-func.h"
+#include "mount-util.h"
 #include "output-mode.h"
 #include "pager.h"
 #include "parse-argument.h"
 #include "path-util.h"
 #include "pretty-print.h"
 #include "process-util.h"
+#include "reboot-util.h"
 #include "rlimit-util.h"
 #include "sigbus.h"
 #include "signal-util.h"
+#include "stat-util.h"
 #include "string-table.h"
 #include "systemctl-add-dependency.h"
 #include "systemctl-cancel-job.h"
@@ -80,6 +85,7 @@ bool arg_show_types = false;
 int arg_check_inhibitors = -1;
 bool arg_dry_run = false;
 bool arg_quiet = false;
+bool arg_no_warn = false;
 bool arg_full = false;
 bool arg_recursive = false;
 bool arg_with_dependencies = false;
@@ -92,6 +98,7 @@ char **arg_wall = NULL;
 const char *arg_kill_whom = NULL;
 int arg_signal = SIGTERM;
 char *arg_root = NULL;
+char *arg_image = NULL;
 usec_t arg_when = 0;
 const char *arg_reboot_argument = NULL;
 enum action arg_action = ACTION_SYSTEMCTL;
@@ -111,6 +118,7 @@ TimestampStyle arg_timestamp_style = TIMESTAMP_PRETTY;
 bool arg_read_only = false;
 bool arg_mkdir = false;
 bool arg_marked = false;
+const char *arg_drop_in = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(arg_types, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_states, strv_freep);
@@ -119,10 +127,12 @@ STATIC_DESTRUCTOR_REGISTER(_arg_job_mode, unsetp);
 STATIC_DESTRUCTOR_REGISTER(arg_wall, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_kill_whom, unsetp);
 STATIC_DESTRUCTOR_REGISTER(arg_root, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_image, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_reboot_argument, unsetp);
 STATIC_DESTRUCTOR_REGISTER(arg_host, unsetp);
 STATIC_DESTRUCTOR_REGISTER(arg_boot_loader_entry, unsetp);
 STATIC_DESTRUCTOR_REGISTER(arg_clean_what, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_drop_in, unsetp);
 
 static int systemctl_help(void) {
         _cleanup_free_ char *link = NULL;
@@ -271,6 +281,7 @@ static int systemctl_help(void) {
                "                             kexec, suspend, hibernate, suspend-then-hibernate,\n"
                "                             hybrid-sleep, default, rescue, emergency, and exit.\n"
                "  -q --quiet             Suppress output\n"
+               "     --no-warn           Suppress several warnings shown by default\n"
                "     --wait              For (re)start, wait until service stopped again\n"
                "                         For is-system-running, wait until startup is completed\n"
                "     --no-block          Do not wait until operation finished\n"
@@ -288,10 +299,12 @@ static int systemctl_help(void) {
                "     --preset-mode=      Apply only enable, only disable, or all presets\n"
                "     --root=PATH         Edit/enable/disable/mask unit files in the specified\n"
                "                         root directory\n"
+               "     --image=PATH        Edit/enable/disable/mask unit files in the specified\n"
+               "                         image\n"
                "  -n --lines=INTEGER     Number of journal entries to show\n"
                "  -o --output=STRING     Change journal output mode (short, short-precise,\n"
                "                             short-iso, short-iso-precise, short-full,\n"
-               "                             short-monotonic, short-unix,\n"
+               "                             short-monotonic, short-unix, short-delta,\n"
                "                             verbose, export, json, json-pretty, json-sse, cat)\n"
                "     --firmware-setup    Tell the firmware to show the setup menu on next boot\n"
                "     --boot-loader-menu=TIME\n"
@@ -304,6 +317,7 @@ static int systemctl_help(void) {
                "     --read-only         Create read-only bind mount\n"
                "     --mkdir             Create directory before mounting, if missing\n"
                "     --marked            Restart/reload previously marked units\n"
+               "     --drop-in=NAME      Edit unit files using the specified drop-in file name\n"
                "\nSee the %2$s for details.\n",
                program_invocation_short_name,
                link,
@@ -402,6 +416,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 ARG_NO_PAGER,
                 ARG_NO_WALL,
                 ARG_ROOT,
+                ARG_IMAGE,
                 ARG_NO_RELOAD,
                 ARG_KILL_WHOM,
                 ARG_NO_ASK_PASSWORD,
@@ -424,6 +439,8 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 ARG_READ_ONLY,
                 ARG_MKDIR,
                 ARG_MARKED,
+                ARG_NO_WARN,
+                ARG_DROP_IN,
         };
 
         static const struct option options[] = {
@@ -456,7 +473,9 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 { "no-wall",             no_argument,       NULL, ARG_NO_WALL             },
                 { "dry-run",             no_argument,       NULL, ARG_DRY_RUN             },
                 { "quiet",               no_argument,       NULL, 'q'                     },
+                { "no-warn",             no_argument,       NULL, ARG_NO_WARN             },
                 { "root",                required_argument, NULL, ARG_ROOT                },
+                { "image",               required_argument, NULL, ARG_IMAGE               },
                 { "force",               no_argument,       NULL, 'f'                     },
                 { "no-reload",           no_argument,       NULL, ARG_NO_RELOAD           },
                 { "kill-whom",           required_argument, NULL, ARG_KILL_WHOM           },
@@ -484,6 +503,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 { "read-only",           no_argument,       NULL, ARG_READ_ONLY           },
                 { "mkdir",               no_argument,       NULL, ARG_MKDIR               },
                 { "marked",              no_argument,       NULL, ARG_MARKED              },
+                { "drop-in",             required_argument, NULL, ARG_DROP_IN             },
                 {}
         };
 
@@ -663,6 +683,12 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                                 return r;
                         break;
 
+                case ARG_IMAGE:
+                        r = parse_path_argument(optarg, false, &arg_image);
+                        if (r < 0)
+                                return r;
+                        break;
+
                 case 'l':
                         arg_full = true;
                         break;
@@ -824,7 +850,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
 
                 case ARG_PRESET_MODE:
                         if (streq(optarg, "help")) {
-                                DUMP_STRING_TABLE(unit_file_preset_mode, UnitFilePresetMode, _UNIT_FILE_PRESET_MAX);
+                                DUMP_STRING_TABLE(unit_file_preset_mode, UnitFilePresetMode, _UNIT_FILE_PRESET_MODE_MAX);
                                 return 0;
                         }
 
@@ -910,6 +936,14 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         arg_marked = true;
                         break;
 
+                case ARG_NO_WARN:
+                        arg_no_warn = true;
+                        break;
+
+                case ARG_DROP_IN:
+                        arg_drop_in = optarg;
+                        break;
+
                 case '.':
                         /* Output an error mimicking getopt, and print a hint afterwards */
                         log_error("%s: invalid option -- '.'", program_invocation_name);
@@ -958,6 +992,9 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                "List of units to restart/reload is required.");
         }
+
+        if (arg_image && arg_root)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Please specify either --root= or --image=, the combination of both is not supported.");
 
         return 1;
 }
@@ -1068,7 +1105,7 @@ static int systemctl_main(int argc, char *argv[]) {
                 { "import-environment",    VERB_ANY, VERB_ANY, VERB_ONLINE_ONLY, verb_import_environment      },
                 { "halt",                  VERB_ANY, 1,        VERB_ONLINE_ONLY, verb_start_system_special    },
                 { "poweroff",              VERB_ANY, 1,        VERB_ONLINE_ONLY, verb_start_system_special    },
-                { "reboot",                VERB_ANY, 2,        VERB_ONLINE_ONLY, verb_start_system_special    },
+                { "reboot",                VERB_ANY, 1,        VERB_ONLINE_ONLY, verb_start_system_special    },
                 { "kexec",                 VERB_ANY, 1,        VERB_ONLINE_ONLY, verb_start_system_special    },
                 { "suspend",               VERB_ANY, 1,        VERB_ONLINE_ONLY, verb_start_system_special    },
                 { "hibernate",             VERB_ANY, 1,        VERB_ONLINE_ONLY, verb_start_system_special    },
@@ -1106,13 +1143,15 @@ static int systemctl_main(int argc, char *argv[]) {
         const Verb *verb = verbs_find_verb(argv[optind], verbs);
         if (verb && (verb->flags & VERB_ONLINE_ONLY) && arg_root)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Verb '%s' cannot be used with --root=.",
+                                       "Verb '%s' cannot be used with --root= or --image=.",
                                        argv[optind] ?: verb->verb);
 
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 
 static int run(int argc, char *argv[]) {
+        _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
+        _cleanup_(umount_and_rmdir_and_freep) char *mounted_dir = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -1127,6 +1166,14 @@ static int run(int argc, char *argv[]) {
         if (r <= 0)
                 goto finish;
 
+        if (proc_mounted() == 0)
+                log_full(arg_no_warn ? LOG_DEBUG : LOG_WARNING,
+                         "%s%s/proc/ is not mounted. This is not a supported mode of operation. Please fix\n"
+                         "your invocation environment to mount /proc/ and /sys/ properly. Proceeding anyway.\n"
+                         "Your mileage may vary.",
+                         emoji_enabled() ? special_glyph(SPECIAL_GLYPH_WARNING_SIGN) : "",
+                         emoji_enabled() ? " " : "");
+
         if (arg_action != ACTION_SYSTEMCTL && running_in_chroot() > 0) {
                 if (!arg_quiet)
                         log_info("Running in chroot, ignoring request.");
@@ -1135,6 +1182,25 @@ static int run(int argc, char *argv[]) {
         }
 
         /* systemctl_main() will print an error message for the bus connection, but only if it needs to */
+
+        if (arg_image) {
+                assert(!arg_root);
+
+                r = mount_image_privately_interactively(
+                                arg_image,
+                                DISSECT_IMAGE_GENERIC_ROOT |
+                                DISSECT_IMAGE_REQUIRE_ROOT |
+                                DISSECT_IMAGE_RELAX_VAR_CHECK |
+                                DISSECT_IMAGE_VALIDATE_OS,
+                                &mounted_dir,
+                                &loop_device);
+                if (r < 0)
+                        return r;
+
+                arg_root = strdup(mounted_dir);
+                if (!arg_root)
+                        return log_oom();
+        }
 
         switch (arg_action) {
 

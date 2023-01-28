@@ -11,13 +11,13 @@
 #include "alloc-util.h"
 #include "errno-util.h"
 #include "in-addr-util.h"
+#include "logarithm.h"
 #include "macro.h"
 #include "parse-util.h"
 #include "random-util.h"
 #include "stdio-util.h"
 #include "string-util.h"
 #include "strxcpyx.h"
-#include "util.h"
 
 bool in4_addr_is_null(const struct in_addr *a) {
         assert(a);
@@ -66,7 +66,7 @@ bool in4_addr_is_link_local_dynamic(const struct in_addr *a) {
 bool in6_addr_is_link_local(const struct in6_addr *a) {
         assert(a);
 
-        return IN6_IS_ADDR_LINKLOCAL(a); /* lgtm [cpp/potentially-dangerous-function] */
+        return IN6_IS_ADDR_LINKLOCAL(a);
 }
 
 int in_addr_is_link_local(int family, const union in_addr_union *u) {
@@ -131,7 +131,7 @@ int in_addr_is_localhost(int family, const union in_addr_union *u) {
                 return in4_addr_is_localhost(&u->in);
 
         if (family == AF_INET6)
-                return IN6_IS_ADDR_LOOPBACK(&u->in6); /* lgtm [cpp/potentially-dangerous-function] */
+                return IN6_IS_ADDR_LOOPBACK(&u->in6);
 
         return -EAFNOSUPPORT;
 }
@@ -144,7 +144,7 @@ int in_addr_is_localhost_one(int family, const union in_addr_union *u) {
                 return be32toh(u->in.s_addr) == UINT32_C(0x7F000001);
 
         if (family == AF_INET6)
-                return IN6_IS_ADDR_LOOPBACK(&u->in6); /* lgtm [cpp/potentially-dangerous-function] */
+                return IN6_IS_ADDR_LOOPBACK(&u->in6);
 
         return -EAFNOSUPPORT;
 }
@@ -194,8 +194,7 @@ int in_addr_prefix_intersect(
         assert(a);
         assert(b);
 
-        /* Checks whether there are any addresses that are in both
-         * networks */
+        /* Checks whether there are any addresses that are in both networks */
 
         m = MIN(aprefixlen, bprefixlen);
 
@@ -203,7 +202,7 @@ int in_addr_prefix_intersect(
                 uint32_t x, nm;
 
                 x = be32toh(a->in.s_addr ^ b->in.s_addr);
-                nm = (m == 0) ? 0 : 0xFFFFFFFFUL << (32 - m);
+                nm = m == 0 ? 0 : 0xFFFFFFFFUL << (32 - m);
 
                 return (x & nm) == 0;
         }
@@ -899,14 +898,6 @@ int in_addr_prefix_from_string_auto_internal(
                         break;
                 case PREFIXLEN_REFUSE:
                         return -ENOANO; /* To distinguish this error from others. */
-                case PREFIXLEN_LEGACY:
-                        if (family == AF_INET) {
-                                r = in4_addr_default_prefixlen(&buffer.in, &k);
-                                if (r < 0)
-                                        return r;
-                        } else
-                                k = 0;
-                        break;
                 default:
                         assert_not_reached();
                 }
@@ -922,7 +913,7 @@ int in_addr_prefix_from_string_auto_internal(
 
 }
 
-static void in_addr_data_hash_func(const struct in_addr_data *a, struct siphash *state) {
+void in_addr_data_hash_func(const struct in_addr_data *a, struct siphash *state) {
         assert(a);
         assert(state);
 
@@ -930,7 +921,7 @@ static void in_addr_data_hash_func(const struct in_addr_data *a, struct siphash 
         siphash24_compress(&a->address, FAMILY_ADDRESS_SIZE(a->family), state);
 }
 
-static int in_addr_data_compare_func(const struct in_addr_data *x, const struct in_addr_data *y) {
+int in_addr_data_compare_func(const struct in_addr_data *x, const struct in_addr_data *y) {
         int r;
 
         assert(x);
@@ -943,7 +934,18 @@ static int in_addr_data_compare_func(const struct in_addr_data *x, const struct 
         return memcmp(&x->address, &y->address, FAMILY_ADDRESS_SIZE(x->family));
 }
 
-DEFINE_HASH_OPS(in_addr_data_hash_ops, struct in_addr_data, in_addr_data_hash_func, in_addr_data_compare_func);
+DEFINE_HASH_OPS(
+        in_addr_data_hash_ops,
+        struct in_addr_data,
+        in_addr_data_hash_func,
+        in_addr_data_compare_func);
+
+DEFINE_HASH_OPS_WITH_KEY_DESTRUCTOR(
+        in_addr_data_hash_ops_free,
+        struct in_addr_data,
+        in_addr_data_hash_func,
+        in_addr_data_compare_func,
+        free);
 
 void in6_addr_hash_func(const struct in6_addr *addr, struct siphash *state) {
         assert(addr);
@@ -959,7 +961,12 @@ int in6_addr_compare_func(const struct in6_addr *a, const struct in6_addr *b) {
         return memcmp(a, b, sizeof(*a));
 }
 
-DEFINE_HASH_OPS(in6_addr_hash_ops, struct in6_addr, in6_addr_hash_func, in6_addr_compare_func);
+DEFINE_HASH_OPS(
+        in6_addr_hash_ops,
+        struct in6_addr,
+        in6_addr_hash_func,
+        in6_addr_compare_func);
+
 DEFINE_HASH_OPS_WITH_KEY_DESTRUCTOR(
         in6_addr_hash_ops_free,
         struct in6_addr,

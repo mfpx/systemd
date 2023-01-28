@@ -27,8 +27,8 @@
   <refsect1>
     <title>Description</title>
 
-    <para>The kernel, the initial RAM disk (initrd) and basic userspace functionality may be configured at
-    boot via kernel command line arguments. In addition, various systemd tools look at the EFI variable
+    <para>The kernel, the programs running in the initrd and in the host system may be configured at boot via
+    kernel command line arguments. In addition, various systemd tools look at the EFI variable
     <literal>SystemdOptions</literal> (if available). Both sources are combined, but the kernel command line
     has higher priority. Please note that <emphasis>the EFI variable is only used by systemd tools, and is
     ignored by the kernel and other user space tools</emphasis>, so it is not a replacement for the kernel
@@ -40,8 +40,7 @@
     and
     <citerefentry project='man-pages'><refentrytitle>bootparam</refentrytitle><manvolnum>7</manvolnum></citerefentry>.</para>
 
-    <para>For command line parameters understood by the initial RAM
-    disk, please see
+    <para>For command line parameters understood by the initrd, see
     <citerefentry project='man-pages'><refentrytitle>dracut.cmdline</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
     or the documentation of the specific initrd implementation of your
     installation.</para>
@@ -73,6 +72,8 @@
         <term><varname>systemd.machine_id=</varname></term>
         <term><varname>systemd.set_credential=</varname></term>
         <term><varname>systemd.import_credentials=</varname></term>
+        <term><varname>systemd.reload_limit_interval_sec=</varname></term>
+        <term><varname>systemd.reload_limit_burst=</varname></term>
         <listitem>
           <para>Parameters understood by the system and service
           manager to control system behavior. For details, see
@@ -335,11 +336,16 @@
         <term><varname>rw</varname></term>
 
         <listitem>
-          <para>Configures the root file system and its file system
-          type and mount options, as well as whether it shall be
-          mounted read-only or read-write initially. For details,
-          see
+          <para>Configures the root file system and its file system type and mount options, as well as
+          whether it shall be mounted read-only or read-write initially. For details, see
           <citerefentry><refentrytitle>systemd-fstab-generator</refentrytitle><manvolnum>8</manvolnum></citerefentry>.</para>
+
+          <para>If <varname>root=</varname> is not set (or set to <literal>gpt-auto</literal>) the automatic
+          root partition discovery implemented by
+          <citerefentry><refentrytitle>systemd-gpt-auto-generator</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+          will be in effect. In this case <varname>rootfstype=</varname>, <varname>rootflags=</varname>,
+          <varname>ro</varname>, <varname>rw</varname> will be interpreted by
+          <command>systemd-gpt-auto-generator</command>.</para>
         </listitem>
       </varlistentry>
 
@@ -470,6 +476,15 @@
           details, see
           <citerefentry><refentrytitle>systemd-modules-load.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>.</para>
         </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>nameserver=</varname></term>
+        <term><varname>domain=</varname></term>
+
+        <listitem><para>Configures DNS server information and search domains, see
+        <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+        for details.</para></listitem>
       </varlistentry>
 
       <varlistentry>

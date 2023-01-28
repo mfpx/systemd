@@ -74,8 +74,17 @@
         <term><varname>Type=</varname></term>
 
         <listitem><para>The GPT partition type UUID to match. This may be a GPT partition type UUID such as
-        <constant>4f68bce3-e8cd-4db1-96e7-fbcaf984b709</constant>, or one of the following special
-        identifiers:</para>
+        <constant>4f68bce3-e8cd-4db1-96e7-fbcaf984b709</constant>, or an identifier.
+        Architecture specific partition types can use one of these architecture identifiers:
+        <constant>alpha</constant>, <constant>arc</constant>, <constant>arm</constant> (32bit),
+        <constant>arm64</constant> (64bit, aka aarch64), <constant>ia64</constant>,
+        <constant>loongarch64</constant>, <constant>mips-le</constant>, <constant>mips64-le</constant>,
+        <constant>parisc</constant>, <constant>ppc</constant>, <constant>ppc64</constant>,
+        <constant>ppc64-le</constant>, <constant>riscv32</constant>, <constant>riscv64</constant>,
+        <constant>s390</constant>, <constant>s390x</constant>, <constant>tilegx</constant>,
+        <constant>x86</constant> (32bit, aka i386) and <constant>x86-64</constant> (64bit, aka amd64).
+
+        The supported identifiers are:</para>
 
         <table>
           <title>GPT partition type identifiers</title>
@@ -143,6 +152,11 @@
               </row>
 
               <row>
+                <entry><constant>root-verity-sig</constant></entry>
+                <entry>Verity signature data for the root file system partition for the local architecture</entry>
+              </row>
+
+              <row>
                 <entry><constant>root-secondary</constant></entry>
                 <entry>Root file system partition of the secondary architecture of the local architecture (usually the matching 32bit architecture for the local 64bit architecture)</entry>
               </row>
@@ -153,83 +167,23 @@
               </row>
 
               <row>
-                <entry><constant>root-x86</constant></entry>
-                <entry>Root file system partition for the x86 (32bit, aka i386) architecture</entry>
+                <entry><constant>root-secondary-verity-sig</constant></entry>
+                <entry>Verity signature data for the root file system partition of the secondary architecture</entry>
               </row>
 
               <row>
-                <entry><constant>root-x86-verity</constant></entry>
-                <entry>Verity data for the x86 (32bit) root file system partition</entry>
+                <entry><constant>root-{arch}</constant></entry>
+                <entry>Root file system partition of the given architecture (such as <constant>root-x86-64</constant> or <constant>root-riscv64</constant>)</entry>
               </row>
 
               <row>
-                <entry><constant>root-x86-64</constant></entry>
-                <entry>Root file system partition for the x86_64 (64bit, aka amd64) architecture</entry>
+                <entry><constant>root-{arch}-verity</constant></entry>
+                <entry>Verity data for the root file system partition of the given architecture</entry>
               </row>
 
               <row>
-                <entry><constant>root-x86-64-verity</constant></entry>
-                <entry>Verity data for the x86_64 (64bit) root file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-arm</constant></entry>
-                <entry>Root file system partition for the ARM (32bit) architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-arm-verity</constant></entry>
-                <entry>Verity data for the ARM (32bit) root file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-arm64</constant></entry>
-                <entry>Root file system partition for the ARM (64bit, aka aarch64) architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-arm64-verity</constant></entry>
-                <entry>Verity data for the ARM (64bit, aka aarch64) root file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-ia64</constant></entry>
-                <entry>Root file system partition for the ia64 architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-ia64-verity</constant></entry>
-                <entry>Verity data for the ia64 root file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-loongarch64</constant></entry>
-                <entry>Root file system partition for the LoongArch 64-bit architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-loongarch64-verity</constant></entry>
-                <entry>Verity data for the LoongArch 64-bit root file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-riscv32</constant></entry>
-                <entry>Root file system partition for the RISC-V 32-bit architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-riscv32-verity</constant></entry>
-                <entry>Verity data for the RISC-V 32-bit root file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-riscv64</constant></entry>
-                <entry>Root file system partition for the RISC-V 64-bit architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>root-riscv64-verity</constant></entry>
-                <entry>Verity data for the RISC-V 64-bit root file system partition</entry>
+                <entry><constant>root-{arch}-verity-sig</constant></entry>
+                <entry>Verity signature data for the root file system partition of the given architecture</entry>
               </row>
 
               <row>
@@ -243,6 +197,11 @@
               </row>
 
               <row>
+                <entry><constant>usr-verity-sig</constant></entry>
+                <entry>Verity signature data for the <filename>/usr/</filename> file system partition for the local architecture</entry>
+              </row>
+
+              <row>
                 <entry><constant>usr-secondary</constant></entry>
                 <entry><filename>/usr/</filename> file system partition of the secondary architecture of the local architecture (usually the matching 32bit architecture for the local 64bit architecture)</entry>
               </row>
@@ -253,83 +212,23 @@
               </row>
 
               <row>
-                <entry><constant>usr-x86</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the x86 (32bit, aka i386) architecture</entry>
+                <entry><constant>usr-secondary-verity-sig</constant></entry>
+                <entry>Verity signature data for the <filename>/usr/</filename> file system partition of the secondary architecture</entry>
               </row>
 
               <row>
-                <entry><constant>usr-x86-verity</constant></entry>
-                <entry>Verity data for the x86 (32bit) <filename>/usr/</filename> file system partition</entry>
+                <entry><constant>usr-{arch}</constant></entry>
+                <entry><filename>/usr/</filename> file system partition of the given architecture</entry>
               </row>
 
               <row>
-                <entry><constant>usr-x86-64</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the x86_64 (64bit, aka amd64) architecture</entry>
+                <entry><constant>usr-{arch}-verity</constant></entry>
+                <entry>Verity data for the <filename>/usr/</filename> file system partition of the given architecture</entry>
               </row>
 
               <row>
-                <entry><constant>usr-x86-64-verity</constant></entry>
-                <entry>Verity data for the x86_64 (64bit) <filename>/usr/</filename> file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-arm</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the ARM (32bit) architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-arm-verity</constant></entry>
-                <entry>Verity data for the ARM (32bit) <filename>/usr/</filename> file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-arm64</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the ARM (64bit, aka aarch64) architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-arm64-verity</constant></entry>
-                <entry>Verity data for the ARM (64bit, aka aarch64) <filename>/usr/</filename> file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-ia64</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the ia64 architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-ia64-verity</constant></entry>
-                <entry>Verity data for the ia64 <filename>/usr/</filename> file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-loongarch64</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the LoongArch 64-bit architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-loongarch64-verity</constant></entry>
-                <entry>Verity data for the LoongArch 64-bit <filename>/usr/</filename> file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-riscv32</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the RISC-V 32-bit architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-riscv32-verity</constant></entry>
-                <entry>Verity data for the RISC-V 32-bit <filename>/usr/</filename> file system partition</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-riscv64</constant></entry>
-                <entry><filename>/usr/</filename> file system partition for the RISC-V 64-bit architecture</entry>
-              </row>
-
-              <row>
-                <entry><constant>usr-riscv64-verity</constant></entry>
-                <entry>Verity data for the RISC-V 64-bit <filename>/usr/</filename> file system partition</entry>
+                <entry><constant>usr-{arch}-verity-sig</constant></entry>
+                <entry>Verity signature data for the <filename>/usr/</filename> file system partition of the given architecture</entry>
               </row>
             </tbody>
           </tgroup>
@@ -338,7 +237,7 @@
         <para>This setting defaults to <constant>linux-generic</constant>.</para>
 
         <para>Most of the partition type UUIDs listed above are defined in the <ulink
-        url="https://systemd.io/DISCOVERABLE_PARTITIONS">Discoverable Partitions
+        url="https://uapi-group.org/specifications/specs/discoverable_partitions_specification">Discoverable Partitions
         Specification</ulink>.</para></listitem>
       </varlistentry>
 
@@ -484,12 +383,13 @@
         <term><varname>Format=</varname></term>
 
         <listitem><para>Takes a file system name, such as <literal>ext4</literal>, <literal>btrfs</literal>,
-        <literal>xfs</literal> or <literal>vfat</literal>, or the special value <literal>swap</literal>. If
-        specified and the partition is newly created it is formatted with the specified file system (or as
-        swap device). The file system UUID and label are automatically derived from the partition UUID and
-        label. If this option is used, the size allocation algorithm is slightly altered: the partition is
-        created as least as big as required for the minimal file system of the specified type (or 4KiB if the
-        minimal size is not known).</para>
+        <literal>xfs</literal>, <literal>vfat</literal>, <literal>erofs</literal>,
+        <literal>squashfs</literal> or the special value <literal>swap</literal>. If specified and the partition
+        is newly created it is formatted with the specified file system (or as swap device). The file system
+        UUID and label are automatically derived from the partition UUID and label. If this option is used,
+        the size allocation algorithm is slightly altered: the partition is created as least as big as
+        required for the minimal file system of the specified type (or 4KiB if the minimal size is not
+        known).</para>
 
         <para>This option has no effect if the partition already exists.</para>
 
@@ -521,11 +421,27 @@
         <para>The copy operation is executed before the file system is registered in the partition table,
         thus ensuring that a file system populated this way only ever exists fully initialized.</para>
 
+        <para>Note that <varname>CopyFiles=</varname> will skip copying files that aren't supported by the
+        target filesystem (e.g symlinks, fifos, sockets and devices on vfat). When an unsupported file type
+        is encountered, repart will skip copying this file and write a log message about it.</para>
+
+        <para>Note that <command>systemd-repart</command> does not change the UIDs/GIDs of any copied files
+        and directories. When running <command>systemd-repart</command> as an unprivileged user to build an
+        image of files and directories owned by the same user, you can run <command>systemd-repart</command>
+        in a user namespace with the current user mapped to the root user to make sure the files and
+        directories in the image are owned by the root user.</para>
+
+        <para>Note that when populating XFS filesystems with <command>systemd-repart</command> and loop
+        devices are not available, populating XFS filesystems with files containing spaces, tabs or newlines
+        will fail due to limitations of mkfs.xfs's protofile format.</para>
+
         <para>This option cannot be combined with <varname>CopyBlocks=</varname>.</para>
 
-        <para>When <command>systemd-repart</command> is invoked with the <option>--image=</option> or
-        <option>--root=</option> command line switches the source paths specified are taken relative to the
-        specified root directory or disk image root.</para></listitem>
+        <para>When
+        <citerefentry><refentrytitle>systemd-repart</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+        is invoked with the <option>--image=</option> or <option>--root=</option> command line switches the
+        source paths specified are taken relative to the specified root directory or disk image root.
+        </para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -583,17 +499,21 @@
       <varlistentry>
         <term><varname>Verity=</varname></term>
 
-        <listitem><para>Takes one of <literal>off</literal>, <literal>data</literal> or
-        <literal>hash</literal>. Defaults to <literal>off</literal>. If set to <literal>off</literal> or
-        <literal>data</literal>, the partition is populated with content as specified by
-        <varname>CopyBlocks=</varname> or <varname>CopyFiles=</varname>. If set to <literal>hash</literal>,
-        the partition will be populated with verity hashes from a matching verity data partition. A matching
-        data partition is a partition with <varname>Verity=</varname> set to <literal>data</literal> and the
-        same verity match key (as configured with <varname>VerityMatchKey=</varname>). If not explicitly
-        configured, the data partition's UUID will be set to the first 128 bits of the verity root hash.
-        Similarly, if not configured, the hash partition's UUID will be set to the final 128 bits of the
-        verity root hash. The verity root hash itself will be included in the output of
-        <command>systemd-repart</command>.</para>
+        <listitem><para>Takes one of <literal>off</literal>, <literal>data</literal>,
+        <literal>hash</literal> or <literal>signature</literal>. Defaults to <literal>off</literal>. If set
+        to <literal>off</literal> or <literal>data</literal>, the partition is populated with content as
+        specified by <varname>CopyBlocks=</varname> or <varname>CopyFiles=</varname>. If set to
+        <literal>hash</literal>, the partition will be populated with verity hashes from the matching verity
+        data partition. If set to <literal>signature</literal>, the partition will be populated with a JSON
+        object containing a signature of the verity root hash of the matching verity hash partition.</para>
+
+        <para>A matching verity partition is a partition with the same verity match key (as configured with
+        <varname>VerityMatchKey=</varname>).</para>
+
+        <para>If not explicitly configured, the data partition's UUID will be set to the first 128
+        bits of the verity root hash. Similarly, if not configured, the hash partition's UUID will be set to
+        the final 128 bits of the verity root hash. The verity root hash itself will be included in the
+        output of <command>systemd-repart</command>.</para>
 
         <para>This option has no effect if the partition already exists.</para>
 
@@ -639,7 +559,7 @@
 
         <listitem><para>Configures the No-Auto, Read-Only and Grow-File-System partition flags (bit 63, 60
         and 59) of the partition table entry, as defined by the <ulink
-        url="https://systemd.io/DISCOVERABLE_PARTITIONS">Discoverable Partitions Specification</ulink>. Only
+        url="https://uapi-group.org/specifications/specs/discoverable_partitions_specification">Discoverable Partitions Specification</ulink>. Only
         available for partition types supported by the specification. This option is a friendly way to set
         bits 63, 60 and 59 of the partition flags value without setting any of the other bits, and may be set
         via <varname>Flags=</varname> too, see above.</para>
@@ -669,6 +589,31 @@
         all partition types that support it, except if the partition is marked read-only (and thus
         effectively, defaults to off for Verity partitions).</para></listitem>
       </varlistentry>
+
+      <varlistentry>
+        <term><varname>SplitName=</varname></term>
+
+        <listitem><para>Configures the suffix to append to split artifacts when the <option>--split</option>
+        option of <command>systemd-repart</command> is used. Simple specifier expansion is supported, see
+        below. Defaults to <literal>%t</literal>. To disable split artifact generation for a partition, set
+        <varname>SplitName=</varname> to <literal>-</literal>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>Minimize=</varname></term>
+
+        <listitem><para>Takes one of <literal>off</literal>, <literal>best</literal>, and
+        <literal>guess</literal> (alternatively, also accepts a boolean value, which is mapped to
+        <literal>off</literal> when false, and <literal>best</literal> when true). Defaults to
+        <literal>off</literal>. If set to <literal>best</literal>, the partition will have the minimal size
+        required to store the sources configured with <varname>CopyFiles=</varname>. <literal>best</literal>
+        is currently only supported for read-only filesystems. If set to <literal>guess</literal>, the
+        partition is created at least as big as required to store the sources configured with
+        <varname>CopyFiles=</varname>. Note that unless the filesystem is a read-only filesystem,
+        <command>systemd-repart</command> will have to populate the filesystem twice to guess the minimal
+        required size, so enabling this option might slow down repart when populating large partitions.
+        </para></listitem>
+      </varlistentry>
     </variablelist>
   </refsect1>
 
@@ -676,8 +621,8 @@
     <title>Specifiers</title>
 
     <para>Specifiers may be used in the <varname>Label=</varname>, <varname>CopyBlocks=</varname>,
-    <varname>CopyFiles=</varname>, <varname>MakeDirectories=</varname> settings. The following expansions are
-    understood:</para>
+    <varname>CopyFiles=</varname>, <varname>MakeDirectories=</varname>, <varname>SplitName=</varname>
+    settings. The following expansions are understood:</para>
       <table class='specifiers'>
         <title>Specifiers available</title>
         <tgroup cols='3' align='left' colsep='1' rowsep='1'>
@@ -707,6 +652,46 @@
             <xi:include href="standard-specifiers.xml" xpointer="T"/>
             <xi:include href="standard-specifiers.xml" xpointer="V"/>
             <xi:include href="standard-specifiers.xml" xpointer="percent"/>
+          </tbody>
+        </tgroup>
+      </table>
+
+    <para>Additionally, for the <varname>SplitName=</varname> setting, the following specifiers are also
+    understood:</para>
+      <table class='specifiers'>
+        <title>Specifiers available</title>
+        <tgroup cols='3' align='left' colsep='1' rowsep='1'>
+          <colspec colname="spec" />
+          <colspec colname="mean" />
+          <colspec colname="detail" />
+          <thead>
+            <row>
+              <entry>Specifier</entry>
+              <entry>Meaning</entry>
+              <entry>Details</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row id='T'>
+              <entry><literal>%T</literal></entry>
+              <entry>Partition Type UUID</entry>
+              <entry>The partition type UUID, as configured with <varname>Type=</varname></entry>
+            </row>
+            <row id='t'>
+              <entry><literal>%t</literal></entry>
+              <entry>Partition Type Identifier</entry>
+              <entry>The partition type identifier corresponding to the partition type UUID</entry>
+            </row>
+            <row id='U'>
+              <entry><literal>%U</literal></entry>
+              <entry>Partition UUID</entry>
+              <entry>The partition UUID, as configured with <varname>UUID=</varname></entry>
+            </row>
+            <row id='n'>
+              <entry><literal>%n</literal></entry>
+              <entry>Partition Number</entry>
+              <entry>The partition number assigned to the partition</entry>
+            </row>
           </tbody>
         </tgroup>
       </table>

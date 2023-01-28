@@ -234,7 +234,11 @@
         <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry>.
         This enables or disables <filename>systemd-nspawn@.service</filename>, instantiated for the specified
         machine name, similarly to the effect of <command>systemctl enable</command> or <command>systemctl
-        disable</command> on the service name.</para></listitem>
+        disable</command> on the service name.</para>
+
+        <para>This command implicitly reloads the system manager configuration after completing the operation.
+        Note that this command does not implicitly start or power off the containers that are being operated on.
+        If this is desired, combine the command with the <option>--now</option> switch.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -777,6 +781,17 @@
       </varlistentry>
 
       <varlistentry>
+        <term><option>--now</option></term>
+
+        <listitem>
+          <para>When used with <command>enable</command> or <command>disable</command>,
+          the containers will also be started or powered off. The start or poweroff
+          operation is only carried out when the respective enable or disable
+          operation has been successful.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><option>--force</option></term>
 
         <listitem><para>When downloading a container or VM image, and
@@ -800,11 +815,10 @@
       <varlistentry>
         <term><option>--max-addresses=</option></term>
 
-        <listitem><para>When used with the <option>list-machines</option> command, limits the number of ip
-        addresses output for every machine.  Defaults to 1. All addresses can be requested with
-        <literal>all</literal> as argument to <option>--max-addresses=</option>. If the argument to
-        <option>--max-addresses=</option> is less than the actual number of addresses,
-        <literal>…</literal>follows the last address.</para></listitem>
+        <listitem><para>When used with the <option>list-machines</option> command, limits the number of IP
+        addresses shown for every machine. Defaults to 1. All addresses can be requested with
+        <literal>all</literal>. If the limit is 0, the address column is not shown. Otherwise, if the machine
+        has more addresses than shown, <literal>…</literal> follows the last address.</para></listitem>
       </varlistentry>
 
       <varlistentry>

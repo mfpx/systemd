@@ -8,6 +8,7 @@
 #include "dropin.h"
 #include "fstab-util.h"
 #include "generator.h"
+#include "initrd-util.h"
 #include "log.h"
 #include "main-func.h"
 #include "mkdir-label.h"
@@ -114,7 +115,7 @@ static int run(const char *dest, const char *dest_early, const char *dest_late) 
 
         arg_dest = ASSERT_PTR(dest);
 
-        /* Don't even consider resuming outside of initramfs. */
+        /* Don't even consider resuming outside of initrd. */
         if (!in_initrd()) {
                 log_debug("Not running in an initrd, quitting.");
                 return 0;

@@ -32,7 +32,6 @@
 #include "tmpfile-util.h"
 #include "umask-util.h"
 #include "user-util.h"
-#include "util.h"
 
 int unlink_noerrno(const char *path) {
         PROTECT_ERRNO;
@@ -175,37 +174,41 @@ int readlink_value(const char *p, char **ret) {
         return 0;
 }
 
-int readlink_and_make_absolute(const char *p, char **r) {
+int readlink_and_make_absolute(const char *p, char **ret) {
         _cleanup_free_ char *target = NULL;
-        char *k;
-        int j;
+        int r;
 
         assert(p);
-        assert(r);
+        assert(ret);
 
-        j = readlink_malloc(p, &target);
-        if (j < 0)
-                return j;
+        r = readlink_malloc(p, &target);
+        if (r < 0)
+                return r;
 
-        k = file_in_same_dir(p, target);
-        if (!k)
-                return -ENOMEM;
-
-        *r = k;
-        return 0;
+        return file_in_same_dir(p, target, ret);
 }
 
-int chmod_and_chown(const char *path, mode_t mode, uid_t uid, gid_t gid) {
-        _cleanup_close_ int fd = -1;
+int chmod_and_chown_at(int dir_fd, const char *path, mode_t mode, uid_t uid, gid_t gid) {
+        _cleanup_close_ int fd = -EBADF;
 
-        assert(path);
+        assert(dir_fd >= 0 || dir_fd == AT_FDCWD);
 
-        fd = open(path, O_PATH|O_CLOEXEC|O_NOFOLLOW); /* Let's acquire an O_PATH fd, as precaution to change
-                                                       * mode/owner on the same file */
-        if (fd < 0)
-                return -errno;
+        if (path) {
+                /* Let's acquire an O_PATH fd, as precaution to change mode/owner on the same file */
+                fd = openat(dir_fd, path, O_PATH|O_CLOEXEC|O_NOFOLLOW);
+                if (fd < 0)
+                        return -errno;
+                dir_fd = fd;
 
-        return fchmod_and_chown(fd, mode, uid, gid);
+        } else if (dir_fd == AT_FDCWD) {
+                /* Let's acquire an O_PATH fd of the current directory */
+                fd = openat(dir_fd, ".", O_PATH|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY);
+                if (fd < 0)
+                        return -errno;
+                dir_fd = fd;
+        }
+
+        return fchmod_and_chown(dir_fd, mode, uid, gid);
 }
 
 int fchmod_and_chown_with_fallback(int fd, const char *path, mode_t mode, uid_t uid, gid_t gid) {
@@ -351,7 +354,7 @@ int fd_warn_permissions(const char *path, int fd) {
 }
 
 int touch_file(const char *path, bool parents, usec_t stamp, uid_t uid, gid_t gid, mode_t mode) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         int r, ret;
 
         assert(path);
@@ -406,13 +409,7 @@ int symlink_idempotent(const char *from, const char *to, bool make_relative) {
         assert(to);
 
         if (make_relative) {
-                _cleanup_free_ char *parent = NULL;
-
-                r = path_extract_directory(to, &parent);
-                if (r < 0)
-                        return r;
-
-                r = path_make_relative(parent, from, &relpath);
+                r = path_make_relative_parent(to, from, &relpath);
                 if (r < 0)
                         return r;
 
@@ -438,29 +435,38 @@ int symlink_idempotent(const char *from, const char *to, bool make_relative) {
         return 0;
 }
 
-int symlink_atomic(const char *from, const char *to) {
-        _cleanup_free_ char *t = NULL;
+int symlinkat_atomic_full(const char *from, int atfd, const char *to, bool make_relative) {
+        _cleanup_free_ char *relpath = NULL, *t = NULL;
         int r;
 
         assert(from);
         assert(to);
 
+        if (make_relative) {
+                r = path_make_relative_parent(to, from, &relpath);
+                if (r < 0)
+                        return r;
+
+                from = relpath;
+        }
+
         r = tempfn_random(to, NULL, &t);
         if (r < 0)
                 return r;
 
-        if (symlink(from, t) < 0)
+        if (symlinkat(from, atfd, t) < 0)
                 return -errno;
 
-        if (rename(t, to) < 0) {
-                unlink_noerrno(t);
-                return -errno;
+        r = RET_NERRNO(renameat(atfd, t, atfd, to));
+        if (r < 0) {
+                (void) unlinkat(atfd, t, 0);
+                return r;
         }
 
         return 0;
 }
 
-int mknod_atomic(const char *path, mode_t mode, dev_t dev) {
+int mknodat_atomic(int atfd, const char *path, mode_t mode, dev_t dev) {
         _cleanup_free_ char *t = NULL;
         int r;
 
@@ -470,58 +476,36 @@ int mknod_atomic(const char *path, mode_t mode, dev_t dev) {
         if (r < 0)
                 return r;
 
-        if (mknod(t, mode, dev) < 0)
+        if (mknodat(atfd, t, mode, dev) < 0)
                 return -errno;
 
-        if (rename(t, path) < 0) {
-                unlink_noerrno(t);
-                return -errno;
-        }
-
-        return 0;
-}
-
-int mkfifo_atomic(const char *path, mode_t mode) {
-        _cleanup_free_ char *t = NULL;
-        int r;
-
-        assert(path);
-
-        r = tempfn_random(path, NULL, &t);
-        if (r < 0)
+        r = RET_NERRNO(renameat(atfd, t, atfd, path));
+        if (r < 0) {
+                (void) unlinkat(atfd, t, 0);
                 return r;
-
-        if (mkfifo(t, mode) < 0)
-                return -errno;
-
-        if (rename(t, path) < 0) {
-                unlink_noerrno(t);
-                return -errno;
         }
 
         return 0;
 }
 
-int mkfifoat_atomic(int dirfd, const char *path, mode_t mode) {
+int mkfifoat_atomic(int atfd, const char *path, mode_t mode) {
         _cleanup_free_ char *t = NULL;
         int r;
 
         assert(path);
-
-        if (path_is_absolute(path))
-                return mkfifo_atomic(path, mode);
 
         /* We're only interested in the (random) filename.  */
-        r = tempfn_random_child("", NULL, &t);
+        r = tempfn_random(path, NULL, &t);
         if (r < 0)
                 return r;
 
-        if (mkfifoat(dirfd, t, mode) < 0)
+        if (mkfifoat(atfd, t, mode) < 0)
                 return -errno;
 
-        if (renameat(dirfd, t, dirfd, path) < 0) {
-                unlink_noerrno(t);
-                return -errno;
+        r = RET_NERRNO(renameat(atfd, t, atfd, path));
+        if (r < 0) {
+                (void) unlinkat(atfd, t, 0);
+                return r;
         }
 
         return 0;
@@ -694,7 +678,7 @@ void unlink_tempfilep(char (*p)[]) {
 }
 
 int unlinkat_deallocate(int fd, const char *name, UnlinkDeallocateFlags flags) {
-        _cleanup_close_ int truncate_fd = -1;
+        _cleanup_close_ int truncate_fd = -EBADF;
         struct stat st;
         off_t l, bs;
 
@@ -825,7 +809,7 @@ int conservative_renameat(
                 int olddirfd, const char *oldpath,
                 int newdirfd, const char *newpath) {
 
-        _cleanup_close_ int old_fd = -1, new_fd = -1;
+        _cleanup_close_ int old_fd = -EBADF, new_fd = -EBADF;
         struct stat old_stat, new_stat;
 
         /* Renames the old path to thew new path, much like renameat() — except if both are regular files and
@@ -921,7 +905,7 @@ int posix_fallocate_loop(int fd, uint64_t offset, uint64_t size) {
 
         /* On EINTR try a couple of times more, but protect against busy looping
          * (not more than 16 times per 10s) */
-        rl = (RateLimit) { 10 * USEC_PER_SEC, 16 };
+        rl = (const RateLimit) { 10 * USEC_PER_SEC, 16 };
         while (ratelimit_below(&rl)) {
                 r = posix_fallocate(fd, offset, size);
                 if (r != EINTR)
@@ -1007,7 +991,7 @@ int parse_cifs_service(
 }
 
 int open_mkdir_at(int dirfd, const char *path, int flags, mode_t mode) {
-        _cleanup_close_ int fd = -1, parent_fd = -1;
+        _cleanup_close_ int fd = -EBADF, parent_fd = -EBADF;
         _cleanup_free_ char *fname = NULL;
         bool made;
         int r;

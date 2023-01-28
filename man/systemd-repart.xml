@@ -43,14 +43,14 @@
     <para>If invoked with no arguments, it operates on the block device backing the root file system
     partition of the running OS, thus growing and adding partitions of the booted OS image itself. If
     <varname>--image=</varname> is used it will operate on the specified image file. When called in the
-    <literal>initrd</literal> it operates on the block device backing <filename>/sysroot/</filename> instead,
-    i.e. on the block device the system will soon transition into. The
-    <filename>systemd-repart.service</filename> service is generally run at boot in the initial RAM disk, in
-    order to augment the partition table of the OS before its partitions are
-    mounted. <command>systemd-repart</command> (mostly) operates in a purely incremental mode: it only grows
-    existing and adds new partitions; it does not shrink, delete or move existing partitions. The service is
-    intended to be run on every boot, but when it detects that the partition table already matches the
-    installed <filename>repart.d/*.conf</filename> configuration files, it executes no operation.</para>
+    initrd it operates on the block device backing <filename>/sysroot/</filename> instead, i.e. on the block
+    device the system will soon transition into. The <filename>systemd-repart.service</filename> service is
+    generally run at boot in the initrd, in order to augment the partition table of the OS before its
+    partitions are mounted. <command>systemd-repart</command> (mostly) operates in a purely incremental mode:
+    it only grows existing and adds new partitions; it does not shrink, delete or move existing partitions.
+    The service is intended to be run on every boot, but when it detects that the partition table already
+    matches the installed <filename>repart.d/*.conf</filename> configuration files, it executes no
+    operation.</para>
 
     <para><command>systemd-repart</command> is intended to be used when deploying OS images, to automatically
     adjust them to the system they are running on, during first boot. This way the deployed image can be
@@ -89,34 +89,34 @@
 
       <listitem><para>Taking the size constraints and weights declared in the configuration files into
       account, all partitions that shall be created are now allocated to the disk, taking up all free space,
-      always respecting the size and padding requests. Similar, existing partitions that are determined to
-      grow are grown. New partitions are always appended to the end of the existing partition table, taking
-      the first partition table slot whose index is greater than the indexes of all existing
-      partitions. Partition table slots are never reordered and thus partition numbers are ensured to remain
-      stable. Note that this allocation happens in RAM only, the partition table on disk is not updated
-      yet.</para></listitem>
+      always respecting the size and padding requests. Similarly, existing partitions that should be grown
+      are grown. New partitions are always appended to the end of the partition table, taking the first
+      partition table slot whose index is greater than the indexes of all existing partitions. Partition
+      table slots are never reordered and thus partition numbers are ensured to remain stable. Note that this
+      allocation happens in memory only, the partition table on disk is not updated yet.</para></listitem>
 
       <listitem><para>All existing partitions for which configuration files exist and which currently have no
       GPT partition label set will be assigned a label, either explicitly configured in the configuration or
-      (if that's missing) derived automatically from the partition type. The same is done for all partitions
-      that are newly created. These assignments are done in RAM only, too, the disk is not updated
-      yet.</para></listitem>
+      — if that's missing — derived automatically from the partition type. The same is done for all
+      partitions that are newly created. These assignments are done in memory only, too, the disk is not
+      updated yet.</para></listitem>
 
       <listitem><para>Similarly, all existing partitions for which configuration files exist and which
       currently have an all-zero identifying UUID will be assigned a new UUID. This UUID is cryptographically
       hashed from a common seed value together with the partition type UUID (and a counter in case multiple
       partitions of the same type are defined), see below. The same is done for all partitions that are
-      created anew. These assignments are done in RAM only, too, the disk is not updated
-      yet.</para></listitem>
+      created anew. These assignments are done in memory only, too, the disk is not updated yet.
+      </para></listitem>
 
       <listitem><para>Similarly, if the disk's volume UUID is all zeroes it is also initialized, also
-      cryptographically hashed from the same common seed value. Also, in RAM only, too.</para></listitem>
+      cryptographically hashed from the same common seed value. This is done in memory only too.
+      </para></listitem>
 
-      <listitem><para>The disk space assigned to new partitions (i.e. what was previously considered free
-      space but is no longer) is now erased. Specifically, all file system signatures are removed, and if the
-      device supports it the <constant>BLKDISCARD</constant> I/O control command is issued to inform the
-      hardware that the space is empty now. In addition any "padding" between partitions and at the end of
-      the device is similarly erased.</para></listitem>
+      <listitem><para>The disk space assigned to new partitions (i.e. what was previously free space) is now
+      erased. Specifically, all file system signatures are removed, and if the device supports it, the
+      <constant>BLKDISCARD</constant> I/O control command is issued to inform the hardware that the space is
+      now empty. In addition any "padding" between partitions and at the end of the device is similarly
+      erased.</para></listitem>
 
       <listitem><para>The new partition table is finally written to disk. The kernel is asked to reread the
       partition table.</para></listitem>
@@ -257,9 +257,9 @@
         <filename>repart.d/*.conf</filename> files, for the machine ID file to use as seed and for the
         <varname>CopyFiles=</varname> and <varname>CopyBlocks=</varname> source files and directories. By
         default when invoked on the regular system this defaults to the host's root file system
-        <filename>/</filename>. If invoked from the initial RAM disk this defaults to
-        <filename>/sysroot/</filename>, so that the tool operates on the configuration and machine ID stored
-        in the root file system later transitioned into itself.</para></listitem>
+        <filename>/</filename>. If invoked from the initrd this defaults to <filename>/sysroot/</filename>,
+        so that the tool operates on the configuration and machine ID stored in the root file system later
+        transitioned into itself.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -313,6 +313,22 @@
       </varlistentry>
 
       <varlistentry>
+        <term><option>--private-key=</option></term>
+
+        <listitem><para>Takes a file system path. Configures the signing key to use when creating verity
+        signature partitions with the <varname>Verity=signature</varname> setting in partition files.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--certificate=</option></term>
+
+        <listitem><para>Takes a file system path. Configures the PEM encoded X.509 certificate to use when
+        creating verity signature partitions with the <varname>Verity=signature</varname> setting in
+        partition files.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><option>--tpm2-device=</option></term>
         <term><option>--tpm2-pcrs=</option></term>
 
@@ -330,6 +346,54 @@
         <listitem><para>Configures a TPM2 signed PCR policy to bind encryption to. See
         <citerefentry><refentrytitle>systemd-cryptenroll</refentrytitle><manvolnum>1</manvolnum></citerefentry>
         for details on these two options.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--split=</option><arg>BOOL</arg></term>
+
+        <listitem><para>Enables generation of split artifacts from partitions configured with
+        <varname>SplitName=</varname>. If enabled, for each partition with <varname>SplitName=</varname> set,
+        a separate output file containing just the contents of that partition is generated. The output
+        filename consists of the loopback filename suffixed with the name configured with
+        <varname>SplitName=</varname>. If the loopback filename ends with <literal>.raw</literal>, the suffix
+        is inserted before the <literal>.raw</literal> extension instead.</para>
+
+        <para>Note that <option>--split</option> is independent from <option>--dry-run</option>. Even if
+        <option>--dry-run</option> is enabled, split artifacts will still be generated from an existing image
+        if <option>--split</option> is enabled.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--include-partitions=</option><arg rep="repeat">PARTITION</arg></term>
+        <term><option>--exclude-partitions=</option><arg rep="repeat">PARTITION</arg></term>
+
+        <listitem><para>These options specify which partition types <command>systemd-repart</command> should
+        operate on. If <option>--include-partitions=</option> is used, all partitions that aren't specified
+        are excluded. If <option>--exclude-partitions=</option> is used, all partitions that are specified
+        are excluded. Both options take a comma separated list of GPT partition type UUIDs or identifiers
+        (see <varname>Type=</varname> in
+        <citerefentry><refentrytitle>repart.d</refentrytitle><manvolnum>5</manvolnum></citerefentry>).
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--defer-partitions=</option><arg rep="repeat">PARTITION</arg></term>
+
+        <listitem><para>This option specifies for which partition types <command>systemd-repart</command>
+        should defer. All partitions that are deferred using this option are still taken into account when
+        calculating the sizes and offsets of other partitions, but aren't actually written to the disk image.
+        The net effect of this option is that if you run <command>systemd-repart</command> again without
+        these options, the missing partitions will be added as if they had not been deferred the first time
+        <command>systemd-repart</command> was executed.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--sector-size=</option><arg>BYTES</arg></term>
+
+        <listitem><para>This option allows configuring the sector size of the image produced by
+        <command>systemd-repart</command>. It takes a value that is a power of <literal>2</literal> between
+        <literal>512</literal> and <literal>4096</literal>. This option is useful when building images for
+        disks that use a different sector size as the disk on which the image is produced.</para></listitem>.
       </varlistentry>
 
       <xi:include href="standard-options.xml" xpointer="help" />

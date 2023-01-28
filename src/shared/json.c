@@ -10,6 +10,7 @@
 
 #include "alloc-util.h"
 #include "errno-util.h"
+#include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "float.h"
@@ -437,6 +438,19 @@ int json_variant_new_base64(JsonVariant **ret, const void *p, size_t n) {
         return json_variant_new_stringn(ret, s, k);
 }
 
+int json_variant_new_base32hex(JsonVariant **ret, const void *p, size_t n) {
+        _cleanup_free_ char *s = NULL;
+
+        assert_return(ret, -EINVAL);
+        assert_return(n == 0 || p, -EINVAL);
+
+        s = base32hexmem(p, n, false);
+        if (!s)
+                return -ENOMEM;
+
+        return json_variant_new_string(ret, s);
+}
+
 int json_variant_new_hex(JsonVariant **ret, const void *p, size_t n) {
         _cleanup_free_ char *s = NULL;
 
@@ -450,8 +464,25 @@ int json_variant_new_hex(JsonVariant **ret, const void *p, size_t n) {
         return json_variant_new_stringn(ret, s, n*2);
 }
 
+int json_variant_new_octescape(JsonVariant **ret, const void *p, size_t n) {
+        _cleanup_free_ char *s = NULL;
+
+        assert_return(ret, -EINVAL);
+        assert_return(n == 0 || p, -EINVAL);
+
+        s = octescape(p, n);
+        if (!s)
+                return -ENOMEM;
+
+        return json_variant_new_string(ret, s);
+}
+
 int json_variant_new_id128(JsonVariant **ret, sd_id128_t id) {
         return json_variant_new_string(ret, SD_ID128_TO_STRING(id));
+}
+
+int json_variant_new_uuid(JsonVariant **ret, sd_id128_t id) {
+        return json_variant_new_string(ret, SD_ID128_TO_UUID_STRING(id));
 }
 
 static void json_variant_set(JsonVariant *a, JsonVariant *b) {
@@ -522,9 +553,34 @@ static void json_variant_copy_source(JsonVariant *v, JsonVariant *from) {
         v->source = json_source_ref(from->source);
 }
 
+static int _json_variant_array_put_element(JsonVariant *array, JsonVariant *element) {
+        assert(array);
+        JsonVariant *w = array + 1 + array->n_elements;
+
+        uint16_t d = json_variant_depth(element);
+        if (d >= DEPTH_MAX) /* Refuse too deep nesting */
+                return -ELNRNG;
+        if (d >= array->depth)
+                array->depth = d + 1;
+        array->n_elements ++;
+
+        *w = (JsonVariant) {
+                .is_embedded = true,
+                .parent = array,
+        };
+
+        json_variant_set(w, element);
+        json_variant_copy_source(w, element);
+
+        if (!json_variant_is_normalized(element))
+                array->normalized = false;
+
+        return 0;
+}
+
 int json_variant_new_array(JsonVariant **ret, JsonVariant **array, size_t n) {
         _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
-        bool normalized = true;
+        int r;
 
         assert_return(ret, -EINVAL);
         if (n == 0) {
@@ -540,32 +596,14 @@ int json_variant_new_array(JsonVariant **ret, JsonVariant **array, size_t n) {
         *v = (JsonVariant) {
                 .n_ref = 1,
                 .type = JSON_VARIANT_ARRAY,
+                .normalized = true,
         };
 
-        for (v->n_elements = 0; v->n_elements < n; v->n_elements++) {
-                JsonVariant *w = v + 1 + v->n_elements,
-                            *c = array[v->n_elements];
-                uint16_t d;
-
-                d = json_variant_depth(c);
-                if (d >= DEPTH_MAX) /* Refuse too deep nesting */
-                        return -ELNRNG;
-                if (d >= v->depth)
-                        v->depth = d + 1;
-
-                *w = (JsonVariant) {
-                        .is_embedded = true,
-                        .parent = v,
-                };
-
-                json_variant_set(w, c);
-                json_variant_copy_source(w, c);
-
-                if (!json_variant_is_normalized(c))
-                        normalized = false;
+        while (v->n_elements < n) {
+                r = _json_variant_array_put_element(v, array[v->n_elements]);
+                if (r < 0)
+                        return r;
         }
-
-        v->normalized = normalized;
 
         *ret = TAKE_PTR(v);
         return 0;
@@ -790,6 +828,19 @@ static void json_variant_free_inner(JsonVariant *v, bool force_sensitive) {
 
         if (sensitive)
                 explicit_bzero_safe(v, json_variant_size(v));
+}
+
+static unsigned json_variant_n_ref(const JsonVariant *v) {
+        /* Return the number of references to v.
+         * 0  => NULL or not a regular object or embedded.
+         * >0 => number of references
+         */
+
+        if (!v || !json_variant_is_regular(v) || v->is_embedded)
+                return 0;
+
+        assert(v->n_ref > 0);
+        return v->n_ref;
 }
 
 JsonVariant *json_variant_ref(JsonVariant *v) {
@@ -1758,9 +1809,13 @@ int json_variant_format(JsonVariant *v, JsonFormatFlags flags, char **ret) {
         return (int) sz - 1;
 }
 
-void json_variant_dump(JsonVariant *v, JsonFormatFlags flags, FILE *f, const char *prefix) {
-        if (!v)
-                return;
+int json_variant_dump(JsonVariant *v, JsonFormatFlags flags, FILE *f, const char *prefix) {
+        if (!v) {
+                if (flags & JSON_FORMAT_EMPTY_ARRAY)
+                        v = JSON_VARIANT_MAGIC_EMPTY_ARRAY;
+                else
+                        return 0;
+        }
 
         if (!f)
                 f = stdout;
@@ -1786,7 +1841,8 @@ void json_variant_dump(JsonVariant *v, JsonFormatFlags flags, FILE *f, const cha
                 fputc('\n', f); /* In case of SSE add a second newline */
 
         if (flags & JSON_FORMAT_FLUSH)
-                fflush(f);
+                return fflush_and_check(f);
+        return 0;
 }
 
 int json_variant_filter(JsonVariant **v, char **to_remove) {
@@ -2037,36 +2093,82 @@ int json_variant_append_array(JsonVariant **v, JsonVariant *element) {
         assert(v);
         assert(element);
 
-
         if (!*v || json_variant_is_null(*v))
                 blank = true;
-        else if (!json_variant_is_array(*v))
-                return -EINVAL;
-        else
+        else if (json_variant_is_array(*v))
                 blank = json_variant_elements(*v) == 0;
+        else
+                return -EINVAL;
 
-        if (blank)
+        if (blank) {
                 r = json_variant_new_array(&nv, (JsonVariant*[]) { element }, 1);
-        else {
-                _cleanup_free_ JsonVariant **array = new(JsonVariant*, json_variant_elements(*v) + 1);
+                if (r < 0)
+                        return r;
+        } else if (json_variant_n_ref(*v) == 1) {
+                /* Let's bump the reference count on element. We can't do the realloc if we're appending *v
+                 * to itself, or one of the objects embedded in *v to *v. If the reference count grows, we
+                 * need to fall back to the other method below. */
+
+                _unused_ _cleanup_(json_variant_unrefp) JsonVariant *dummy = json_variant_ref(element);
+                if (json_variant_n_ref(*v) == 1) {
+                        /* We hold the only reference. Let's mutate the object. */
+                        size_t size = json_variant_elements(*v);
+                        void *old = *v;
+
+                        if (!GREEDY_REALLOC(*v, size + 1 + 1))
+                                return -ENOMEM;
+
+                        if (old != *v)
+                                /* Readjust the parent pointers to the new address */
+                                for (size_t i = 1; i < size; i++)
+                                        (*v)[1 + i].parent = *v;
+
+                        return _json_variant_array_put_element(*v, element);
+                }
+        }
+
+        if (!blank) {
+                size_t size = json_variant_elements(*v);
+
+                _cleanup_free_ JsonVariant **array = new(JsonVariant*, size + 1);
                 if (!array)
                         return -ENOMEM;
 
-                size_t size = json_variant_elements(*v);
                 for (size_t i = 0; i < size; i++)
                         array[i] = json_variant_by_index(*v, i);
 
                 array[size] = element;
 
                 r = json_variant_new_array(&nv, array, size + 1);
+                if (r < 0)
+                        return r;
         }
-        if (r < 0)
-                return r;
 
         json_variant_propagate_sensitive(*v, nv);
         JSON_VARIANT_REPLACE(*v, TAKE_PTR(nv));
 
         return 0;
+}
+
+JsonVariant *json_variant_find(JsonVariant *haystack, JsonVariant *needle) {
+        JsonVariant *i;
+
+        /* Find a json object in an array. Returns NULL if not found, or if the array is not actually an array. */
+
+        JSON_VARIANT_ARRAY_FOREACH(i, haystack)
+                if (json_variant_equal(i, needle))
+                        return i;
+
+        return NULL;
+}
+
+int json_variant_append_array_nodup(JsonVariant **v, JsonVariant *element) {
+        assert(v);
+
+        if (json_variant_find(*v, element))
+                return 0;
+
+        return json_variant_append_array(v, element);
 }
 
 int json_variant_strv(JsonVariant *v, char ***ret) {
@@ -3148,18 +3250,54 @@ finish:
         return r;
 }
 
-int json_parse(const char *input, JsonParseFlags flags, JsonVariant **ret, unsigned *ret_line, unsigned *ret_column) {
-        return json_parse_internal(&input, NULL, flags, ret, ret_line, ret_column, false);
+int json_parse_with_source(
+                const char *input,
+                const char *source,
+                JsonParseFlags flags,
+                JsonVariant **ret,
+                unsigned *ret_line,
+                unsigned *ret_column) {
+
+        _cleanup_(json_source_unrefp) JsonSource *s = NULL;
+
+        if (source) {
+                s = json_source_new(source);
+                if (!s)
+                        return -ENOMEM;
+        }
+
+        return json_parse_internal(&input, s, flags, ret, ret_line, ret_column, false);
 }
 
-int json_parse_continue(const char **p, JsonParseFlags flags, JsonVariant **ret, unsigned *ret_line, unsigned *ret_column) {
-        return json_parse_internal(p, NULL, flags, ret, ret_line, ret_column, true);
+int json_parse_with_source_continue(
+                const char **p,
+                const char *source,
+                JsonParseFlags flags,
+                JsonVariant **ret,
+                unsigned *ret_line,
+                unsigned *ret_column) {
+
+        _cleanup_(json_source_unrefp) JsonSource *s = NULL;
+
+        if (source) {
+                s = json_source_new(source);
+                if (!s)
+                        return -ENOMEM;
+        }
+
+        return json_parse_internal(p, s, flags, ret, ret_line, ret_column, true);
 }
 
-int json_parse_file_at(FILE *f, int dir_fd, const char *path, JsonParseFlags flags, JsonVariant **ret, unsigned *ret_line, unsigned *ret_column) {
-        _cleanup_(json_source_unrefp) JsonSource *source = NULL;
+int json_parse_file_at(
+                FILE *f,
+                int dir_fd,
+                const char *path,
+                JsonParseFlags flags,
+                JsonVariant **ret,
+                unsigned *ret_line,
+                unsigned *ret_column) {
+
         _cleanup_free_ char *text = NULL;
-        const char *p;
         int r;
 
         if (f)
@@ -3171,14 +3309,10 @@ int json_parse_file_at(FILE *f, int dir_fd, const char *path, JsonParseFlags fla
         if (r < 0)
                 return r;
 
-        if (path) {
-                source = json_source_new(path);
-                if (!source)
-                        return -ENOMEM;
-        }
+        if (isempty(text))
+                return -ENODATA;
 
-        p = text;
-        return json_parse_internal(&p, source, flags, ret, ret_line, ret_column, false);
+        return json_parse_with_source(text, path, flags, ret, ret_line, ret_column);
 }
 
 int json_buildv(JsonVariant **ret, va_list ap) {
@@ -3543,7 +3677,10 @@ int json_buildv(JsonVariant **ret, va_list ap) {
                         break;
                 }
 
-                case _JSON_BUILD_BASE64: {
+                case _JSON_BUILD_BASE64:
+                case _JSON_BUILD_BASE32HEX:
+                case _JSON_BUILD_HEX:
+                case _JSON_BUILD_OCTESCAPE: {
                         const void *p;
                         size_t n;
 
@@ -3556,7 +3693,10 @@ int json_buildv(JsonVariant **ret, va_list ap) {
                         n = va_arg(ap, size_t);
 
                         if (current->n_suppress == 0) {
-                                r = json_variant_new_base64(&add, p, n);
+                                r = command == _JSON_BUILD_BASE64    ? json_variant_new_base64(&add, p, n) :
+                                    command == _JSON_BUILD_BASE32HEX ? json_variant_new_base32hex(&add, p, n) :
+                                    command == _JSON_BUILD_HEX       ? json_variant_new_hex(&add, p, n) :
+                                                                       json_variant_new_octescape(&add, p, n);
                                 if (r < 0)
                                         goto finish;
                         }
@@ -3573,37 +3713,8 @@ int json_buildv(JsonVariant **ret, va_list ap) {
                         break;
                 }
 
-                case _JSON_BUILD_HEX: {
-                        const void *p;
-                        size_t n;
-
-                        if (!IN_SET(current->expect, EXPECT_TOPLEVEL, EXPECT_OBJECT_VALUE, EXPECT_ARRAY_ELEMENT)) {
-                                r = -EINVAL;
-                                goto finish;
-                        }
-
-                        p = va_arg(ap, const void *);
-                        n = va_arg(ap, size_t);
-
-                        if (current->n_suppress == 0) {
-                                r = json_variant_new_hex(&add, p, n);
-                                if (r < 0)
-                                        goto finish;
-                        }
-
-                        n_subtract = 1;
-
-                        if (current->expect == EXPECT_TOPLEVEL)
-                                current->expect = EXPECT_END;
-                        else if (current->expect == EXPECT_OBJECT_VALUE)
-                                current->expect = EXPECT_OBJECT_KEY;
-                        else
-                                assert(current->expect == EXPECT_ARRAY_ELEMENT);
-
-                        break;
-                }
-
-                case _JSON_BUILD_ID128: {
+                case _JSON_BUILD_ID128:
+                case _JSON_BUILD_UUID: {
                         const sd_id128_t *id;
 
                         if (!IN_SET(current->expect, EXPECT_TOPLEVEL, EXPECT_OBJECT_VALUE, EXPECT_ARRAY_ELEMENT)) {
@@ -3614,7 +3725,9 @@ int json_buildv(JsonVariant **ret, va_list ap) {
                         assert_se(id = va_arg(ap, sd_id128_t*));
 
                         if (current->n_suppress == 0) {
-                                r = json_variant_new_id128(&add, *id);
+                                r = command == _JSON_BUILD_ID128 ?
+                                        json_variant_new_id128(&add, *id) :
+                                        json_variant_new_uuid(&add, *id);
                                 if (r < 0)
                                         goto finish;
                         }
@@ -4208,6 +4321,19 @@ int json_log_internal(
                                 NULL);
 }
 
+static void *dispatch_userdata(const JsonDispatch *p, void *userdata) {
+
+        /* When the the userdata pointer is passed in as NULL, then we'll just use the offset as a literal
+         * address, and convert it to a pointer.  Note that might as well just add the offset to the NULL
+         * pointer, but UndefinedBehaviourSanitizer doesn't like pointer arithmetics based on NULL pointers,
+         * hence we code this explicitly here. */
+
+        if (userdata)
+                return (uint8_t*) userdata + p->offset;
+
+        return SIZE_TO_PTR(p->offset);
+}
+
 int json_dispatch(JsonVariant *v, const JsonDispatch table[], JsonDispatchCallback bad, JsonDispatchFlags flags, void *userdata) {
         size_t m;
         int r, done = 0;
@@ -4271,7 +4397,7 @@ int json_dispatch(JsonVariant *v, const JsonDispatch table[], JsonDispatchCallba
                         found[p-table] = true;
 
                         if (p->callback) {
-                                r = p->callback(json_variant_string(key), value, merged_flags, (uint8_t*) userdata + p->offset);
+                                r = p->callback(json_variant_string(key), value, merged_flags, dispatch_userdata(p, userdata));
                                 if (r < 0) {
                                         if (merged_flags & JSON_PERMISSIVE)
                                                 continue;
@@ -4401,6 +4527,36 @@ int json_dispatch_int32(const char *name, JsonVariant *variant, JsonDispatchFlag
                 return json_log(variant, flags, SYNTHETIC_ERRNO(ERANGE), "JSON field '%s' out of bounds.", strna(name));
 
         *i = (int32_t) json_variant_integer(variant);
+        return 0;
+}
+
+int json_dispatch_int16(const char *name, JsonVariant *variant, JsonDispatchFlags flags, void *userdata) {
+        int16_t *i = ASSERT_PTR(userdata);
+
+        assert(variant);
+
+        if (!json_variant_is_integer(variant))
+                return json_log(variant, flags, SYNTHETIC_ERRNO(EINVAL), "JSON field '%s' is not an integer.", strna(name));
+
+        if (json_variant_integer(variant) < INT16_MIN || json_variant_integer(variant) > INT16_MAX)
+                return json_log(variant, flags, SYNTHETIC_ERRNO(ERANGE), "JSON field '%s' out of bounds.", strna(name));
+
+        *i = (int16_t) json_variant_integer(variant);
+        return 0;
+}
+
+int json_dispatch_uint16(const char *name, JsonVariant *variant, JsonDispatchFlags flags, void *userdata) {
+        uint16_t *i = ASSERT_PTR(userdata);
+
+        assert(variant);
+
+        if (!json_variant_is_unsigned(variant))
+                return json_log(variant, flags, SYNTHETIC_ERRNO(EINVAL), "JSON field '%s' is not an unsigned integer.", strna(name));
+
+        if (json_variant_unsigned(variant) > UINT16_MAX)
+                return json_log(variant, flags, SYNTHETIC_ERRNO(ERANGE), "JSON field '%s' out of bounds.", strna(name));
+
+        *i = (uint16_t) json_variant_unsigned(variant);
         return 0;
 }
 

@@ -331,11 +331,11 @@
 
       <para>For example, target units will complement all configured dependencies of type
       <varname>Wants=</varname> or <varname>Requires=</varname> with dependencies of type
-      <varname>After=</varname> unless <varname>DefaultDependencies=no</varname> is set in the
-      specified units. See
+      <varname>After=</varname>. See
       <citerefentry><refentrytitle>systemd.target</refentrytitle><manvolnum>5</manvolnum></citerefentry>
-      for details. Note that this behavior can be turned off by setting
-      <varname>DefaultDependencies=no</varname>.</para>
+      for details. Note that this behavior can be opted out by setting
+      <varname>DefaultDependencies=no</varname> in the specified units, or it can be selectively
+      overridden via an explicit <varname>Before=</varname> dependency.</para>
     </refsect2>
   </refsect1>
 
@@ -1235,27 +1235,32 @@
         <varlistentry>
           <term><varname>ConditionFirmware=</varname></term>
 
-          <listitem><para>Check whether the system's firmware is of a certain type. Multiple values are possible.</para>
+          <listitem><para>Check whether the system's firmware is of a certain type. The following values are
+          possible:</para>
 
-          <para><literal>uefi</literal> for systems with EFI.</para>
+          <itemizedlist>
+            <listitem><para><literal>uefi</literal> matches systems with EFI.</para></listitem>
 
-          <para><literal>device-tree</literal> for systems with a device tree.</para>
+            <listitem><para><literal>device-tree</literal> matches systems with a device tree.
+            </para></listitem>
 
-          <para><literal>device-tree-compatible(<replaceable>value</replaceable>)</literal> for systems with a device tree that is compatible to
-          <literal>value</literal>.</para>
+            <listitem><para><literal>device-tree-compatible(<replaceable>value</replaceable>)</literal>
+            matches systems with a device tree that are compatible with <literal>value</literal>.
+            </para></listitem>
 
-          <para><literal>smbios-field(<replaceable>field</replaceable> <replaceable>operator</replaceable>
-          <replaceable>value</replaceable>)</literal> for systems with a SMBIOS field containing a certain
-          value.  <literal>field</literal> is the name of the SMBIOS field exposed as
-          <literal>sysfs</literal> attribute file below <filename>/sys/class/dmi/id/</filename>.
-          <literal>operator</literal> is one of <literal>&lt;</literal>, <literal>&lt;=</literal>,
-          <literal>&gt;=</literal>, <literal>&gt;</literal>, <literal>==</literal>,
-          <literal>&lt;&gt;</literal> for version comparison, <literal>=</literal> and <literal>!=</literal>
-          for literal string comparison, or <literal>$=</literal>, <literal>!$=</literal> for shell-style
-          glob comparison.  <literal>value</literal> is the expected value of the SMBIOS field value
-          (possibly containing shell style globs in case <literal>$=</literal>/<literal>!$=</literal> is
-          used).</para>
-          </listitem>
+            <listitem><para><literal>smbios-field(<replaceable>field</replaceable>
+            <replaceable>operator</replaceable> <replaceable>value</replaceable>)</literal> matches systems
+            with a SMBIOS field containing a certain value. <replaceable>field</replaceable> is the name of
+            the SMBIOS field exposed as <literal>sysfs</literal> attribute file below
+            <filename>/sys/class/dmi/id/</filename>. <replaceable>operator</replaceable> is one of
+            <literal>&lt;</literal>, <literal>&lt;=</literal>, <literal>&gt;=</literal>,
+            <literal>&gt;</literal>, <literal>==</literal>, <literal>&lt;&gt;</literal> for version
+            comparisons, <literal>=</literal> and <literal>!=</literal> for literal string comparisons, or
+            <literal>$=</literal>, <literal>!$=</literal> for shell-style glob comparisons.
+            <replaceable>value</replaceable> is the expected value of the SMBIOS field value (possibly
+            containing shell style globs in case <literal>$=</literal>/<literal>!$=</literal> is used).
+            </para></listitem>
+          </itemizedlist></listitem>
         </varlistentry>
 
         <varlistentry>
@@ -1280,6 +1285,7 @@
           <literal>bhyve</literal>,
           <literal>qnx</literal>,
           <literal>apple</literal>,
+          <literal>sre</literal>,
           <literal>openvz</literal>,
           <literal>lxc</literal>,
           <literal>lxc-libvirt</literal>,
@@ -1332,13 +1338,13 @@
           <term><varname>ConditionKernelVersion=</varname></term>
 
           <listitem><para><varname>ConditionKernelVersion=</varname> may be used to check whether the kernel
-          version (as reported by <command>uname -r</command>) matches a certain expression (or if prefixed
-          with the exclamation mark does not match it). The argument must be a list of (potentially quoted)
-          expressions.  Each expression starts with one of <literal>=</literal> or <literal>!=</literal> for
+          version (as reported by <command>uname -r</command>) matches a certain expression, or if prefixed
+          with the exclamation mark, does not match. The argument must be a list of (potentially quoted)
+          expressions. Each expression starts with one of <literal>=</literal> or <literal>!=</literal> for
           string comparisons, <literal>&lt;</literal>, <literal>&lt;=</literal>, <literal>==</literal>,
-          <literal>&lt;&gt;</literal>, <literal>&gt;=</literal>, <literal>&gt;</literal> for a relative
-          version comparison, or <literal>$=</literal>, <literal>!$=</literal> for a shell-style glob
-          match. If no operator is specified <literal>$=</literal> is implied.</para>
+          <literal>&lt;&gt;</literal>, <literal>&gt;=</literal>, <literal>&gt;</literal> for version
+          comparisons, or <literal>$=</literal>, <literal>!$=</literal> for a shell-style glob match. If no
+          operator is specified, <literal>$=</literal> is implied.</para>
 
           <para>Note that using the kernel version string is an unreliable way to determine which features
           are supported by a kernel, because of the widespread practice of backporting drivers, features, and
@@ -1455,15 +1461,18 @@
           <term><varname>ConditionFirstBoot=</varname></term>
 
           <listitem><para>Takes a boolean argument. This condition may be used to conditionalize units on
-          whether the system is booting up for the first time.  This roughly means that <filename>/etc/</filename>
-          is unpopulated (for details, see "First Boot Semantics" in
+          whether the system is booting up for the first time. This roughly means that <filename>/etc/</filename>
+          was unpopulated when the system started booting (for details, see "First Boot Semantics" in
           <citerefentry><refentrytitle>machine-id</refentrytitle><manvolnum>5</manvolnum></citerefentry>).
-          This may be used to populate <filename>/etc/</filename> on the first boot after factory reset, or
-          when a new system instance boots up for the first time.</para>
+          First boot is considered finished (this condition will evaluate as false) after the manager
+          has finished the startup phase.</para>
+
+          <para>This condition may be used to populate <filename>/etc/</filename> on the first boot after
+          factory reset, or when a new system instance boots up for the first time.</para>
 
           <para>For robustness, units with <varname>ConditionFirstBoot=yes</varname> should order themselves
           before <filename>first-boot-complete.target</filename> and pull in this passive target with
-          <varname>Wants=</varname>.  This ensures that in a case of an aborted first boot, these units will
+          <varname>Wants=</varname>. This ensures that in a case of an aborted first boot, these units will
           be re-run during the next system startup.</para>
 
           <para>If the <varname>systemd.condition-first-boot=</varname> option is specified on the kernel
@@ -1737,6 +1746,7 @@
           <term><varname>AssertHost=</varname></term>
           <term><varname>AssertKernelCommandLine=</varname></term>
           <term><varname>AssertKernelVersion=</varname></term>
+          <term><varname>AssertCredential=</varname></term>
           <term><varname>AssertEnvironment=</varname></term>
           <term><varname>AssertSecurity=</varname></term>
           <term><varname>AssertCapability=</varname></term>
@@ -2319,7 +2329,7 @@ PrivateTmp=yes</programlisting>
       <title>Top level drop-ins with template units</title>
 
       <para>Top level per-type drop-ins can be used to change some aspect of
-      all units of a particular type. For example by creating the
+      all units of a particular type. For example, by creating the
       <filename index='false'>/etc/systemd/system/service.d/</filename>
       directory with a drop-in file, the contents of the drop-in file can be
       applied to all service units. We can take this further by having the

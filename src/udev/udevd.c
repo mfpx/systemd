@@ -32,6 +32,7 @@
 #include "cgroup-setup.h"
 #include "cgroup-util.h"
 #include "cpu-set-util.h"
+#include "daemon-util.h"
 #include "dev-setup.h"
 #include "device-monitor-private.h"
 #include "device-private.h"
@@ -330,9 +331,7 @@ static void manager_exit(Manager *manager) {
 
         manager->exit = true;
 
-        sd_notify(false,
-                  "STOPPING=1\n"
-                  "STATUS=Starting shutdown...");
+        (void) sd_notify(/* unset= */ false, NOTIFY_STOPPING);
 
         /* close sources of new events and discard buffered events */
         manager->ctrl = udev_ctrl_unref(manager->ctrl);
@@ -350,7 +349,7 @@ static void manager_exit(Manager *manager) {
 static void notify_ready(void) {
         int r;
 
-        r = sd_notifyf(false,
+        r = sd_notifyf(/* unset= */ false,
                        "READY=1\n"
                        "STATUS=Processing with %u children at max", arg_children_max);
         if (r < 0)
@@ -375,23 +374,33 @@ static void manager_reload(Manager *manager, bool force) {
         mac_selinux_maybe_reload();
 
         /* Nothing changed. It is not necessary to reload. */
-        if (!udev_rules_should_reload(manager->rules) && !udev_builtin_should_reload())
-                return;
+        if (!udev_rules_should_reload(manager->rules) && !udev_builtin_should_reload()) {
 
-        sd_notify(false,
-                  "RELOADING=1\n"
-                  "STATUS=Flushing configuration...");
+                if (!force)
+                        return;
 
-        manager_kill_workers(manager, false);
+                /* If we eat this up, then tell our service manager to just continue */
+                (void) sd_notifyf(/* unset= */ false,
+                                  "RELOADING=1\n"
+                                  "STATUS=Skipping configuration reloading, nothing changed.\n"
+                                  "MONOTONIC_USEC=" USEC_FMT, now(CLOCK_MONOTONIC));
+        } else {
+                (void) sd_notifyf(/* unset= */ false,
+                                  "RELOADING=1\n"
+                                  "STATUS=Flushing configuration...\n"
+                                  "MONOTONIC_USEC=" USEC_FMT, now(CLOCK_MONOTONIC));
 
-        udev_builtin_exit();
-        udev_builtin_init();
+                manager_kill_workers(manager, false);
 
-        r = udev_rules_load(&rules, arg_resolve_name_timing);
-        if (r < 0)
-                log_warning_errno(r, "Failed to read udev rules, using the previously loaded rules, ignoring: %m");
-        else
-                udev_rules_free_and_replace(manager->rules, rules);
+                udev_builtin_exit();
+                udev_builtin_init();
+
+                r = udev_rules_load(&rules, arg_resolve_name_timing);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to read udev rules, using the previously loaded rules, ignoring: %m");
+                else
+                        udev_rules_free_and_replace(manager->rules, rules);
+        }
 
         notify_ready();
 }
@@ -473,13 +482,6 @@ static int device_get_whole_disk(sd_device *dev, sd_device **ret_device, const c
         if (device_for_action(dev, SD_DEVICE_REMOVE))
                 goto irrelevant;
 
-        r = sd_device_get_subsystem(dev, &val);
-        if (r < 0)
-                return log_device_debug_errno(dev, r, "Failed to get subsystem: %m");
-
-        if (!streq(val, "block"))
-                goto irrelevant;
-
         r = sd_device_get_sysname(dev, &val);
         if (r < 0)
                 return log_device_debug_errno(dev, r, "Failed to get sysname: %m");
@@ -493,20 +495,15 @@ static int device_get_whole_disk(sd_device *dev, sd_device **ret_device, const c
         if (STARTSWITH_SET(val, "dm-", "md", "drbd"))
                 goto irrelevant;
 
-        r = sd_device_get_devtype(dev, &val);
-        if (r < 0 && r != -ENOENT)
-                return log_device_debug_errno(dev, r, "Failed to get devtype: %m");
-        if (r >= 0 && streq(val, "partition")) {
-                r = sd_device_get_parent(dev, &dev);
-                if (r == -ENOENT) /* The device may be already removed. */
-                        goto irrelevant;
-                if (r < 0)
-                        return log_device_debug_errno(dev, r, "Failed to get parent device: %m");
-        }
+        r = block_device_get_whole_disk(dev, &dev);
+        if (IN_SET(r,
+                   -ENOTBLK, /* The device is not a block device. */
+                   -ENODEV   /* The whole disk device was not found, it may already be removed. */))
+                goto irrelevant;
+        if (r < 0)
+                return log_device_debug_errno(dev, r, "Failed to get whole disk device: %m");
 
         r = sd_device_get_devname(dev, &val);
-        if (r == -ENOENT)
-                goto irrelevant;
         if (r < 0)
                 return log_device_debug_errno(dev, r, "Failed to get devname: %m");
 
@@ -525,7 +522,7 @@ irrelevant:
 }
 
 static int worker_lock_whole_disk(sd_device *dev, int *ret_fd) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         sd_device *dev_whole_disk;
         const char *val;
         int r;
@@ -544,7 +541,7 @@ static int worker_lock_whole_disk(sd_device *dev, int *ret_fd) {
         if (r == 0)
                 goto nolock;
 
-        fd = sd_device_open(dev_whole_disk, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+        fd = sd_device_open(dev_whole_disk, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
         if (fd < 0) {
                 bool ignore = ERRNO_IS_DEVICE_ABSENT(fd);
 
@@ -562,12 +559,12 @@ static int worker_lock_whole_disk(sd_device *dev, int *ret_fd) {
         return 1;
 
 nolock:
-        *ret_fd = -1;
+        *ret_fd = -EBADF;
         return 0;
 }
 
 static int worker_mark_block_device_read_only(sd_device *dev) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *val;
         int state = 1, r;
 
@@ -599,7 +596,7 @@ static int worker_mark_block_device_read_only(sd_device *dev) {
         if (STARTSWITH_SET(val, "dm-", "md", "drbd", "loop", "nbd", "zram"))
                 return 0;
 
-        fd = sd_device_open(dev, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+        fd = sd_device_open(dev, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
         if (fd < 0)
                 return log_device_debug_errno(dev, fd, "Failed to open '%s', ignoring: %m", val);
 
@@ -612,7 +609,7 @@ static int worker_mark_block_device_read_only(sd_device *dev) {
 
 static int worker_process_device(Manager *manager, sd_device *dev) {
         _cleanup_(udev_event_freep) UdevEvent *udev_event = NULL;
-        _cleanup_close_ int fd_lock = -1;
+        _cleanup_close_ int fd_lock = -EBADF;
         int r;
 
         assert(manager);
@@ -654,7 +651,11 @@ static int worker_process_device(Manager *manager, sd_device *dev) {
                 /* in case rtnl was initialized */
                 manager->rtnl = sd_netlink_ref(udev_event->rtnl);
 
-        udev_event_process_inotify_watch(udev_event, manager->inotify_fd);
+        if (udev_event->inotify_watch) {
+                r = udev_watch_begin(manager->inotify_fd, dev);
+                if (r < 0 && r != -ENOENT) /* The device may be already removed, ignore -ENOENT. */
+                        log_device_warning_errno(dev, r, "Failed to add inotify watch, ignoring: %m");
+        }
 
         log_device_uevent(dev, "Device processed");
         return 0;
@@ -725,8 +726,6 @@ static int worker_main(Manager *_manager, sd_device_monitor *monitor, sd_device 
         r = sd_device_monitor_start(monitor, worker_device_monitor_handler, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to start device monitor: %m");
-
-        (void) sd_event_source_set_description(sd_device_monitor_get_event_source(monitor), "worker-device-monitor");
 
         /* Process first device */
         (void) worker_device_monitor_handler(monitor, dev, manager);
@@ -1374,52 +1373,44 @@ static int synthesize_change_one(sd_device *dev, sd_device *target) {
 }
 
 static int synthesize_change(sd_device *dev) {
-        const char *subsystem, *sysname, *devtype;
-        int r;
-
-        r = sd_device_get_subsystem(dev, &subsystem);
-        if (r < 0)
-                return r;
-
-        r = sd_device_get_devtype(dev, &devtype);
-        if (r < 0)
-                return r;
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        bool part_table_read;
+        const char *sysname;
+        sd_device *d;
+        int r, k;
 
         r = sd_device_get_sysname(dev, &sysname);
         if (r < 0)
                 return r;
 
-        if (streq_ptr(subsystem, "block") &&
-            streq_ptr(devtype, "disk") &&
-            !startswith(sysname, "dm-")) {
-                _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
-                bool part_table_read;
-                sd_device *d;
+        if (startswith(sysname, "dm-") || block_device_is_whole_disk(dev) <= 0)
+                return synthesize_change_one(dev, dev);
 
-                r = blockdev_reread_partition_table(dev);
-                if (r < 0)
-                        log_device_debug_errno(dev, r, "Failed to re-read partition table, ignoring: %m");
-                part_table_read = r >= 0;
+        r = blockdev_reread_partition_table(dev);
+        if (r < 0)
+                log_device_debug_errno(dev, r, "Failed to re-read partition table, ignoring: %m");
+        part_table_read = r >= 0;
 
-                /* search for partitions */
-                r = partition_enumerator_new(dev, &e);
-                if (r < 0)
-                        return r;
+        /* search for partitions */
+        r = partition_enumerator_new(dev, &e);
+        if (r < 0)
+                return r;
 
-                /* We have partitions and re-read the table, the kernel already sent out a "change"
-                 * event for the disk, and "remove/add" for all partitions. */
-                if (part_table_read && sd_device_enumerator_get_device_first(e))
-                        return 0;
+        /* We have partitions and re-read the table, the kernel already sent out a "change"
+         * event for the disk, and "remove/add" for all partitions. */
+        if (part_table_read && sd_device_enumerator_get_device_first(e))
+                return 0;
 
-                /* We have partitions but re-reading the partition table did not work, synthesize
-                 * "change" for the disk and all partitions. */
-                (void) synthesize_change_one(dev, dev);
-                FOREACH_DEVICE(e, d)
-                        (void) synthesize_change_one(dev, d);
-        } else
-                (void) synthesize_change_one(dev, dev);
+        /* We have partitions but re-reading the partition table did not work, synthesize
+         * "change" for the disk and all partitions. */
+        r = synthesize_change_one(dev, dev);
+        FOREACH_DEVICE(e, d) {
+                k = synthesize_change_one(dev, d);
+                if (k < 0 && r >= 0)
+                        r = k;
+        }
 
-        return 0;
+        return r;
 }
 
 static int on_inotify(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
@@ -1579,7 +1570,7 @@ static int on_post(sd_event_source *s, void *userdata) {
 }
 
 static int listen_fds(int *ret_ctrl, int *ret_netlink) {
-        int ctrl_fd = -1, netlink_fd = -1;
+        int ctrl_fd = -EBADF, netlink_fd = -EBADF;
         int fd, n;
 
         assert(ret_ctrl);
@@ -1828,7 +1819,7 @@ static int create_subcgroup(char **ret) {
         }
 
         r = cg_get_xattr_bool(SYSTEMD_CGROUP_CONTROLLER, cgroup, "trusted.delegate");
-        if (IN_SET(r, 0, -ENODATA))
+        if (r == 0 || (r < 0 && ERRNO_IS_XATTR_ABSENT(r)))
                 return log_debug_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "The cgroup %s is not delegated to us.", cgroup);
         if (r < 0)
                 return log_debug_errno(r, "Failed to read trusted.delegate attribute: %m");
@@ -1865,8 +1856,8 @@ static int manager_new(Manager **ret, int fd_ctrl, int fd_uevent) {
                 return log_oom();
 
         *manager = (Manager) {
-                .inotify_fd = -1,
-                .worker_watch = { -1, -1 },
+                .inotify_fd = -EBADF,
+                .worker_watch = PIPE_EBADF,
                 .cgroup = TAKE_PTR(cgroup),
         };
 
@@ -1977,8 +1968,6 @@ static int main_loop(Manager *manager) {
         if (r < 0)
                 return log_error_errno(r, "Failed to start device monitor: %m");
 
-        (void) sd_event_source_set_description(sd_device_monitor_get_event_source(manager->monitor), "device-monitor");
-
         r = sd_event_add_io(manager->event, NULL, fd_worker, EPOLLIN, on_worker, manager);
         if (r < 0)
                 return log_error_errno(r, "Failed to create worker event source: %m");
@@ -2005,15 +1994,13 @@ static int main_loop(Manager *manager) {
         if (r < 0)
                 log_error_errno(r, "Event loop failed: %m");
 
-        sd_notify(false,
-                  "STOPPING=1\n"
-                  "STATUS=Shutting down...");
+        (void) sd_notify(/* unset= */ false, NOTIFY_STOPPING);
         return r;
 }
 
 int run_udevd(int argc, char *argv[]) {
         _cleanup_(manager_freep) Manager *manager = NULL;
-        int fd_ctrl = -1, fd_uevent = -1;
+        int fd_ctrl = -EBADF, fd_uevent = -EBADF;
         int r;
 
         log_set_target(LOG_TARGET_AUTO);

@@ -461,6 +461,9 @@ struct Manager {
         struct restrict_fs_bpf *restrict_fs;
 
         char *default_smack_process_label;
+
+        /* Allow users to configure a rate limit for Reload() operations */
+        RateLimit reload_ratelimit;
 };
 
 static inline usec_t manager_default_timeout_abort_usec(Manager *m) {
@@ -494,8 +497,8 @@ Unit *manager_get_unit(Manager *m, const char *name);
 int manager_get_job_from_dbus_path(Manager *m, const char *s, Job **_j);
 
 bool manager_unit_cache_should_retry_load(Unit *u);
-int manager_load_unit_prepare(Manager *m, const char *name, const char *path, sd_bus_error *e, Unit **_ret);
-int manager_load_unit(Manager *m, const char *name, const char *path, sd_bus_error *e, Unit **_ret);
+int manager_load_unit_prepare(Manager *m, const char *name, const char *path, sd_bus_error *e, Unit **ret);
+int manager_load_unit(Manager *m, const char *name, const char *path, sd_bus_error *e, Unit **ret);
 int manager_load_startable_unit_or_warn(Manager *m, const char *name, const char *path, Unit **ret);
 int manager_load_unit_from_dbus_path(Manager *m, const char *s, sd_bus_error *e, Unit **_u);
 
@@ -535,6 +538,7 @@ void manager_send_unit_plymouth(Manager *m, Unit *u);
 bool manager_unit_inactive_or_pending(Manager *m, const char *name);
 
 void manager_check_finished(Manager *m);
+void manager_send_reloading(Manager *m);
 
 void disable_printk_ratelimit(void);
 void manager_recheck_dbus(Manager *m);

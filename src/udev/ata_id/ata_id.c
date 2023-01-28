@@ -162,8 +162,8 @@ static int disk_identify_command(
                         return ret;
         }
 
-        if (!(sense[0] == 0x72 && desc[0] == 0x9 && desc[1] == 0x0c) &&
-                !(sense[0] == 0x70 && sense[12] == 0x00 && sense[13] == 0x1d)) {
+        if (!((sense[0] & 0x7f) == 0x72 && desc[0] == 0x9 && desc[1] == 0x0c) &&
+                !((sense[0] & 0x7f) == 0x70 && sense[12] == 0x00 && sense[13] == 0x1d)) {
                 errno = EIO;
                 return -1;
         }
@@ -240,7 +240,7 @@ static int disk_identify_packet_device_command(
                         return ret;
         }
 
-        if (!(sense[0] == 0x72 && desc[0] == 0x9 && desc[1] == 0x0c)) {
+        if (!((sense[0] & 0x7f) == 0x72 && desc[0] == 0x9 && desc[1] == 0x0c)) {
                 errno = EIO;
                 return -1;
         }
@@ -399,7 +399,7 @@ int main(int argc, char *argv[]) {
         char revision[9];
         const char *node = NULL;
         int export = 0;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         uint16_t word;
         int is_packet_device = 0;
         static const struct option options[] = {
@@ -439,7 +439,7 @@ int main(int argc, char *argv[]) {
                 return 1;
         }
 
-        fd = open(node, O_RDONLY|O_NONBLOCK|O_CLOEXEC);
+        fd = open(node, O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOCTTY);
         if (fd < 0) {
                 log_error("unable to open '%s'", node);
                 return 1;

@@ -16,6 +16,7 @@
 #include "glyph-util.h"
 #include "hashmap.h"
 #include "list.h"
+#include "logarithm.h"
 #include "macro.h"
 #include "memory-util.h"
 #include "missing_syscall.h"
@@ -152,6 +153,8 @@ struct sd_event {
         struct epoll_event *event_queue;
 
         LIST_HEAD(sd_event_source, sources);
+
+        sd_event_source *sigint_event_source, *sigterm_event_source;
 
         usec_t last_run_usec, last_log_usec;
         unsigned delays[sizeof(usec_t) * 8];
@@ -323,6 +326,9 @@ static sd_event *event_free(sd_event *e) {
 
         assert(e);
 
+        e->sigterm_event_source = sd_event_source_unref(e->sigterm_event_source);
+        e->sigint_event_source = sd_event_source_unref(e->sigint_event_source);
+
         while ((s = e->sources)) {
                 assert(s->floating);
                 source_disconnect(s);
@@ -372,22 +378,22 @@ _public_ int sd_event_new(sd_event** ret) {
 
         *e = (sd_event) {
                 .n_ref = 1,
-                .epoll_fd = -1,
-                .watchdog_fd = -1,
+                .epoll_fd = -EBADF,
+                .watchdog_fd = -EBADF,
                 .realtime.wakeup = WAKEUP_CLOCK_DATA,
-                .realtime.fd = -1,
+                .realtime.fd = -EBADF,
                 .realtime.next = USEC_INFINITY,
                 .boottime.wakeup = WAKEUP_CLOCK_DATA,
-                .boottime.fd = -1,
+                .boottime.fd = -EBADF,
                 .boottime.next = USEC_INFINITY,
                 .monotonic.wakeup = WAKEUP_CLOCK_DATA,
-                .monotonic.fd = -1,
+                .monotonic.fd = -EBADF,
                 .monotonic.next = USEC_INFINITY,
                 .realtime_alarm.wakeup = WAKEUP_CLOCK_DATA,
-                .realtime_alarm.fd = -1,
+                .realtime_alarm.fd = -EBADF,
                 .realtime_alarm.next = USEC_INFINITY,
                 .boottime_alarm.wakeup = WAKEUP_CLOCK_DATA,
-                .boottime_alarm.fd = -1,
+                .boottime_alarm.fd = -EBADF,
                 .boottime_alarm.next = USEC_INFINITY,
                 .perturb = USEC_INFINITY,
                 .original_pid = getpid_cached(),
@@ -637,7 +643,7 @@ static int event_make_signal_data(
 
                 *d = (struct signal_data) {
                         .wakeup = WAKEUP_SIGNAL_DATA,
-                        .fd = -1,
+                        .fd = -EBADF,
                         .priority = priority,
                 };
 
@@ -653,7 +659,9 @@ static int event_make_signal_data(
         ss_copy = d->sigset;
         assert_se(sigaddset(&ss_copy, sig) >= 0);
 
-        r = signalfd(d->fd, &ss_copy, SFD_NONBLOCK|SFD_CLOEXEC);
+        r = signalfd(d->fd >= 0 ? d->fd : -1,   /* the first arg must be -1 or a valid signalfd */
+                     &ss_copy,
+                     SFD_NONBLOCK|SFD_CLOEXEC);
         if (r < 0) {
                 r = -errno;
                 goto fail;
@@ -813,6 +821,7 @@ static void event_source_time_prioq_remove(
 
 static void source_disconnect(sd_event_source *s) {
         sd_event *event;
+        int r;
 
         assert(s);
 
@@ -853,6 +862,20 @@ static void source_disconnect(sd_event_source *s) {
                                 s->event->signal_sources[s->signal.sig] = NULL;
 
                         event_gc_signal_data(s->event, &s->priority, s->signal.sig);
+
+                        if (s->signal.unblock) {
+                                sigset_t new_ss;
+
+                                if (sigemptyset(&new_ss) < 0)
+                                        log_debug_errno(errno, "Failed to reset signal set, ignoring: %m");
+                                else if (sigaddset(&new_ss, s->signal.sig) < 0)
+                                        log_debug_errno(errno, "Failed to add signal %i to signal mask, ignoring: %m", s->signal.sig);
+                                else {
+                                        r = pthread_sigmask(SIG_UNBLOCK, &new_ss, NULL);
+                                        if (r != 0)
+                                                log_debug_errno(r, "Failed to unblock signal %i, ignoring: %m", s->signal.sig);
+                                }
+                        }
                 }
 
                 break;
@@ -1157,7 +1180,7 @@ static int event_setup_timer_fd(
         if (_likely_(d->fd >= 0))
                 return 0;
 
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
 
         fd = timerfd_create(clock, TFD_NONBLOCK|TFD_CLOEXEC);
         if (fd < 0)
@@ -1328,22 +1351,37 @@ _public_ int sd_event_add_signal(
 
         _cleanup_(source_freep) sd_event_source *s = NULL;
         struct signal_data *d;
+        sigset_t new_ss;
+        bool block_it;
         int r;
 
         assert_return(e, -EINVAL);
         assert_return(e = event_resolve(e), -ENOPKG);
-        assert_return(SIGNAL_VALID(sig), -EINVAL);
         assert_return(e->state != SD_EVENT_FINISHED, -ESTALE);
         assert_return(!event_pid_changed(e), -ECHILD);
 
+        /* Let's make sure our special flag stays outside of the valid signal range */
+        assert_cc(_NSIG < SD_EVENT_SIGNAL_PROCMASK);
+
+        if (sig & SD_EVENT_SIGNAL_PROCMASK) {
+                sig &= ~SD_EVENT_SIGNAL_PROCMASK;
+                assert_return(SIGNAL_VALID(sig), -EINVAL);
+
+                block_it = true;
+        } else {
+                assert_return(SIGNAL_VALID(sig), -EINVAL);
+
+                r = signal_is_blocked(sig);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        return -EBUSY;
+
+                block_it = false;
+        }
+
         if (!callback)
                 callback = signal_exit_callback;
-
-        r = signal_is_blocked(sig);
-        if (r < 0)
-                return r;
-        if (r == 0)
-                return -EBUSY;
 
         if (!e->signal_sources) {
                 e->signal_sources = new0(sd_event_source*, _NSIG);
@@ -1363,9 +1401,34 @@ _public_ int sd_event_add_signal(
 
         e->signal_sources[sig] = s;
 
+        if (block_it) {
+                sigset_t old_ss;
+
+                if (sigemptyset(&new_ss) < 0)
+                        return -errno;
+
+                if (sigaddset(&new_ss, sig) < 0)
+                        return -errno;
+
+                r = pthread_sigmask(SIG_BLOCK, &new_ss, &old_ss);
+                if (r != 0)
+                        return -r;
+
+                r = sigismember(&old_ss, sig);
+                if (r < 0)
+                        return -errno;
+
+                s->signal.unblock = !r;
+        } else
+                s->signal.unblock = false;
+
         r = event_make_signal_data(e, sig, &d);
-        if (r < 0)
+        if (r < 0) {
+                if (s->signal.unblock)
+                        (void) pthread_sigmask(SIG_UNBLOCK, &new_ss, NULL);
+
                 return r;
+        }
 
         /* Use the signal name as description for the event source by default */
         (void) sd_event_source_set_description(s, signal_to_string(sig));
@@ -1453,7 +1516,7 @@ _public_ int sd_event_add_child(
                 } else
                         s->child.pidfd_owned = true; /* If we allocate the pidfd we own it by default */
         } else
-                s->child.pidfd = -1;
+                s->child.pidfd = -EBADF;
 
         if (EVENT_SOURCE_WATCH_PIDFD(s)) {
                 /* We have a pidfd and we only want to watch for exit */
@@ -1716,7 +1779,7 @@ static int event_make_inotify_data(
                 int64_t priority,
                 struct inotify_data **ret) {
 
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         struct inotify_data *d;
         int r;
 
@@ -1913,7 +1976,7 @@ static int event_make_inode_data(
                 .dev = dev,
                 .ino = ino,
                 .wd = -1,
-                .fd = -1,
+                .fd = -EBADF,
                 .inotify_data = inotify_data,
         };
 
@@ -2009,7 +2072,7 @@ static int event_add_inotify_fd_internal(
                 sd_event_inotify_handler_t callback,
                 void *userdata) {
 
-        _cleanup_close_ int donated_fd = donate ? fd : -1;
+        _cleanup_close_ int donated_fd = donate ? fd : -EBADF;
         _cleanup_(source_freep) sd_event_source *s = NULL;
         struct inotify_data *inotify_data = NULL;
         struct inode_data *inode_data = NULL;
@@ -2111,9 +2174,9 @@ _public_ int sd_event_add_inotify(
 
         assert_return(path, -EINVAL);
 
-        fd = open(path, O_PATH|O_CLOEXEC|
-                  (mask & IN_ONLYDIR ? O_DIRECTORY : 0)|
-                  (mask & IN_DONT_FOLLOW ? O_NOFOLLOW : 0));
+        fd = open(path, O_PATH | O_CLOEXEC |
+                        (mask & IN_ONLYDIR ? O_DIRECTORY : 0) |
+                        (mask & IN_DONT_FOLLOW ? O_NOFOLLOW : 0));
         if (fd < 0)
                 return -errno;
 
@@ -2663,6 +2726,9 @@ _public_ int sd_event_source_set_time_relative(sd_event_source *s, uint64_t usec
         assert_return(s, -EINVAL);
         assert_return(EVENT_SOURCE_IS_TIME(s->type), -EDOM);
 
+        if (usec == USEC_INFINITY)
+                return sd_event_source_set_time(s, USEC_INFINITY);
+
         r = sd_event_now(s->event, event_source_type_to_clock(s->type), &t);
         if (r < 0)
                 return r;
@@ -3116,7 +3182,7 @@ static int event_arm_timer(
         assert_se(d->fd >= 0);
 
         if (t == 0) {
-                /* We don' want to disarm here, just mean some time looooong ago. */
+                /* We don't want to disarm here, just mean some time looooong ago. */
                 its.it_value.tv_sec = 0;
                 its.it_value.tv_nsec = 1;
         } else
@@ -3713,12 +3779,9 @@ static int event_prepare(sd_event *e) {
                         break;
 
                 s->prepare_iteration = e->iteration;
-                r = prioq_reshuffle(e->prepare, s, &s->prepare_index);
-                if (r < 0)
-                        return r;
+                prioq_reshuffle(e->prepare, s, &s->prepare_index);
 
                 assert(s->prepare);
-
                 s->dispatching = true;
                 r = s->prepare(s, s->userdata);
                 s->dispatching = false;
@@ -3908,15 +3971,18 @@ static int epoll_wait_usec(
                 usec_t timeout) {
 
         int msec;
-#if 0
+        /* A wrapper that uses epoll_pwait2() if available, and falls back to epoll_wait() if not. */
+
+#if HAVE_EPOLL_PWAIT2
         static bool epoll_pwait2_absent = false;
         int r;
 
-        /* A wrapper that uses epoll_pwait2() if available, and falls back to epoll_wait() if not.
-         *
-         * FIXME: this is temporarily disabled until epoll_pwait2() becomes more widely available.
-         * See https://github.com/systemd/systemd/pull/18973 and
-         * https://github.com/systemd/systemd/issues/19052. */
+        /* epoll_pwait2() was added to Linux 5.11 (2021-02-14) and to glibc in 2.35 (2022-02-03). In contrast
+         * to other syscalls we don't bother with our own fallback syscall wrappers on old libcs, since this
+         * is not that obvious to implement given the libc and kernel definitions differ in the last
+         * argument. Moreover, the only reason to use it is the more accurate time-outs (which is not a
+         * biggie), let's hence rely on glibc's definitions, and fallback to epoll_pwait() when that's
+         * missing. */
 
         if (!epoll_pwait2_absent && timeout != USEC_INFINITY) {
                 r = epoll_pwait2(fd,
@@ -4557,4 +4623,56 @@ _public_ int sd_event_source_is_ratelimited(sd_event_source *s) {
                 return false;
 
         return s->ratelimited;
+}
+
+_public_ int sd_event_set_signal_exit(sd_event *e, int b) {
+        bool change = false;
+        int r;
+
+        assert_return(e, -EINVAL);
+
+        if (b) {
+                /* We want to maintain pointers to these event sources, so that we can destroy them when told
+                 * so. But we also don't want them to pin the event loop itself. Hence we mark them as
+                 * floating after creation (and undo this before deleting them again). */
+
+                if (!e->sigint_event_source) {
+                        r = sd_event_add_signal(e, &e->sigint_event_source, SIGINT | SD_EVENT_SIGNAL_PROCMASK, NULL, NULL);
+                        if (r < 0)
+                                return r;
+
+                        assert(sd_event_source_set_floating(e->sigint_event_source, true) >= 0);
+                        change = true;
+                }
+
+                if (!e->sigterm_event_source) {
+                        r = sd_event_add_signal(e, &e->sigterm_event_source, SIGTERM | SD_EVENT_SIGNAL_PROCMASK, NULL, NULL);
+                        if (r < 0) {
+                                if (change) {
+                                        assert(sd_event_source_set_floating(e->sigint_event_source, false) >= 0);
+                                        e->sigint_event_source = sd_event_source_unref(e->sigint_event_source);
+                                }
+
+                                return r;
+                        }
+
+                        assert(sd_event_source_set_floating(e->sigterm_event_source, true) >= 0);
+                        change = true;
+                }
+
+        } else {
+                if (e->sigint_event_source) {
+                        assert(sd_event_source_set_floating(e->sigint_event_source, false) >= 0);
+                        e->sigint_event_source = sd_event_source_unref(e->sigint_event_source);
+                        change = true;
+                }
+
+                if (e->sigterm_event_source) {
+                        assert(sd_event_source_set_floating(e->sigterm_event_source, false) >= 0);
+                        e->sigterm_event_source = sd_event_source_unref(e->sigterm_event_source);
+                        change = true;
+                }
+        }
+
+        return change;
 }

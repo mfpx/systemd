@@ -36,12 +36,15 @@ typedef enum NetworkConfigState {
         NETWORK_CONFIG_STATE_REMOVING    = 1 << 4, /* e.g. address_remove() is called, but no response is received yet */
 } NetworkConfigState;
 
-static inline usec_t sec16_to_usec(uint16_t sec, usec_t timestamp_usec) {
-        return sec == UINT16_MAX ? USEC_INFINITY : usec_add(timestamp_usec, sec * USEC_PER_SEC);
+static inline usec_t sec_to_usec(uint32_t sec, usec_t timestamp_usec) {
+        return
+                sec == 0 ? 0 :
+                sec == UINT32_MAX ? USEC_INFINITY :
+                usec_add(timestamp_usec, sec * USEC_PER_SEC);
 }
 
-static inline usec_t sec_to_usec(uint32_t sec, usec_t timestamp_usec) {
-        return sec == UINT32_MAX ? USEC_INFINITY : usec_add(timestamp_usec, sec * USEC_PER_SEC);
+static inline usec_t sec16_to_usec(uint16_t sec, usec_t timestamp_usec) {
+        return sec_to_usec(sec == UINT16_MAX ? UINT32_MAX : (uint32_t) sec, timestamp_usec);
 }
 
 static inline uint32_t usec_to_sec(usec_t usec, usec_t now_usec) {
@@ -88,12 +91,14 @@ int network_config_state_to_string_alloc(NetworkConfigState s, char **ret);
                                     0);                                 \
         }                                                               \
         static inline bool name##_is_requesting(type *t) {              \
+                assert(t);                                              \
                 return FLAGS_SET(t->state, NETWORK_CONFIG_STATE_REQUESTING); \
         }                                                               \
         static inline void name##_enter_configuring(type *t) {          \
                 name##_update_state(t,                                  \
                                     NETWORK_CONFIG_STATE_REQUESTING |   \
-                                    NETWORK_CONFIG_STATE_CONFIGURING,   \
+                                    NETWORK_CONFIG_STATE_CONFIGURING |  \
+                                    NETWORK_CONFIG_STATE_REMOVING,      \
                                     NETWORK_CONFIG_STATE_CONFIGURING);  \
         }                                                               \
         static inline void name##_enter_configured(type *t) {           \

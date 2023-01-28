@@ -79,11 +79,11 @@ static int prepare_socket_bind_bpf(
         if (!obj)
                 return log_unit_full_errno(u, u ? LOG_ERR : LOG_DEBUG, errno, "bpf-socket-bind: Failed to open BPF object: %m");
 
-        if (sym_bpf_map__resize(obj->maps.sd_bind_allow, MAX(allow_count, 1u)) != 0)
+        if (sym_bpf_map__set_max_entries(obj->maps.sd_bind_allow, MAX(allow_count, 1u)) != 0)
                 return log_unit_full_errno(u, u ? LOG_ERR : LOG_WARNING, errno,
                                            "bpf-socket-bind: Failed to resize BPF map '%s': %m", sym_bpf_map__name(obj->maps.sd_bind_allow));
 
-        if (sym_bpf_map__resize(obj->maps.sd_bind_deny, MAX(deny_count, 1u)) != 0)
+        if (sym_bpf_map__set_max_entries(obj->maps.sd_bind_deny, MAX(deny_count, 1u)) != 0)
                 return log_unit_full_errno(u, u ? LOG_ERR : LOG_WARNING, errno,
                                            "bpf-socket-bind: Failed to resize BPF map '%s': %m", sym_bpf_map__name(obj->maps.sd_bind_deny));
 
@@ -120,7 +120,7 @@ int bpf_socket_bind_supported(void) {
         if (!cgroup_bpf_supported())
                 return false;
 
-        if (!sym_bpf_probe_prog_type(BPF_PROG_TYPE_CGROUP_SOCK_ADDR, /*ifindex=*/0)) {
+        if (!compat_libbpf_probe_bpf_prog_type(BPF_PROG_TYPE_CGROUP_SOCK_ADDR, /*opts=*/NULL)) {
                 log_debug("bpf-socket-bind: BPF program type cgroup_sock_addr is not supported");
                 return false;
         }
@@ -156,7 +156,7 @@ static int socket_bind_install_impl(Unit *u) {
         _cleanup_(bpf_link_freep) struct bpf_link *ipv4 = NULL, *ipv6 = NULL;
         _cleanup_(socket_bind_bpf_freep) struct socket_bind_bpf *obj = NULL;
         _cleanup_free_ char *cgroup_path = NULL;
-        _cleanup_close_ int cgroup_fd = -1;
+        _cleanup_close_ int cgroup_fd = -EBADF;
         CGroupContext *cc;
         int r;
 

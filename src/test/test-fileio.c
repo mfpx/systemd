@@ -24,7 +24,6 @@
 #include "strv.h"
 #include "tests.h"
 #include "tmpfile-util.h"
-#include "util.h"
 
 TEST(parse_env_file) {
         _cleanup_(unlink_tempfilep) char
@@ -526,7 +525,7 @@ TEST(search_and_fopen) {
         char name[] = "/tmp/test-search_and_fopen.XXXXXX";
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *p = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *e;
         int r;
 
@@ -554,15 +553,15 @@ TEST(search_and_fopen) {
         f = safe_fclose(f);
         p = mfree(p);
 
-        r = search_and_fopen("/a/file/which/does/not/exist/i/guess", "r", NULL, (const char**) dirs, &f, &p);
+        r = search_and_fopen("/a/file/which/does/not/exist/i/guess", "re", NULL, (const char**) dirs, &f, &p);
         assert_se(r == -ENOENT);
-        r = search_and_fopen("afilewhichdoesnotexistiguess", "r", NULL, (const char**) dirs, &f, &p);
+        r = search_and_fopen("afilewhichdoesnotexistiguess", "re", NULL, (const char**) dirs, &f, &p);
         assert_se(r == -ENOENT);
 
         r = unlink(name);
         assert_se(r == 0);
 
-        r = search_and_fopen(basename(name), "r", NULL, (const char**) dirs, &f, &p);
+        r = search_and_fopen(basename(name), "re", NULL, (const char**) dirs, &f, &p);
         assert_se(r == -ENOENT);
 }
 
@@ -574,7 +573,7 @@ TEST(search_and_fopen_nulstr) {
         _cleanup_(unlink_tempfilep) char name[] = "/tmp/test-search_and_fopen.XXXXXX";
         _cleanup_fclose_ FILE *f = NULL;
         _cleanup_free_ char *p = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *e;
         int r;
 
@@ -595,15 +594,15 @@ TEST(search_and_fopen_nulstr) {
         f = safe_fclose(f);
         p = mfree(p);
 
-        r = search_and_fopen_nulstr("/a/file/which/does/not/exist/i/guess", "r", NULL, dirs, &f, &p);
+        r = search_and_fopen_nulstr("/a/file/which/does/not/exist/i/guess", "re", NULL, dirs, &f, &p);
         assert_se(r == -ENOENT);
-        r = search_and_fopen_nulstr("afilewhichdoesnotexistiguess", "r", NULL, dirs, &f, &p);
+        r = search_and_fopen_nulstr("afilewhichdoesnotexistiguess", "re", NULL, dirs, &f, &p);
         assert_se(r == -ENOENT);
 
         r = unlink(name);
         assert_se(r == 0);
 
-        r = search_and_fopen_nulstr(basename(name), "r", NULL, dirs, &f, &p);
+        r = search_and_fopen_nulstr(basename(name), "re", NULL, dirs, &f, &p);
         assert_se(r == -ENOENT);
 }
 
@@ -611,7 +610,7 @@ TEST(writing_tmpfile) {
         _cleanup_(unlink_tempfilep) char name[] = "/tmp/test-systemd_writing_tmpfile.XXXXXX";
         _cleanup_free_ char *contents = NULL;
         size_t size;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         int r;
 
         struct iovec iov[] = {
@@ -677,7 +676,7 @@ TEST(fgetc) {
         _cleanup_fclose_ FILE *f = NULL;
         char c;
 
-        assert_se(f = fmemopen_unlocked((void*) chars, sizeof(chars), "re"));
+        assert_se(f = fmemopen_unlocked((void*) chars, sizeof(chars), "r"));
 
         for (size_t i = 0; i < sizeof(chars); i++) {
                 assert_se(safe_fgetc(f, &c) == 1);
@@ -770,7 +769,7 @@ static void test_read_line_one_file(FILE *f) {
 TEST(read_line1) {
         _cleanup_fclose_ FILE *f = NULL;
 
-        assert_se(f = fmemopen_unlocked((void*) buffer, sizeof(buffer), "re"));
+        assert_se(f = fmemopen_unlocked((void*) buffer, sizeof(buffer), "r"));
         test_read_line_one_file(f);
 }
 
@@ -878,7 +877,7 @@ TEST(read_nul_string) {
 
 TEST(read_full_file_socket) {
         _cleanup_(rm_rf_physical_and_freep) char *z = NULL;
-        _cleanup_close_ int listener = -1;
+        _cleanup_close_ int listener = -EBADF;
         _cleanup_free_ char *data = NULL, *clientname = NULL;
         union sockaddr_union sa;
         const char *j, *jj;
@@ -910,7 +909,7 @@ TEST(read_full_file_socket) {
         if (r == 0) {
                 union sockaddr_union peer = {};
                 socklen_t peerlen = sizeof(peer);
-                _cleanup_close_ int rfd = -1;
+                _cleanup_close_ int rfd = -EBADF;
                 /* child */
 
                 rfd = accept4(listener, NULL, 0, SOCK_CLOEXEC);

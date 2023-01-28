@@ -205,6 +205,36 @@ testcase_nvme_basic() {
     test_run_one "${1:?}"
 }
 
+# Testcase for:
+#   * https://github.com/systemd/systemd/pull/24748
+#   * https://github.com/systemd/systemd/pull/24766
+#   * https://github.com/systemd/systemd/pull/24946
+# Docs: https://qemu.readthedocs.io/en/latest/system/devices/nvme.html#nvm-subsystems
+testcase_nvme_subsystem() {
+    if ! "${QEMU_BIN:?}" -device help | grep 'name "nvme-subsys"'; then
+        echo "nvme-subsystem device driver is not available, skipping test..."
+        return 77
+    fi
+
+    local i
+    local qemu_opts=(
+        # Create an NVM Subsystem Device
+        "-device nvme-subsys,id=nvme-subsys-64,nqn=subsys64"
+        # Attach two NVM controllers to it
+        "-device nvme,subsys=nvme-subsys-64,serial=deadbeef"
+        "-device nvme,subsys=nvme-subsys-64,serial=deadbeef"
+        # And create two shared namespaces attached to both controllers
+        "-device nvme-ns,drive=nvme0,nsid=16,shared=on"
+        "-drive format=raw,cache=unsafe,file=${TESTDIR:?}/disk0.img,if=none,id=nvme0"
+        "-device nvme-ns,drive=nvme1,nsid=17,shared=on"
+        "-drive format=raw,cache=unsafe,file=${TESTDIR:?}/disk1.img,if=none,id=nvme1"
+    )
+
+    KERNEL_APPEND="systemd.setenv=TEST_FUNCTION_NAME=${FUNCNAME[0]} ${USER_KERNEL_APPEND:-}"
+    QEMU_OPTIONS="${qemu_opts[*]} ${USER_QEMU_OPTIONS:-}"
+    test_run_one "${1:?}"
+}
+
 # Test for issue https://github.com/systemd/systemd/issues/20212
 testcase_virtio_scsi_identically_named_partitions() {
 
@@ -312,19 +342,23 @@ EOF
 # Test case for issue https://github.com/systemd/systemd/issues/19946
 testcase_simultaneous_events() {
     local qemu_opts=("-device virtio-scsi-pci,id=scsi")
-    local partdisk="${TESTDIR:?}/simultaneousevents.img"
+    local diskpath i
 
-    dd if=/dev/zero of="$partdisk" bs=1M count=110
-    qemu_opts+=(
-        "-device scsi-hd,drive=drive1,serial=deadbeeftest"
-        "-drive format=raw,cache=unsafe,file=$partdisk,if=none,id=drive1"
-    )
+    for i in {0..9}; do
+        diskpath="${TESTDIR:?}/simultaneousevents${i}.img"
+
+        dd if=/dev/zero of="$diskpath" bs=1M count=32
+        qemu_opts+=(
+            "-device scsi-hd,drive=drive$i,serial=deadbeeftest$i"
+            "-drive format=raw,cache=unsafe,file=$diskpath,if=none,id=drive$i"
+        )
+    done
 
     KERNEL_APPEND="systemd.setenv=TEST_FUNCTION_NAME=${FUNCNAME[0]} ${USER_KERNEL_APPEND:-}"
     QEMU_OPTIONS="${qemu_opts[*]} ${USER_QEMU_OPTIONS:-}"
     test_run_one "${1:?}" || return $?
 
-    rm -f "$partdisk"
+    rm -f "$diskpath"
 }
 
 testcase_lvm_basic() {
@@ -416,7 +450,7 @@ testcase_long_sysfs_path() {
     local testdisk="${TESTDIR:?}/longsysfspath.img"
     local qemu_opts=(
         "-drive if=none,id=drive0,format=raw,cache=unsafe,file=$testdisk"
-        "-device pci-bridge,id=pci_bridge0,bus=pci.0,chassis_nr=64"
+        "-device pci-bridge,id=pci_bridge0,chassis_nr=64"
     )
 
     dd if=/dev/zero of="$testdisk" bs=1M count=64

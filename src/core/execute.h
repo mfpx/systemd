@@ -23,7 +23,9 @@ typedef struct Manager Manager;
 #include "namespace.h"
 #include "nsflags.h"
 #include "numa-util.h"
+#include "open-file.h"
 #include "path-util.h"
+#include "set.h"
 #include "time-util.h"
 
 #define EXEC_STDIN_DATA_MAX (64U*1024U*1024U)
@@ -135,6 +137,7 @@ typedef enum ExecDirectoryType {
 typedef struct ExecDirectoryItem {
         char *path;
         char **symlinks;
+        bool only_create;
 } ExecDirectoryItem;
 
 typedef struct ExecDirectory {
@@ -285,6 +288,8 @@ struct ExecContext {
 
         struct iovec* log_extra_fields;
         size_t n_log_extra_fields;
+        Set *log_filter_allowed_patterns;
+        Set *log_filter_denied_patterns;
 
         usec_t log_ratelimit_interval_usec;
         unsigned log_ratelimit_burst;
@@ -423,6 +428,8 @@ struct ExecParameters {
         int exec_fd;
 
         const char *notify_socket;
+
+        LIST_HEAD(OpenFile, open_files);
 };
 
 #include "unit.h"
@@ -452,6 +459,7 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix);
 
 int exec_context_destroy_runtime_directory(const ExecContext *c, const char *runtime_root);
 int exec_context_destroy_credentials(const ExecContext *c, const char *runtime_root, const char *unit);
+int exec_context_destroy_mount_ns_dir(Unit *u);
 
 const char* exec_context_fdname(const ExecContext *c, int fd_index);
 
@@ -492,7 +500,8 @@ ExecLoadCredential *exec_load_credential_free(ExecLoadCredential *lc);
 DEFINE_TRIVIAL_CLEANUP_FUNC(ExecLoadCredential*, exec_load_credential_free);
 
 void exec_directory_done(ExecDirectory *d);
-int exec_directory_add(ExecDirectoryItem **d, size_t *n, const char *path, char **symlinks);
+int exec_directory_add(ExecDirectory *d, const char *path, const char *symlink);
+void exec_directory_sort(ExecDirectory *d);
 
 extern const struct hash_ops exec_set_credential_hash_ops;
 extern const struct hash_ops exec_load_credential_hash_ops;

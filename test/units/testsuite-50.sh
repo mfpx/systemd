@@ -7,13 +7,17 @@ set -o pipefail
 
 export SYSTEMD_LOG_LEVEL=debug
 
-cleanup()
-{
+cleanup() {(
+    set +ex
+
     if [ -z "${image_dir}" ]; then
         return
     fi
+    umount "${image_dir}/app0"
+    umount "${image_dir}/app1"
+    umount "${image_dir}/app-nodistro"
     rm -rf "${image_dir}"
-}
+)}
 
 udevadm control --log-level=debug
 
@@ -36,6 +40,15 @@ os_release="$(test -e /etc/os-release && echo /etc/os-release || echo /usr/lib/o
 systemd-dissect --json=short "${image}.raw" | grep -q -F '{"rw":"ro","designator":"root","partition_uuid":null,"partition_label":null,"fstype":"squashfs","architecture":null,"verity":"external"'
 systemd-dissect "${image}.raw" | grep -q -F "MARKER=1"
 systemd-dissect "${image}.raw" | grep -q -F -f <(sed 's/"//g' "$os_release")
+
+systemd-dissect --list "${image}.raw" | grep -q '^etc/os-release$'
+systemd-dissect --mtree "${image}.raw" | grep -q "./usr/bin/cat type=file mode=0755 uid=0 gid=0"
+
+read -r SHA256SUM1 _ < <(systemd-dissect --copy-from "${image}.raw" etc/os-release | sha256sum)
+test "$SHA256SUM1" != ""
+read -r SHA256SUM2 _ < <(systemd-dissect --read-only --with "${image}.raw" sha256sum etc/os-release)
+test "$SHA256SUM2" != ""
+test "$SHA256SUM1" = "$SHA256SUM2"
 
 mv "${image}.verity" "${image}.fooverity"
 mv "${image}.roothash" "${image}.foohash"
@@ -210,12 +223,21 @@ losetup -d "${loop}"
 ROOT_UUID="$(systemd-id128 -u show "$(head -c 32 "${image}.roothash")" -u | tail -n 1 | cut -b 6-)"
 VERITY_UUID="$(systemd-id128 -u show "$(tail -c 32 "${image}.roothash")" -u | tail -n 1 | cut -b 6-)"
 
-systemd-dissect --json=short --root-hash "${roothash}" "${image}.gpt" | grep -q '{"rw":"ro","designator":"root","partition_uuid":"'"$ROOT_UUID"'","partition_label":"Root Partition","fstype":"squashfs","architecture":"'"$architecture"'","verity":"yes",'
+systemd-dissect --json=short --root-hash "${roothash}" "${image}.gpt" | grep -q '{"rw":"ro","designator":"root","partition_uuid":"'"$ROOT_UUID"'","partition_label":"Root Partition","fstype":"squashfs","architecture":"'"$architecture"'","verity":"signed",'
 systemd-dissect --json=short --root-hash "${roothash}" "${image}.gpt" | grep -q '{"rw":"ro","designator":"root-verity","partition_uuid":"'"$VERITY_UUID"'","partition_label":"Verity Partition","fstype":"DM_verity_hash","architecture":"'"$architecture"'","verity":null,'
+if [ "${HAVE_OPENSSL}" -eq 1 ]; then
+    systemd-dissect --json=short --root-hash "${roothash}" "${image}.gpt" | grep -q -E '{"rw":"ro","designator":"root-verity-sig","partition_uuid":"'".*"'","partition_label":"Signature Partition","fstype":"verity_hash_signature","architecture":"'"$architecture"'","verity":null,'
+fi
 systemd-dissect --root-hash "${roothash}" "${image}.gpt" | grep -q -F "MARKER=1"
 systemd-dissect --root-hash "${roothash}" "${image}.gpt" | grep -q -F -f <(sed 's/"//g' "$os_release")
 
 systemd-dissect --root-hash "${roothash}" --mount "${image}.gpt" "${image_dir}/mount"
+grep -q -F -f "$os_release" "${image_dir}/mount/usr/lib/os-release"
+grep -q -F -f "$os_release" "${image_dir}/mount/etc/os-release"
+grep -q -F "MARKER=1" "${image_dir}/mount/usr/lib/os-release"
+systemd-dissect --umount "${image_dir}/mount"
+
+systemd-dissect --root-hash "${roothash}" --mount "${image}.gpt" --in-memory "${image_dir}/mount"
 grep -q -F -f "$os_release" "${image_dir}/mount/usr/lib/os-release"
 grep -q -F -f "$os_release" "${image_dir}/mount/etc/os-release"
 grep -q -F "MARKER=1" "${image_dir}/mount/usr/lib/os-release"
@@ -297,7 +319,14 @@ Type=notify
 RemainAfterExit=yes
 MountAPIVFS=yes
 PrivateTmp=yes
-ExecStart=/bin/sh -c 'systemd-notify --ready; while ! grep -q -F MARKER /tmp/img/usr/lib/os-release; do sleep 0.1; done; mount | grep -e "/dev/mapper/${roothash}-verity" -e "/dev/mapper/loop[0-9]*-verity" | grep -q -F "nosuid"'
+ExecStart=/bin/sh -c ' \\
+    systemd-notify --ready; \\
+    while [[ ! -f /tmp/img/usr/lib/os-release ]] || ! grep -q -F MARKER /tmp/img/usr/lib/os-release; do \\
+        sleep 0.1; \\
+    done; \\
+    mount; \\
+    mount | grep -F "on /tmp/img type squashfs" | grep -q -F "nosuid"; \\
+'
 EOF
 systemctl start testservice-50d.service
 
@@ -385,6 +414,15 @@ test ! -e /usr/lib/systemd/system/some_file
 systemd-sysext unmerge
 rmdir /etc/extensions/app-nodistro
 rm /var/lib/extensions/app-nodistro.raw
+
+mkdir -p /run/machines /run/portables /run/extensions
+touch /run/machines/a.raw /run/portables/b.raw /run/extensions/c.raw
+
+systemd-dissect --discover --json=short > /tmp/discover.json
+grep -q -F '{"name":"a","type":"raw","class":"machine","ro":false,"path":"/run/machines/a.raw"' /tmp/discover.json
+grep -q -F '{"name":"b","type":"raw","class":"portable","ro":false,"path":"/run/portables/b.raw"' /tmp/discover.json
+grep -q -F '{"name":"c","type":"raw","class":"extension","ro":false,"path":"/run/extensions/c.raw"' /tmp/discover.json
+rm /tmp/discover.json /run/machines/a.raw /run/portables/b.raw /run/extensions/c.raw
 
 echo OK >/testok
 

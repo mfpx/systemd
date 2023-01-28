@@ -372,7 +372,7 @@ static int property_get_scheduled_shutdown(
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_handle_action, handle_action, HandleAction);
 static BUS_DEFINE_PROPERTY_GET(property_get_docked, "b", Manager, manager_is_docked_or_external_displays);
 static BUS_DEFINE_PROPERTY_GET(property_get_lid_closed, "b", Manager, manager_is_lid_closed);
-static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_on_external_power, "b", manager_is_on_external_power);
+static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_on_external_power, "b", manager_is_on_external_power());
 static BUS_DEFINE_PROPERTY_GET_GLOBAL(property_get_compat_user_tasks_max, "t", CGROUP_LIMIT_MAX);
 static BUS_DEFINE_PROPERTY_GET_REF(property_get_hashmap_size, "t", Hashmap *, (uint64_t) hashmap_size);
 
@@ -3196,7 +3196,7 @@ static int method_inhibit(sd_bus_message *message, void *userdata, sd_bus_error 
         _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
         const char *who, *why, *what, *mode;
         _cleanup_free_ char *id = NULL;
-        _cleanup_close_ int fifo_fd = -1;
+        _cleanup_close_ int fifo_fd = -EBADF;
         Manager *m = ASSERT_PTR(userdata);
         InhibitMode mm;
         InhibitWhat w;
@@ -3967,6 +3967,12 @@ int manager_start_scope(
                 return r;
 
         r = sd_bus_message_append(m, "(sv)", "PIDs", "au", 1, pid);
+        if (r < 0)
+                return r;
+
+        /* For login session scopes, if a process is OOM killed by the kernel, *don't* terminate the rest of
+           the scope */
+        r = sd_bus_message_append(m, "(sv)", "OOMPolicy", "s", "continue");
         if (r < 0)
                 return r;
 

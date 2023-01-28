@@ -8,7 +8,7 @@
 #include "conf-files.h"
 #include "copy.h"
 #include "data-fd-util.h"
-#include "def.h"
+#include "constants.h"
 #include "dirent-util.h"
 #include "discover-image.h"
 #include "dissect-image.h"
@@ -150,7 +150,7 @@ static int send_one_fd_iov_with_data_fd(
                 size_t iovlen,
                 int fd) {
 
-        _cleanup_close_ int data_fd = -1;
+        _cleanup_close_ int data_fd = -EBADF;
 
         assert(iov || iovlen == 0);
         assert(socket_fd >= 0);
@@ -171,6 +171,7 @@ static int extract_now(
                 char **matches,
                 const char *image_name,
                 bool path_is_extension,
+                bool relax_extension_release_check,
                 int socket_fd,
                 PortableMetadata **ret_os_release,
                 Hashmap **ret_unit_files) {
@@ -178,7 +179,7 @@ static int extract_now(
         _cleanup_hashmap_free_ Hashmap *unit_files = NULL;
         _cleanup_(portable_metadata_unrefp) PortableMetadata *os_release = NULL;
         _cleanup_(lookup_paths_free) LookupPaths paths = {};
-        _cleanup_close_ int os_release_fd = -1;
+        _cleanup_close_ int os_release_fd = -EBADF;
         _cleanup_free_ char *os_release_path = NULL;
         const char *os_release_id;
         int r;
@@ -197,7 +198,7 @@ static int extract_now(
         /* First, find os-release/extension-release and send it upstream (or just save it). */
         if (path_is_extension) {
                 os_release_id = strjoina("/usr/lib/extension-release.d/extension-release.", image_name);
-                r = open_extension_release(where, image_name, &os_release_path, &os_release_fd);
+                r = open_extension_release(where, image_name, relax_extension_release_check, &os_release_path, &os_release_fd);
         } else {
                 os_release_id = "/etc/os-release";
                 r = open_os_release(where, &os_release_path, &os_release_fd);
@@ -223,7 +224,7 @@ static int extract_now(
                         if (!os_release)
                                 return -ENOMEM;
 
-                        os_release_fd = -1;
+                        os_release_fd = -EBADF;
                         os_release->source = TAKE_PTR(os_release_path);
                 }
         }
@@ -252,7 +253,7 @@ static int extract_now(
                 FOREACH_DIRENT(de, d, return log_debug_errno(errno, "Failed to read directory: %m")) {
                         _cleanup_(portable_metadata_unrefp) PortableMetadata *m = NULL;
                         _cleanup_(mac_selinux_freep) char *con = NULL;
-                        _cleanup_close_ int fd = -1;
+                        _cleanup_close_ int fd = -EBADF;
 
                         if (!unit_name_is_valid(de->d_name, UNIT_NAME_ANY))
                                 continue;
@@ -278,7 +279,7 @@ static int extract_now(
                          * we have to preserve it. Copy it out so that it can be applied later. */
 
                         r = fgetfilecon_raw(fd, &con);
-                        if (r < 0 && errno != ENODATA)
+                        if (r < 0 && !ERRNO_IS_XATTR_ABSENT(errno))
                                 log_debug_errno(errno, "Failed to get SELinux file context from '%s', ignoring: %m", de->d_name);
 #endif
 
@@ -297,7 +298,7 @@ static int extract_now(
                         m = portable_metadata_new(de->d_name, where, con, fd);
                         if (!m)
                                 return -ENOMEM;
-                        fd = -1;
+                        fd = -EBADF;
 
                         m->source = path_join(resolved, de->d_name);
                         if (!m->source)
@@ -321,6 +322,7 @@ static int extract_now(
 static int portable_extract_by_path(
                 const char *path,
                 bool path_is_extension,
+                bool relax_extension_release_check,
                 char **matches,
                 PortableMetadata **ret_os_release,
                 Hashmap **ret_unit_files,
@@ -333,7 +335,7 @@ static int portable_extract_by_path(
 
         assert(path);
 
-        r = loop_device_make_by_path(path, O_RDONLY, LO_FLAGS_PARTSCAN, LOCK_SH, &d);
+        r = loop_device_make_by_path(path, O_RDONLY, /* sector_size= */ UINT32_MAX, LO_FLAGS_PARTSCAN, LOCK_SH, &d);
         if (r == -EISDIR) {
                 _cleanup_free_ char *image_name = NULL;
 
@@ -344,7 +346,7 @@ static int portable_extract_by_path(
                 if (r < 0)
                         return log_error_errno(r, "Failed to extract image name from path '%s': %m", path);
 
-                r = extract_now(path, matches, image_name, path_is_extension, -1, &os_release, &unit_files);
+                r = extract_now(path, matches, image_name, path_is_extension, /* relax_extension_release_check= */ false, -1, &os_release, &unit_files);
                 if (r < 0)
                         return r;
 
@@ -353,7 +355,7 @@ static int portable_extract_by_path(
         else {
                 _cleanup_(dissected_image_unrefp) DissectedImage *m = NULL;
                 _cleanup_(rmdir_and_freep) char *tmpdir = NULL;
-                _cleanup_(close_pairp) int seq[2] = { -1, -1 };
+                _cleanup_(close_pairp) int seq[2] = PIPE_EBADF;
                 _cleanup_(sigkill_waitp) pid_t child = 0;
 
                 /* We now have a loopback block device, let's fork off a child in its own mount namespace, mount it
@@ -373,7 +375,9 @@ static int portable_extract_by_path(
                                 DISSECT_IMAGE_REQUIRE_ROOT |
                                 DISSECT_IMAGE_DISCARD_ON_LOOP |
                                 DISSECT_IMAGE_RELAX_VAR_CHECK |
-                                DISSECT_IMAGE_USR_NO_ROOT,
+                                DISSECT_IMAGE_USR_NO_ROOT |
+                                DISSECT_IMAGE_ADD_PARTITION_DEVICES |
+                                DISSECT_IMAGE_PIN_PARTITION_DEVICES,
                                 &m);
                 if (r == -ENOPKG)
                         sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Couldn't identify a suitable partition table or file system in '%s'.", path);
@@ -400,7 +404,7 @@ static int portable_extract_by_path(
                         seq[0] = safe_close(seq[0]);
 
                         if (path_is_extension)
-                                flags |= DISSECT_IMAGE_VALIDATE_OS_EXT;
+                                flags |= DISSECT_IMAGE_VALIDATE_OS_EXT | (relax_extension_release_check ? DISSECT_IMAGE_RELAX_SYSEXT_CHECK : 0);
                         else
                                 flags |= DISSECT_IMAGE_VALIDATE_OS;
 
@@ -410,7 +414,7 @@ static int portable_extract_by_path(
                                 goto child_finish;
                         }
 
-                        r = extract_now(tmpdir, matches, m->image_name, path_is_extension, seq[1], NULL, NULL);
+                        r = extract_now(tmpdir, matches, m->image_name, path_is_extension, relax_extension_release_check, seq[1], NULL, NULL);
 
                 child_finish:
                         _exit(r < 0 ? EXIT_FAILURE : EXIT_SUCCESS);
@@ -424,7 +428,7 @@ static int portable_extract_by_path(
 
                 for (;;) {
                         _cleanup_(portable_metadata_unrefp) PortableMetadata *add = NULL;
-                        _cleanup_close_ int fd = -1;
+                        _cleanup_close_ int fd = -EBADF;
                         /* We use NAME_MAX space for the SELinux label here. The kernel currently enforces no limit, but
                          * according to suggestions from the SELinux people this will change and it will probably be
                          * identical to NAME_MAX. For now we use that, but this should be updated one day when the final
@@ -457,7 +461,7 @@ static int portable_extract_by_path(
                         add = portable_metadata_new(iov_buffer, path, selinux_label, fd);
                         if (!add)
                                 return -ENOMEM;
-                        fd = -1;
+                        fd = -EBADF;
 
                         /* Note that we do not initialize 'add->source' here, as the source path is not usable here as
                          * it refers to a path only valid in the short-living namespaced child process we forked
@@ -505,6 +509,7 @@ static int extract_image_and_extensions(
                 char **matches,
                 char **extension_image_paths,
                 bool validate_sysext,
+                bool relax_extension_release_check,
                 Image **ret_image,
                 OrderedHashmap **ret_extension_images,
                 OrderedHashmap **ret_extension_releases,
@@ -553,7 +558,7 @@ static int extract_image_and_extensions(
                 }
         }
 
-        r = portable_extract_by_path(image->path, /* path_is_extension= */ false, matches, &os_release, &unit_files, error);
+        r = portable_extract_by_path(image->path, /* path_is_extension= */ false, /* relax_extension_release_check= */ false, matches, &os_release, &unit_files, error);
         if (r < 0)
                 return r;
 
@@ -589,11 +594,11 @@ static int extract_image_and_extensions(
                 _cleanup_(portable_metadata_unrefp) PortableMetadata *extension_release_meta = NULL;
                 _cleanup_hashmap_free_ Hashmap *extra_unit_files = NULL;
                 _cleanup_strv_free_ char **extension_release = NULL;
-                _cleanup_close_ int extension_release_fd = -1;
+                _cleanup_close_ int extension_release_fd = -EBADF;
                 _cleanup_fclose_ FILE *f = NULL;
                 const char *e;
 
-                r = portable_extract_by_path(ext->path, /* path_is_extension= */ true, matches, &extension_release_meta, &extra_unit_files, error);
+                r = portable_extract_by_path(ext->path, /* path_is_extension= */ true, relax_extension_release_check, matches, &extension_release_meta, &extra_unit_files, error);
                 if (r < 0)
                         return r;
 
@@ -668,6 +673,7 @@ int portable_extract(
                 const char *name_or_path,
                 char **matches,
                 char **extension_image_paths,
+                PortableFlags flags,
                 PortableMetadata **ret_os_release,
                 OrderedHashmap **ret_extension_releases,
                 Hashmap **ret_unit_files,
@@ -688,6 +694,7 @@ int portable_extract(
                         matches,
                         extension_image_paths,
                         /* validate_sysext= */ false,
+                        /* relax_extension_release_check= */ FLAGS_SET(flags, PORTABLE_FORCE_SYSEXT),
                         &image,
                         &extension_images,
                         &extension_releases,
@@ -955,6 +962,7 @@ static int install_chroot_dropin(
                 OrderedHashmap *extension_images,
                 const PortableMetadata *m,
                 const char *dropin_dir,
+                PortableFlags flags,
                 char **ret_dropin,
                 PortableChange **changes,
                 size_t *n_changes) {
@@ -1004,7 +1012,16 @@ static int install_chroot_dropin(
 
                 if (m->image_path && !path_equal(m->image_path, image_path))
                         ORDERED_HASHMAP_FOREACH(ext, extension_images)
-                                if (!strextend(&text, extension_setting_from_image(ext->type), ext->path, "\n"))
+                                if (!strextend(&text,
+                                               extension_setting_from_image(ext->type),
+                                               ext->path,
+                                               /* With --force tell PID1 to avoid enforcing that the image <name> and
+                                                * extension-release.<name> have to match. */
+                                               !IN_SET(type, IMAGE_DIRECTORY, IMAGE_SUBVOLUME) &&
+                                                   FLAGS_SET(flags, PORTABLE_FORCE_SYSEXT) ?
+                                                       ":x-systemd.relax-extension-release-check" :
+                                                       "",
+                                               "\n"))
                                         return -ENOMEM;
         }
 
@@ -1116,7 +1133,7 @@ static int attach_unit_file(
         (void) mkdir_parents(where, 0755);
         if (mkdir(where, 0755) < 0) {
                 if (errno != EEXIST)
-                        return -errno;
+                        return log_debug_errno(errno, "Failed to create attach directory %s: %m", where);
         } else
                 (void) portable_changes_add(changes, n_changes, PORTABLE_MKDIR, where, NULL);
 
@@ -1130,7 +1147,7 @@ static int attach_unit_file(
 
         if (mkdir(dropin_dir, 0755) < 0) {
                 if (errno != EEXIST)
-                        return -errno;
+                        return log_debug_errno(errno, "Failed to create drop-in directory %s: %m", dropin_dir);
         } else
                 (void) portable_changes_add(changes, n_changes, PORTABLE_MKDIR, dropin_dir, NULL);
 
@@ -1138,7 +1155,7 @@ static int attach_unit_file(
          * is reloaded while we are creating things here: as long as only the drop-ins exist the unit doesn't exist at
          * all for PID 1. */
 
-        r = install_chroot_dropin(image_path, type, extension_images, m, dropin_dir, &chroot_dropin, changes, n_changes);
+        r = install_chroot_dropin(image_path, type, extension_images, m, dropin_dir, flags, &chroot_dropin, changes, n_changes);
         if (r < 0)
                 return r;
 
@@ -1155,7 +1172,7 @@ static int attach_unit_file(
 
         } else {
                 _cleanup_(unlink_and_freep) char *tmp = NULL;
-                _cleanup_close_ int fd = -1;
+                _cleanup_close_ int fd = -EBADF;
 
                 (void) mac_selinux_create_file_prepare_label(path, m->selinux_label);
 
@@ -1303,6 +1320,7 @@ int portable_attach(
                         matches,
                         extension_image_paths,
                         /* validate_sysext= */ true,
+                        /* relax_extension_release_check= */ FLAGS_SET(flags, PORTABLE_FORCE_SYSEXT),
                         &image,
                         &extension_images,
                         /* extension_releases= */ NULL,
@@ -1357,25 +1375,26 @@ int portable_attach(
         if (r < 0)
                 return r;
 
-        HASHMAP_FOREACH(item, unit_files) {
-                r = unit_file_exists(LOOKUP_SCOPE_SYSTEM, &paths, item->name);
-                if (r < 0)
-                        return sd_bus_error_set_errnof(error, r, "Failed to determine whether unit '%s' exists on the host: %m", item->name);
-                if (!FLAGS_SET(flags, PORTABLE_REATTACH) && r > 0)
-                        return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' exists on the host already, refusing.", item->name);
+        if (!FLAGS_SET(flags, PORTABLE_REATTACH) && !FLAGS_SET(flags, PORTABLE_FORCE_ATTACH))
+                HASHMAP_FOREACH(item, unit_files) {
+                        r = unit_file_exists(LOOKUP_SCOPE_SYSTEM, &paths, item->name);
+                        if (r < 0)
+                                return sd_bus_error_set_errnof(error, r, "Failed to determine whether unit '%s' exists on the host: %m", item->name);
+                        if (r > 0)
+                                return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' exists on the host already, refusing.", item->name);
 
-                r = unit_file_is_active(bus, item->name, error);
-                if (r < 0)
-                        return r;
-                if (!FLAGS_SET(flags, PORTABLE_REATTACH) && r > 0)
-                        return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' is active already, refusing.", item->name);
-        }
+                        r = unit_file_is_active(bus, item->name, error);
+                        if (r < 0)
+                                return r;
+                        if (r > 0)
+                                return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' is active already, refusing.", item->name);
+                }
 
         HASHMAP_FOREACH(item, unit_files) {
                 r = attach_unit_file(&paths, image->path, image->type, extension_images,
                                      item, profile, flags, changes, n_changes);
                 if (r < 0)
-                        return r;
+                        return sd_bus_error_set_errnof(error, r, "Failed to attach unit '%s': %m", item->name);
         }
 
         /* We don't care too much for the image symlink, it's just a convenience thing, it's not necessary for proper
@@ -1483,7 +1502,7 @@ static int test_chroot_dropin(
 
         _cleanup_free_ char *line = NULL, *marker = NULL;
         _cleanup_fclose_ FILE *f = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         const char *p, *e, *k;
         int r;
 
@@ -1599,11 +1618,13 @@ int portable_detach(
                 if (r == 0)
                         continue;
 
-                r = unit_file_is_active(bus, unit_name, error);
-                if (r < 0)
-                        return r;
-                if (!FLAGS_SET(flags, PORTABLE_REATTACH) && r > 0)
-                        return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' is active, can't detach.", unit_name);
+                if (!FLAGS_SET(flags, PORTABLE_REATTACH) && !FLAGS_SET(flags, PORTABLE_FORCE_ATTACH)) {
+                        r = unit_file_is_active(bus, unit_name, error);
+                        if (r < 0)
+                                return r;
+                        if (r > 0)
+                                return sd_bus_error_setf(error, BUS_ERROR_UNIT_EXISTS, "Unit file '%s' is active, can't detach.", unit_name);
+                }
 
                 r = set_ensure_consume(&unit_files, &string_hash_ops_free, TAKE_PTR(unit_name));
                 if (r < 0)

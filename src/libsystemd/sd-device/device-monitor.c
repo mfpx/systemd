@@ -48,7 +48,6 @@ struct sd_device_monitor {
         bool bound;
 
         UidRange *mapped_userns_uid_range;
-        size_t n_uid_range;
 
         Hashmap *subsystem_filter;
         Set *tag_filter;
@@ -131,7 +130,7 @@ int device_monitor_get_fd(sd_device_monitor *m) {
 
 int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, int fd) {
         _cleanup_(sd_device_monitor_unrefp) sd_device_monitor *m = NULL;
-        _cleanup_close_ int sock = -1;
+        _cleanup_close_ int sock = -EBADF;
         int r;
 
         assert(group >= 0 && group < _MONITOR_NETLINK_GROUP_MAX);
@@ -174,7 +173,6 @@ int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, 
                 .bound = fd >= 0,
                 .snl.nl.nl_family = AF_NETLINK,
                 .snl.nl.nl_groups = group,
-                .n_uid_range = SIZE_MAX,
         };
 
         if (fd >= 0) {
@@ -186,7 +184,7 @@ int device_monitor_new_full(sd_device_monitor **ret, MonitorNetlinkGroup group, 
         }
 
         if (DEBUG_LOGGING) {
-                _cleanup_close_ int netns = -1;
+                _cleanup_close_ int netns = -EBADF;
 
                 /* So here's the thing: only AF_NETLINK sockets from the main network namespace will get
                  * hardware events. Let's check if ours is from there, and if not generate a debug message,
@@ -244,10 +242,14 @@ _public_ int sd_device_monitor_stop(sd_device_monitor *m) {
 
 static int device_monitor_event_handler(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
         _cleanup_(sd_device_unrefp) sd_device *device = NULL;
+        _unused_ _cleanup_(log_context_freep) LogContext *c = NULL;
         sd_device_monitor *m = ASSERT_PTR(userdata);
 
         if (device_monitor_receive_device(m, &device) <= 0)
                 return 0;
+
+        if (log_context_enabled())
+                c = log_context_new_consume(device_make_log_fields(device));
 
         if (m->callback)
                 return m->callback(m, device, m->userdata);
@@ -376,7 +378,7 @@ static sd_device_monitor *device_monitor_free(sd_device_monitor *m) {
 
         (void) sd_device_monitor_detach_event(m);
 
-        free(m->mapped_userns_uid_range);
+        uid_range_free(m->mapped_userns_uid_range);
         free(m->description);
         hashmap_free(m->subsystem_filter);
         set_free(m->tag_filter);
@@ -468,15 +470,14 @@ static bool check_sender_uid(sd_device_monitor *m, uid_t uid) {
         if (uid == getuid() || uid == geteuid())
                 return true;
 
-        if (m->n_uid_range == SIZE_MAX) {
-                m->n_uid_range = 0;
-                r = uid_range_load_userns(&m->mapped_userns_uid_range, &m->n_uid_range, NULL);
+        if (!m->mapped_userns_uid_range) {
+                r = uid_range_load_userns(&m->mapped_userns_uid_range, NULL);
                 if (r < 0)
                         log_monitor_errno(m, r, "Failed to load UID ranges mapped to the current user namespace, ignoring: %m");
         }
 
         /* Trust messages come from outside of the current user namespace. */
-        if (m->n_uid_range != SIZE_MAX && !uid_range_contains(m->mapped_userns_uid_range, m->n_uid_range, uid))
+        if (!uid_range_contains(m->mapped_userns_uid_range, uid))
                 return true;
 
         /* Otherwise, refuse messages. */
@@ -485,14 +486,13 @@ static bool check_sender_uid(sd_device_monitor *m, uid_t uid) {
 
 int device_monitor_receive_device(sd_device_monitor *m, sd_device **ret) {
         _cleanup_(sd_device_unrefp) sd_device *device = NULL;
+        _cleanup_free_ uint8_t *buf_alloc = NULL;
         union {
-                monitor_netlink_header nlh;
-                char raw[8192];
-        } buf;
-        struct iovec iov = {
-                .iov_base = &buf,
-                .iov_len = sizeof(buf)
-        };
+                monitor_netlink_header *nlh;
+                char *nulstr;
+                uint8_t *buf;
+        } message;
+        struct iovec iov;
         CMSG_BUFFER_TYPE(CMSG_SPACE(sizeof(struct ucred))) control;
         union sockaddr_union snl;
         struct msghdr smsg = {
@@ -505,22 +505,45 @@ int device_monitor_receive_device(sd_device_monitor *m, sd_device **ret) {
         };
         struct cmsghdr *cmsg;
         struct ucred *cred;
-        ssize_t buflen, bufpos;
+        size_t offset;
+        ssize_t n;
         bool is_initialized = false;
         int r;
 
         assert(m);
         assert(ret);
 
-        buflen = recvmsg(m->sock, &smsg, 0);
-        if (buflen < 0) {
+        n = next_datagram_size_fd(m->sock);
+        if (n < 0) {
+                if (!ERRNO_IS_TRANSIENT(n))
+                        log_monitor_errno(m, n, "Failed to get the received message size: %m");
+                return n;
+        }
+
+        if ((size_t) n < ALLOCA_MAX / sizeof(uint8_t) / 2)
+                message.buf = newa(uint8_t, n);
+        else {
+                buf_alloc = new(uint8_t, n);
+                if (!buf_alloc)
+                        return log_oom_debug();
+
+                message.buf = buf_alloc;
+        }
+
+        iov = IOVEC_MAKE(message.buf, n);
+
+        n = recvmsg(m->sock, &smsg, 0);
+        if (n < 0) {
                 if (!ERRNO_IS_TRANSIENT(errno))
                         log_monitor_errno(m, errno, "Failed to receive message: %m");
                 return -errno;
         }
 
-        if (buflen < 32 || (smsg.msg_flags & MSG_TRUNC))
-                return log_monitor_errno(m, SYNTHETIC_ERRNO(EINVAL), "Invalid message length.");
+        if (smsg.msg_flags & MSG_TRUNC)
+                return log_monitor_errno(m, SYNTHETIC_ERRNO(EINVAL), "Received truncated message, ignoring message.");
+
+        if (n < 32)
+                return log_monitor_errno(m, SYNTHETIC_ERRNO(EINVAL), "Invalid message length (%zi), ignoring message.", n);
 
         if (snl.nl.nl_groups == MONITOR_GROUP_NONE) {
                 /* unicast message, check if we trust the sender */
@@ -546,37 +569,37 @@ int device_monitor_receive_device(sd_device_monitor *m, sd_device **ret) {
                 return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN),
                                          "Sender uid="UID_FMT", message ignored.", cred->uid);
 
-        if (streq(buf.raw, "libudev")) {
+        if (!memchr(message.buf, 0, n))
+                return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN), "Received message without NUL, ignoring message.");
+
+        if (streq(message.nulstr, "libudev")) {
                 /* udev message needs proper version magic */
-                if (buf.nlh.magic != htobe32(UDEV_MONITOR_MAGIC))
+                if (message.nlh->magic != htobe32(UDEV_MONITOR_MAGIC))
                         return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN),
                                                  "Invalid message signature (%x != %x).",
-                                                 buf.nlh.magic, htobe32(UDEV_MONITOR_MAGIC));
+                                                 message.nlh->magic, htobe32(UDEV_MONITOR_MAGIC));
 
-                if (buf.nlh.properties_off+32 > (size_t) buflen)
+                if (message.nlh->properties_off + 32 > (size_t) n)
                         return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN),
-                                                 "Invalid message length (%u > %zd).",
-                                                 buf.nlh.properties_off+32, buflen);
+                                                 "Invalid offset for properties (%u > %zi).",
+                                                 message.nlh->properties_off + 32, n);
 
-                bufpos = buf.nlh.properties_off;
+                offset = message.nlh->properties_off;
 
                 /* devices received from udev are always initialized */
                 is_initialized = true;
 
         } else {
-                /* kernel message with header */
-                bufpos = strlen(buf.raw) + 1;
-                if ((size_t) bufpos < sizeof("a@/d") || bufpos >= buflen)
-                        return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN),
-                                                 "Invalid message length.");
+                /* check kernel message header */
+                if (!strstr(message.nulstr, "@/"))
+                        return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN), "Invalid message header.");
 
-                /* check message header */
-                if (!strstr(buf.raw, "@/"))
-                        return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN),
-                                                 "Invalid message header.");
+                offset = strlen(message.nulstr) + 1;
+                if (offset >= (size_t) n)
+                        return log_monitor_errno(m, SYNTHETIC_ERRNO(EAGAIN), "Invalid message length.");
         }
 
-        r = device_new_from_nulstr(&device, &buf.raw[bufpos], buflen - bufpos);
+        r = device_new_from_nulstr(&device, message.nulstr + offset, n - offset);
         if (r < 0)
                 return log_monitor_errno(m, r, "Failed to create device from received message: %m");
 

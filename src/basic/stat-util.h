@@ -11,6 +11,7 @@
 
 #include "macro.h"
 #include "missing_stat.h"
+#include "siphash24.h"
 
 int is_symlink(const char *path);
 int is_dir_full(int atfd, const char *fname, bool follow);
@@ -73,6 +74,9 @@ int proc_mounted(void);
 bool stat_inode_same(const struct stat *a, const struct stat *b);
 bool stat_inode_unmodified(const struct stat *a, const struct stat *b);
 
+bool statx_inode_same(const struct statx *a, const struct statx *b);
+bool statx_mount_same(const struct new_statx *a, const struct new_statx *b);
+
 int statx_fallback(int dfd, const char *path, int flags, unsigned mask, struct statx *sx);
 
 #if HAS_FEATURE_MEMORY_SANITIZER
@@ -93,3 +97,7 @@ int statx_fallback(int dfd, const char *path, int flags, unsigned mask, struct s
                 struct new_statx nsx;           \
         } var
 #endif
+
+void inode_hash_func(const struct stat *q, struct siphash *state);
+int inode_compare_func(const struct stat *a, const struct stat *b);
+extern const struct hash_ops inode_hash_ops;

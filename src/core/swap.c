@@ -660,10 +660,10 @@ static int swap_spawn(Swap *s, ExecCommand *c, pid_t *_pid) {
 
         _cleanup_(exec_params_clear) ExecParameters exec_params = {
                 .flags     = EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN,
-                .stdin_fd  = -1,
-                .stdout_fd = -1,
-                .stderr_fd = -1,
-                .exec_fd   = -1,
+                .stdin_fd  = -EBADF,
+                .stdout_fd = -EBADF,
+                .stderr_fd = -EBADF,
+                .exec_fd   = -EBADF,
         };
         pid_t pid;
         int r;
@@ -827,7 +827,7 @@ static void swap_enter_activating(Swap *s) {
                 }
         }
 
-        r = exec_command_set(s->control_command, "/sbin/swapon", NULL);
+        r = exec_command_set(s->control_command, "/sbin/swapon", "--fixpgsz", NULL);
         if (r < 0)
                 goto fail;
 

@@ -17,7 +17,6 @@
 #include "missing_drm.h"
 #include "missing_input.h"
 #include "parse-util.h"
-#include "util.h"
 
 enum SessionDeviceNotifications {
         SESSION_DEVICE_RESUME,
@@ -49,7 +48,7 @@ static int session_device_notify(SessionDevice *sd, enum SessionDeviceNotificati
                         sd->session->manager->bus,
                         &m, path,
                         "org.freedesktop.login1.Session",
-                        (type == SESSION_DEVICE_RESUME) ? "ResumeDevice" : "PauseDevice");
+                        type == SESSION_DEVICE_RESUME ? "ResumeDevice" : "PauseDevice");
         if (!m)
                 return r;
 
@@ -188,7 +187,7 @@ static int session_device_start(SessionDevice *sd) {
 
                 /* For evdev devices, the file descriptor might be left uninitialized. This might happen while resuming
                  * into a session and logind has been restarted right before. */
-                CLOSE_AND_REPLACE(sd->fd, r);
+                close_and_replace(sd->fd, r);
                 break;
 
         case DEVICE_TYPE_UNKNOWN:
@@ -334,7 +333,7 @@ int session_device_new(Session *s, dev_t dev, bool open_device, SessionDevice **
 
         sd->session = s;
         sd->dev = dev;
-        sd->fd = -1;
+        sd->fd = -EBADF;
         sd->type = DEVICE_TYPE_UNKNOWN;
 
         r = session_device_verify(sd);

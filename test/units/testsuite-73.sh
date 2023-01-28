@@ -92,6 +92,19 @@ test_locale() {
         return
     fi
 
+    # start with a known default environment and make sure to also give a
+    # default value to LC_CTYPE= since we're about to also set/unset it. We
+    # also reload PID1 configuration to make sure that PID1 environment itself
+    # is updated as it's not always been the case.
+    assert_rc 0 localectl set-locale "LANG=en_US.UTF-8" "LC_CTYPE=C"
+    systemctl daemon-reload
+    output=$(localectl)
+    assert_in "System Locale: LANG=en_US.UTF-8" "$output"
+    assert_in "LC_CTYPE=C" "$output"
+    output=$(systemctl show-environment)
+    assert_in "LANG=en_US.UTF-8" "$output"
+    assert_in "LC_CTYPE=C" "$output"
+
     # warn when kernel command line has locale settings
     output=$(SYSTEMD_PROC_CMDLINE="locale.LANG=C.UTF-8 locale.LC_CTYPE=ja_JP.UTF-8" localectl 2>&1)
     assert_in "Warning:" "$output"
@@ -118,9 +131,7 @@ LC_CTYPE=$i"
 
         assert_rc 0 localectl set-locale "$i"
         if [[ -f /etc/default/locale ]]; then
-            # Debian/Ubuntu patch is buggy, and LC_CTYPE= still exists.
-            assert_eq "$(cat /etc/default/locale)" "LANG=$i
-LC_CTYPE=$i"
+            assert_eq "$(cat /etc/default/locale)" "LANG=$i"
         else
             assert_eq "$(cat /etc/locale.conf)" "LANG=$i"
         fi
@@ -212,7 +223,7 @@ wait_vconsole_setup() {
 }
 
 test_vc_keymap() {
-    local i output
+    local i output vc
 
     if [[ -z "$(localectl list-keymaps)" ]]; then
         echo "No vconsole keymap installed, skipping test."
@@ -229,14 +240,15 @@ test_vc_keymap() {
         # clear previous conversion from VC -> X11 keymap
         systemctl stop systemd-localed.service
         wait_vconsole_setup
-        rm -f /etc/X11/xorg.conf.d/00-keyboard.conf /etc/default/keyboard
+        rm -f /etc/vconsole.conf /etc/X11/xorg.conf.d/00-keyboard.conf /etc/default/keyboard
 
         # set VC keymap
         assert_rc 0 localectl set-keymap "$i"
         output=$(localectl)
 
         # check VC keymap
-        assert_in "KEYMAP=$i" "$(cat /etc/vconsole.conf)"
+        vc=$(cat /etc/vconsole.conf)
+        assert_in "KEYMAP=$i" "$vc"
         assert_in "VC Keymap: $i" "$output"
 
         # check VC -> X11 keymap conversion
@@ -245,16 +257,31 @@ test_vc_keymap() {
             assert_in "X11 Model: pc105\+inet" "$output"
             assert_not_in "X11 Variant:" "$output"
             assert_in "X11 Options: terminate:ctrl_alt_bksp" "$output"
+
+            assert_in "XKBLAYOUT=us" "$vc"
+            assert_in "XKBMODEL=pc105\+inet" "$vc"
+            assert_not_in "XKBVARIANT" "$vc"
+            assert_in "XKBOPTIONS=terminate:ctrl_alt_bksp" "$vc"
         elif [[ "$i" == "us-acentos" ]]; then
             assert_in "X11 Layout: us" "$output"
             assert_in 'X11 Model: pc105$' "$output"
             assert_in "X11 Variant: intl" "$output"
             assert_in "X11 Options: terminate:ctrl_alt_bksp" "$output"
+
+            assert_in "XKBLAYOUT=us" "$vc"
+            assert_in "XKBMODEL=pc105$" "$vc"
+            assert_in "XKBVARIANT=intl" "$vc"
+            assert_in "XKBOPTIONS=terminate:ctrl_alt_bksp" "$vc"
         elif [[ "$i" =~ ^us-.* ]]; then
-            assert_in "X11 Layout: n/a" "$output"
+            assert_in "X11 Layout: .unset." "$output"
             assert_not_in "X11 Model:" "$output"
             assert_not_in "X11 Variant:" "$output"
             assert_not_in "X11 Options:" "$output"
+
+            assert_not_in "XKBLAYOUT" "$vc"
+            assert_not_in "XKBMODEL" "$vc"
+            assert_not_in "XKBVARIANT" "$vc"
+            assert_not_in "XKBOPTIONS" "$vc"
         fi
     done
 
@@ -262,7 +289,7 @@ test_vc_keymap() {
     systemctl stop systemd-localed.service
     wait_vconsole_setup
     rm -f /etc/vconsole.conf
-    assert_in "VC Keymap: n/a" "$(localectl)"
+    assert_in "VC Keymap: .unset." "$(localectl)"
 }
 
 test_x11_keymap() {
@@ -293,6 +320,12 @@ XKBOPTIONS=terminate:ctrl_alt_bksp"
         assert_in 'Option "XkbModel" "pc105\+inet"' "$output"
         assert_in 'Option "XkbVariant" "intl"' "$output"
         assert_in 'Option "XkbOptions" "terminate:ctrl_alt_bksp"' "$output"
+
+        output=$(cat /etc/vconsole.conf)
+        assert_in 'XKBLAYOUT=us' "$output"
+        assert_in 'XKBMODEL=pc105\+inet' "$output"
+        assert_in 'XKBVARIANT=intl' "$output"
+        assert_in 'XKBOPTIONS=terminate:ctrl_alt_bksp' "$output"
     fi
 
     output=$(localectl)
@@ -317,6 +350,12 @@ XKBVARIANT=intl"
         assert_in 'Option "XkbModel" "pc105\+inet"' "$output"
         assert_in 'Option "XkbVariant" "intl"' "$output"
         assert_not_in 'Option "XkbOptions"' "$output"
+
+        output=$(cat /etc/vconsole.conf)
+        assert_in 'XKBLAYOUT=us' "$output"
+        assert_in 'XKBMODEL=pc105\+inet' "$output"
+        assert_in 'XKBVARIANT=intl' "$output"
+        assert_not_in 'XKBOPTIONS' "$output"
     fi
 
     output=$(localectl)
@@ -340,6 +379,12 @@ XKBMODEL=pc105+inet"
         assert_in 'Option "XkbModel" "pc105\+inet"' "$output"
         assert_not_in 'Option "XkbVariant"' "$output"
         assert_not_in 'Option "XkbOptions"' "$output"
+
+        output=$(cat /etc/vconsole.conf)
+        assert_in 'XKBLAYOUT=us' "$output"
+        assert_in 'XKBMODEL=pc105\+inet' "$output"
+        assert_not_in 'XKBVARIANT' "$output"
+        assert_not_in 'XKBOPTIONS' "$output"
     fi
 
     output=$(localectl)
@@ -362,6 +407,12 @@ XKBMODEL=pc105+inet"
         assert_not_in 'Option "XkbModel"' "$output"
         assert_not_in 'Option "XkbVariant"' "$output"
         assert_not_in 'Option "XkbOptions"' "$output"
+
+        output=$(cat /etc/vconsole.conf)
+        assert_in 'XKBLAYOUT=us' "$output"
+        assert_not_in 'XKBMODEL' "$output"
+        assert_not_in 'XKBVARIANT' "$output"
+        assert_not_in 'XKBOPTIONS' "$output"
     fi
 
     output=$(localectl)
@@ -372,9 +423,9 @@ XKBMODEL=pc105+inet"
 
     # gets along without config file
     systemctl stop systemd-localed.service
-    rm -f /etc/X11/xorg.conf.d/00-keyboard.conf /etc/default/keyboard
+    rm -f /etc/vconsole.conf /etc/X11/xorg.conf.d/00-keyboard.conf /etc/default/keyboard
     output=$(localectl)
-    assert_in "X11 Layout: n/a" "$output"
+    assert_in "X11 Layout: .unset." "$output"
     assert_not_in "X11 Model:" "$output"
     assert_not_in "X11 Variant:" "$output"
     assert_not_in "X11 Options:" "$output"

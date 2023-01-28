@@ -309,9 +309,11 @@ typedef struct UserRecord {
         uint64_t luks_volume_key_size;
         char *luks_pbkdf_hash_algorithm;
         char *luks_pbkdf_type;
+        uint64_t luks_pbkdf_force_iterations;
         uint64_t luks_pbkdf_time_cost_usec;
         uint64_t luks_pbkdf_memory_cost;
         uint64_t luks_pbkdf_parallel_threads;
+        uint64_t luks_sector_size;
         char *luks_extra_mount_options;
 
         uint64_t disk_usage;
@@ -393,9 +395,11 @@ const char *user_record_luks_cipher(UserRecord *h);
 const char *user_record_luks_cipher_mode(UserRecord *h);
 uint64_t user_record_luks_volume_key_size(UserRecord *h);
 const char* user_record_luks_pbkdf_type(UserRecord *h);
+uint64_t user_record_luks_pbkdf_force_iterations(UserRecord *h);
 usec_t user_record_luks_pbkdf_time_cost_usec(UserRecord *h);
 uint64_t user_record_luks_pbkdf_memory_cost(UserRecord *h);
 uint64_t user_record_luks_pbkdf_parallel_threads(UserRecord *h);
+uint64_t user_record_luks_sector_size(UserRecord *h);
 const char *user_record_luks_pbkdf_hash_algorithm(UserRecord *h);
 gid_t user_record_gid(UserRecord *h);
 UserDisposition user_record_disposition(UserRecord *h);

@@ -22,6 +22,7 @@
 #include "alloc-util.h"
 #include "apparmor-setup.h"
 #include "architecture.h"
+#include "argv-util.h"
 #if HAVE_LIBBPF
 #include "bpf-lsm.h"
 #endif
@@ -36,7 +37,7 @@
 #include "crash-handler.h"
 #include "dbus-manager.h"
 #include "dbus.h"
-#include "def.h"
+#include "constants.h"
 #include "dev-setup.h"
 #include "efi-random.h"
 #include "efivars.h"
@@ -52,6 +53,7 @@
 #include "hostname-setup.h"
 #include "ima-setup.h"
 #include "import-creds.h"
+#include "initrd-util.h"
 #include "killall.h"
 #include "kmod-setup.h"
 #include "limits-util.h"
@@ -92,7 +94,6 @@
 #include "time-util.h"
 #include "umask-util.h"
 #include "user-util.h"
-#include "util.h"
 #include "virt.h"
 #include "watchdog.h"
 
@@ -172,6 +173,8 @@ static size_t arg_random_seed_size;
 static int arg_default_oom_score_adjust;
 static bool arg_default_oom_score_adjust_set;
 static char *arg_default_smack_process_label;
+static usec_t arg_reload_limit_interval_sec;
+static unsigned arg_reload_limit_burst;
 
 /* A copy of the original environment block */
 static char **saved_env = NULL;
@@ -210,7 +213,7 @@ static int manager_find_user_config_paths(char ***ret_files, char ***ret_dirs) {
 }
 
 static int console_setup(void) {
-        _cleanup_close_ int tty_fd = -1;
+        _cleanup_close_ int tty_fd = -EBADF;
         int r;
 
         tty_fd = open_terminal("/dev/console", O_WRONLY|O_NOCTTY|O_CLOEXEC);
@@ -482,6 +485,28 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 arg_random_seed = sz > 0 ? p : mfree(p);
                 arg_random_seed_size = sz;
 
+        } else if (proc_cmdline_key_streq(key, "systemd.reload_limit_interval_sec")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                r = parse_sec(value, &arg_reload_limit_interval_sec);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to parse systemd.reload_limit_interval_sec= argument '%s', ignoring: %m", value);
+                        return 0;
+                }
+
+        } else if (proc_cmdline_key_streq(key, "systemd.reload_limit_burst")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                r = safe_atou(value, &arg_reload_limit_burst);
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to parse systemd.reload_limit_burst= argument '%s', ignoring: %m", value);
+                        return 0;
+                }
+
         } else if (streq(key, "quiet") && !value) {
 
                 if (arg_show_status == _SHOW_STATUS_INVALID)
@@ -658,9 +683,11 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultMemoryAccounting",      config_parse_bool,                  0,                        &arg_default_memory_accounting    },
                 { "Manager", "DefaultTasksAccounting",       config_parse_bool,                  0,                        &arg_default_tasks_accounting     },
                 { "Manager", "DefaultTasksMax",              config_parse_tasks_max,             0,                        &arg_default_tasks_max            },
-                { "Manager", "CtrlAltDelBurstAction",        config_parse_emergency_action,      0,                        &arg_cad_burst_action             },
+                { "Manager", "CtrlAltDelBurstAction",        config_parse_emergency_action,      arg_system,               &arg_cad_burst_action             },
                 { "Manager", "DefaultOOMPolicy",             config_parse_oom_policy,            0,                        &arg_default_oom_policy           },
                 { "Manager", "DefaultOOMScoreAdjust",        config_parse_oom_score_adjust,      0,                        NULL                              },
+                { "Manager", "ReloadLimitIntervalSec",       config_parse_sec,                   0,                        &arg_reload_limit_interval_sec    },
+                { "Manager", "ReloadLimitBurst",             config_parse_unsigned,              0,                        &arg_reload_limit_burst           },
 #if ENABLE_SMACK
                 { "Manager", "DefaultSmackProcessLabel",     config_parse_string,                0,                        &arg_default_smack_process_label  },
 #else
@@ -761,6 +788,10 @@ static void set_manager_settings(Manager *m) {
         m->confirm_spawn = arg_confirm_spawn;
         m->service_watchdogs = arg_service_watchdogs;
         m->cad_burst_action = arg_cad_burst_action;
+        /* Note that we don't do structured initialization here, otherwise it will reset the rate limit
+         * counter on every daemon-reload. */
+        m->reload_ratelimit.interval = arg_reload_limit_interval_sec;
+        m->reload_ratelimit.burst = arg_reload_limit_burst;
 
         manager_set_watchdog(m, WATCHDOG_RUNTIME, arg_runtime_watchdog);
         manager_set_watchdog(m, WATCHDOG_REBOOT, arg_reboot_watchdog);
@@ -1183,9 +1214,10 @@ static void bump_file_max_and_nr_open(void) {
 #if BUMP_PROC_SYS_FS_FILE_MAX
         /* The maximum the kernel allows for this since 5.2 is LONG_MAX, use that. (Previously things were
          * different, but the operation would fail silently.) */
-        r = sysctl_writef("fs/file-max", "%li\n", LONG_MAX);
+        r = sysctl_write("fs/file-max", LONG_MAX_STR);
         if (r < 0)
-                log_full_errno(IN_SET(r, -EROFS, -EPERM, -EACCES) ? LOG_DEBUG : LOG_WARNING, r, "Failed to bump fs.file-max, ignoring: %m");
+                log_full_errno(IN_SET(r, -EROFS, -EPERM, -EACCES) ? LOG_DEBUG : LOG_WARNING,
+                               r, "Failed to bump fs.file-max, ignoring: %m");
 #endif
 
 #if BUMP_PROC_SYS_FS_NR_OPEN
@@ -1217,7 +1249,7 @@ static void bump_file_max_and_nr_open(void) {
                         break;
                 }
 
-                r = sysctl_writef("fs/nr_open", "%i\n", v);
+                r = sysctl_writef("fs/nr_open", "%i", v);
                 if (r == -EINVAL) {
                         log_debug("Couldn't write fs.nr_open as %i, halving it.", v);
                         v /= 2;
@@ -1339,7 +1371,7 @@ static int os_release_status(void) {
                 return log_full_errno(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, r,
                                       "Failed to read os-release file, ignoring: %m");
 
-        const char *label = empty_to_null(pretty_name) ?: empty_to_null(name) ?: "Linux";
+        const char *label = os_release_pretty_name(pretty_name, name);
 
         if (show_status_on(arg_show_status)) {
                 if (log_get_show_color())
@@ -1353,7 +1385,7 @@ static int os_release_status(void) {
                                       label);
         }
 
-        if (support_end && os_release_support_ended(support_end, false) > 0)
+        if (support_end && os_release_support_ended(support_end, /* quiet */ false, NULL) > 0)
                 /* pretty_name may include the version already, so we'll print the version only if we
                  * have it and we're not using pretty_name. */
                 status_printf(ANSI_HIGHLIGHT_RED "  !!  " ANSI_NORMAL, 0,
@@ -1374,7 +1406,7 @@ static int write_container_id(void) {
         if (isempty(c))
                 return 0;
 
-        RUN_WITH_UMASK(0022)
+        WITH_UMASK(0022)
                 r = write_string_file("/run/systemd/container", c, WRITE_STRING_FILE_CREATE);
         if (r < 0)
                 return log_warning_errno(r, "Failed to write /run/systemd/container, ignoring: %m");
@@ -1403,8 +1435,7 @@ static int bump_unix_max_dgram_qlen(void) {
         if (v >= DEFAULT_UNIX_MAX_DGRAM_QLEN)
                 return 0;
 
-        r = write_string_filef("/proc/sys/net/unix/max_dgram_qlen", WRITE_STRING_FILE_DISABLE_BUFFER,
-                               "%lu", DEFAULT_UNIX_MAX_DGRAM_QLEN);
+        r = sysctl_write("net/unix/max_dgram_qlen", STRINGIFY(DEFAULT_UNIX_MAX_DGRAM_QLEN));
         if (r < 0)
                 return log_full_errno(IN_SET(r, -EROFS, -EPERM, -EACCES) ? LOG_DEBUG : LOG_WARNING, r,
                                       "Failed to bump AF_UNIX datagram queue length, ignoring: %m");
@@ -1463,9 +1494,15 @@ static void redirect_telinit(int argc, char *argv[]) {
 #endif
 }
 
-static int become_shutdown(
-                const char *shutdown_verb,
-                int retval) {
+static int become_shutdown(int objective, int retval) {
+
+        static const char* const table[_MANAGER_OBJECTIVE_MAX] = {
+                [MANAGER_EXIT]     = "exit",
+                [MANAGER_REBOOT]   = "reboot",
+                [MANAGER_POWEROFF] = "poweroff",
+                [MANAGER_HALT]     = "halt",
+                [MANAGER_KEXEC]    = "kexec",
+        };
 
         char log_level[DECIMAL_STR_MAX(int) + 1],
                 exit_code[DECIMAL_STR_MAX(uint8_t) + 1],
@@ -1473,7 +1510,7 @@ static int become_shutdown(
 
         const char* command_line[13] = {
                 SYSTEMD_SHUTDOWN_BINARY_PATH,
-                shutdown_verb,
+                table[objective],
                 "--timeout", timeout,
                 "--log-level", log_level,
                 "--log-target",
@@ -1484,7 +1521,8 @@ static int become_shutdown(
         size_t pos = 7;
         int r;
 
-        assert(shutdown_verb);
+        assert(objective >= 0 && objective < _MANAGER_OBJECTIVE_MAX);
+        assert(table[objective]);
         assert(!command_line[pos]);
         env_block = strv_copy(environ);
 
@@ -1518,7 +1556,7 @@ static int become_shutdown(
         if (log_get_show_time())
                 command_line[pos++] = "--log-time";
 
-        if (streq(shutdown_verb, "exit")) {
+        if (objective == MANAGER_EXIT) {
                 command_line[pos++] = "--exit-code";
                 command_line[pos++] = exit_code;
                 xsprintf(exit_code, "%d", retval);
@@ -1526,9 +1564,9 @@ static int become_shutdown(
 
         assert(pos < ELEMENTSOF(command_line));
 
-        if (streq(shutdown_verb, "reboot"))
+        if (objective == MANAGER_REBOOT)
                 watchdog_timer = arg_reboot_watchdog;
-        else if (streq(shutdown_verb, "kexec"))
+        else if (objective == MANAGER_KEXEC)
                 watchdog_timer = arg_kexec_watchdog;
 
         /* If we reboot or kexec let's set the shutdown watchdog and tell the
@@ -1660,7 +1698,7 @@ static void initialize_coredump(bool skip_setup) {
 
         /* But at the same time, turn off the core_pattern logic by default, so that no coredumps are stored
          * until the systemd-coredump tool is enabled via sysctl. However it can be changed via the kernel
-         * command line later so core dumps can still be generated during early startup and in initramfs. */
+         * command line later so core dumps can still be generated during early startup and in initrd. */
         if (!skip_setup)
                 disable_coredumps();
 #endif
@@ -1858,7 +1896,7 @@ static int do_reexecute(
                 args[i++] = argv[j];
         assert(i <= args_size);
 
-        /* Re-enable any blocked signals, especially important if we switch from initial ramdisk to init=... */
+        /* Re-enable any blocked signals, especially important if we switch from initrd to init=... */
         (void) reset_all_signal_handlers();
         (void) reset_signal_mask();
         (void) rlimit_nofile_safe();
@@ -1894,7 +1932,6 @@ static int invoke_main_loop(
                 const struct rlimit *saved_rlimit_nofile,
                 const struct rlimit *saved_rlimit_memlock,
                 int *ret_retval,                   /* Return parameters relevant for shutting down */
-                const char **ret_shutdown_verb,    /* … */
                 FDSet **ret_fds,                   /* Return parameters for reexecuting */
                 char **ret_switch_root_dir,        /* … */
                 char **ret_switch_root_init,       /* … */
@@ -1906,7 +1943,6 @@ static int invoke_main_loop(
         assert(saved_rlimit_nofile);
         assert(saved_rlimit_memlock);
         assert(ret_retval);
-        assert(ret_shutdown_verb);
         assert(ret_fds);
         assert(ret_switch_root_dir);
         assert(ret_switch_root_init);
@@ -1924,6 +1960,8 @@ static int invoke_main_loop(
                 case MANAGER_RELOAD: {
                         LogTarget saved_log_target;
                         int saved_log_level;
+
+                        manager_send_reloading(m);
 
                         log_info("Reloading.");
 
@@ -1955,6 +1993,10 @@ static int invoke_main_loop(
                 }
 
                 case MANAGER_REEXECUTE:
+
+                        manager_send_reloading(m); /* From the perspective of the manager calling us this is
+                                                    * pretty much the same as a reload */
+
                         r = prepare_reexecute(m, &arg_serialization, ret_fds, false);
                         if (r < 0) {
                                 *ret_error_message = "Failed to prepare for reexecution";
@@ -1964,12 +2006,15 @@ static int invoke_main_loop(
                         log_notice("Reexecuting.");
 
                         *ret_retval = EXIT_SUCCESS;
-                        *ret_shutdown_verb = NULL;
                         *ret_switch_root_dir = *ret_switch_root_init = NULL;
 
                         return objective;
 
                 case MANAGER_SWITCH_ROOT:
+
+                        manager_send_reloading(m); /* From the perspective of the manager calling us this is
+                                                    * pretty much the same as a reload */
+
                         manager_set_switching_root(m, true);
 
                         if (!m->switch_root_init) {
@@ -1984,7 +2029,6 @@ static int invoke_main_loop(
                         log_notice("Switching root.");
 
                         *ret_retval = EXIT_SUCCESS;
-                        *ret_shutdown_verb = NULL;
 
                         /* Steal the switch root parameters */
                         *ret_switch_root_dir = TAKE_PTR(m->switch_root);
@@ -1997,7 +2041,6 @@ static int invoke_main_loop(
                                 log_debug("Exit.");
 
                                 *ret_retval = m->return_value;
-                                *ret_shutdown_verb = NULL;
                                 *ret_fds = NULL;
                                 *ret_switch_root_dir = *ret_switch_root_init = NULL;
 
@@ -2009,18 +2052,9 @@ static int invoke_main_loop(
                 case MANAGER_POWEROFF:
                 case MANAGER_HALT:
                 case MANAGER_KEXEC: {
-                        static const char* const table[_MANAGER_OBJECTIVE_MAX] = {
-                                [MANAGER_EXIT]     = "exit",
-                                [MANAGER_REBOOT]   = "reboot",
-                                [MANAGER_POWEROFF] = "poweroff",
-                                [MANAGER_HALT]     = "halt",
-                                [MANAGER_KEXEC]    = "kexec",
-                        };
-
                         log_notice("Shutting down.");
 
                         *ret_retval = m->return_value;
-                        assert_se(*ret_shutdown_verb = table[m->objective]);
                         *ret_fds = NULL;
                         *ret_switch_root_dir = *ret_switch_root_init = NULL;
 
@@ -2034,6 +2068,8 @@ static int invoke_main_loop(
 }
 
 static void log_execution_mode(bool *ret_first_boot) {
+        bool first_boot = false;
+
         assert(ret_first_boot);
 
         if (arg_system) {
@@ -2050,29 +2086,40 @@ static void log_execution_mode(bool *ret_first_boot) {
 
                 log_info("Detected architecture %s.", architecture_to_string(uname_architecture()));
 
-                if (in_initrd()) {
-                        *ret_first_boot = false;
-                        log_info("Running in initial RAM disk.");
-                } else {
+                if (in_initrd())
+                        log_info("Running in initrd.");
+                else {
                         int r;
                         _cleanup_free_ char *id_text = NULL;
 
-                        /* Let's check whether we are in first boot.  We use /etc/machine-id as flag file
-                         * for this: If it is missing or contains the value "uninitialized", this is the
-                         * first boot.  In any other case, it is not.  This allows container managers and
-                         * installers to provision a couple of files already.  If the container manager
-                         * wants to provision the machine ID itself it should pass $container_uuid to PID 1. */
+                        /* Let's check whether we are in first boot. First, check if an override was
+                         * specified on the kernel commandline. If yes, we honour that. */
 
-                        r = read_one_line_file("/etc/machine-id", &id_text);
-                        if (r < 0 || streq(id_text, "uninitialized")) {
-                                if (r < 0 && r != -ENOENT)
-                                        log_warning_errno(r, "Unexpected error while reading /etc/machine-id, ignoring: %m");
+                        r = proc_cmdline_get_bool("systemd.condition-first-boot", &first_boot);
+                        if (r < 0)
+                                log_debug_errno(r, "Failed to parse systemd.condition-first-boot= kernel commandline argument, ignoring: %m");
 
-                                *ret_first_boot = true;
-                                log_info("Detected first boot.");
-                        } else {
-                                *ret_first_boot = false;
-                                log_debug("Detected initialized system, this is not the first boot.");
+                        if (r > 0)
+                                log_full(first_boot ? LOG_INFO : LOG_DEBUG,
+                                         "Kernel commandline argument says we are %s first boot.",
+                                         first_boot ? "in" : "not in");
+                        else {
+                                /* Second, perform autodetection. We use /etc/machine-id as flag file for
+                                 * this: If it is missing or contains the value "uninitialized", this is the
+                                 * first boot. In other cases, it is not. This allows container managers and
+                                 * installers to provision a couple of files in /etc but still permit the
+                                 * first-boot initialization to occur. If the container manager wants to
+                                 * provision the machine ID it should pass $container_uuid to PID 1. */
+
+                                r = read_one_line_file("/etc/machine-id", &id_text);
+                                if (r < 0 || streq(id_text, "uninitialized")) {
+                                        if (r < 0 && r != -ENOENT)
+                                                log_warning_errno(r, "Unexpected error while reading /etc/machine-id, ignoring: %m");
+
+                                        first_boot = true;
+                                        log_info("Detected first boot.");
+                                } else
+                                        log_debug("Detected initialized system, this is not the first boot.");
                         }
                 }
 
@@ -2092,9 +2139,9 @@ static void log_execution_mode(bool *ret_first_boot) {
                                   arg_action == ACTION_TEST ? " test" : "",
                                   getuid(), strna(t), systemd_features);
                 }
-
-                *ret_first_boot = false;
         }
+
+        *ret_first_boot = first_boot;
 }
 
 static int initialize_runtime(
@@ -2134,7 +2181,7 @@ static int initialize_runtime(
                         (void) os_release_status();
                         (void) hostname_setup(true);
                         /* Force transient machine-id on first boot. */
-                        machine_id_setup(NULL, first_boot, arg_machine_id, NULL);
+                        machine_id_setup(NULL, /* force_transient= */ first_boot, arg_machine_id, NULL);
                         (void) loopback_setup();
                         bump_unix_max_dgram_qlen();
                         bump_file_max_and_nr_open();
@@ -2437,6 +2484,9 @@ static void reset_arguments(void) {
 
         arg_default_oom_score_adjust_set = false;
         arg_default_smack_process_label = mfree(arg_default_smack_process_label);
+
+        arg_reload_limit_interval_sec = 0;
+        arg_reload_limit_burst = 0;
 }
 
 static void determine_default_oom_score_adjust(void) {
@@ -2676,7 +2726,7 @@ int main(int argc, char *argv[]) {
         char *switch_root_dir = NULL, *switch_root_init = NULL;
         usec_t before_startup, after_startup;
         static char systemd[] = "systemd";
-        const char *shutdown_verb = NULL, *error_message = NULL;
+        const char *error_message = NULL;
         int r, retval = EXIT_FAILURE;
         Manager *m = NULL;
         FDSet *fds = NULL;
@@ -2817,8 +2867,8 @@ int main(int argc, char *argv[]) {
                         goto finish;
                 }
 
-                /* The efivarfs is now mounted, let's read the random seed off it */
-                (void) efi_take_random_seed();
+                /* The efivarfs is now mounted, let's lock down the system token. */
+                lock_down_efi_variables();
 
                 /* Cache command-line options passed from EFI variables */
                 if (!skip_setup)
@@ -2989,7 +3039,6 @@ int main(int argc, char *argv[]) {
                              &saved_rlimit_nofile,
                              &saved_rlimit_memlock,
                              &retval,
-                             &shutdown_verb,
                              &fds,
                              &switch_root_dir,
                              &switch_root_init,
@@ -3049,8 +3098,13 @@ finish:
 
         /* Try to invoke the shutdown binary unless we already failed.
          * If we failed above, we want to freeze after finishing cleanup. */
-        if (r >= 0 && shutdown_verb) {
-                r = become_shutdown(shutdown_verb, retval);
+        if (arg_system && IN_SET(r, MANAGER_EXIT,
+                                    MANAGER_REBOOT,
+                                    MANAGER_POWEROFF,
+                                    MANAGER_HALT,
+                                    MANAGER_KEXEC)) {
+
+                r = become_shutdown(r, retval);
                 log_error_errno(r, "Failed to execute shutdown binary, %s: %m", getpid_cached() == 1 ? "freezing" : "quitting");
                 error_message = "Failed to execute shutdown binary";
         }

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <uchar.h>
@@ -99,12 +100,42 @@ static inline char16_t *xstrdup16(const char16_t *s) {
         return xstrndup16(s, SIZE_MAX);
 }
 
+char16_t *xstrn8_to_16(const char *str8, size_t n);
+static inline char16_t *xstr8_to_16(const char *str8) {
+        return xstrn8_to_16(str8, strlen8(str8));
+}
+
 bool efi_fnmatch(const char16_t *pattern, const char16_t *haystack);
 
 bool parse_number8(const char *s, uint64_t *ret_u, const char **ret_tail);
 bool parse_number16(const char16_t *s, uint64_t *ret_u, const char16_t **ret_tail);
 
-#ifdef SD_BOOT
+typedef size_t EFI_STATUS;
+
+#if !SD_BOOT
+/* Provide these for unit testing. */
+enum {
+        EFI_ERROR_MASK = ((EFI_STATUS) 1 << (sizeof(EFI_STATUS) * CHAR_BIT - 1)),
+        EFI_SUCCESS = 0,
+        EFI_LOAD_ERROR = 1 | EFI_ERROR_MASK,
+};
+#endif
+
+#ifdef __clang__
+#  define _gnu_printf_(a, b) _printf_(a, b)
+#else
+#  define _gnu_printf_(a, b) __attribute__((format(gnu_printf, a, b)))
+#endif
+
+_gnu_printf_(2, 3) void printf_status(EFI_STATUS status, const char *format, ...);
+_gnu_printf_(2, 0) void vprintf_status(EFI_STATUS status, const char *format, va_list ap);
+_gnu_printf_(2, 3) _warn_unused_result_ char16_t *xasprintf_status(EFI_STATUS status, const char *format, ...);
+_gnu_printf_(2, 0) _warn_unused_result_ char16_t *xvasprintf_status(EFI_STATUS status, const char *format, va_list ap);
+
+#if SD_BOOT
+#  define printf(...) printf_status(EFI_SUCCESS, __VA_ARGS__)
+#  define xasprintf(...) xasprintf_status(EFI_SUCCESS, __VA_ARGS__)
+
 /* The compiler normally has knowledge about standard functions such as memcmp, but this is not the case when
  * compiling with -ffreestanding. By referring to builtins, the compiler can check arguments and do
  * optimizations again. Note that we still need to provide implementations as the compiler is free to not
@@ -119,9 +150,10 @@ static inline void *mempcpy(void * restrict dest, const void * restrict src, siz
         memcpy(dest, src, n);
         return (uint8_t *) dest + n;
 }
-#endif
 
-/* The actual implementations of builtins with efi_ prefix so we can unit test them. */
+#else
+/* For unit testing. */
 int efi_memcmp(const void *p1, const void *p2, size_t n);
 void *efi_memcpy(void * restrict dest, const void * restrict src, size_t n);
 void *efi_memset(void *p, int c, size_t n);
+#endif

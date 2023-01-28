@@ -3,11 +3,12 @@
 #include <getopt.h>
 #include <unistd.h>
 
+#include "build.h"
 #include "bus-error.h"
 #include "bus-locator.h"
 #include "chase-symlinks.h"
 #include "conf-files.h"
-#include "def.h"
+#include "constants.h"
 #include "dirent-util.h"
 #include "dissect-image.h"
 #include "fd-util.h"
@@ -510,7 +511,7 @@ static int context_show_version(Context *c, const char *version) {
         (void) table_set_align_percent(t, table_get_cell(t, 0, 6), 100);
         (void) table_set_align_percent(t, table_get_cell(t, 0, 7), 100);
         (void) table_set_align_percent(t, table_get_cell(t, 0, 8), 100);
-        (void) table_set_empty_string(t, "-");
+        table_set_ersatz_string(t, TABLE_ERSATZ_DASH);
 
         /* Determine if the target will make use of partition/fs attributes for any of the transfers */
         for (size_t n = 0; n < c->n_transfers; n++) {
@@ -855,17 +856,14 @@ static int reboot_now(void) {
 static int process_image(
                 bool ro,
                 char **ret_mounted_dir,
-                LoopDevice **ret_loop_device,
-                DecryptedImage **ret_decrypted_image) {
+                LoopDevice **ret_loop_device) {
 
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *mounted_dir = NULL;
         int r;
 
         assert(ret_mounted_dir);
         assert(ret_loop_device);
-        assert(ret_decrypted_image);
 
         if (!arg_image)
                 return 0;
@@ -883,8 +881,7 @@ static int process_image(
                         DISSECT_IMAGE_GENERIC_ROOT |
                         DISSECT_IMAGE_REQUIRE_ROOT,
                         &mounted_dir,
-                        &loop_device,
-                        &decrypted_image);
+                        &loop_device);
         if (r < 0)
                 return r;
 
@@ -894,14 +891,12 @@ static int process_image(
 
         *ret_mounted_dir = TAKE_PTR(mounted_dir);
         *ret_loop_device = TAKE_PTR(loop_device);
-        *ret_decrypted_image = TAKE_PTR(decrypted_image);
 
         return 0;
 }
 
 static int verb_list(int argc, char **argv, void *userdata) {
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *mounted_dir = NULL;
         _cleanup_(context_freep) Context* context = NULL;
         const char *version;
@@ -910,7 +905,7 @@ static int verb_list(int argc, char **argv, void *userdata) {
         assert(argc <= 2);
         version = argc >= 2 ? argv[1] : NULL;
 
-        r = process_image(/* ro= */ true, &mounted_dir, &loop_device, &decrypted_image);
+        r = process_image(/* ro= */ true, &mounted_dir, &loop_device);
         if (r < 0)
                 return r;
 
@@ -926,14 +921,13 @@ static int verb_list(int argc, char **argv, void *userdata) {
 
 static int verb_check_new(int argc, char **argv, void *userdata) {
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *mounted_dir = NULL;
         _cleanup_(context_freep) Context* context = NULL;
         int r;
 
         assert(argc <= 1);
 
-        r = process_image(/* ro= */ true, &mounted_dir, &loop_device, &decrypted_image);
+        r = process_image(/* ro= */ true, &mounted_dir, &loop_device);
         if (r < 0)
                 return r;
 
@@ -952,14 +946,13 @@ static int verb_check_new(int argc, char **argv, void *userdata) {
 
 static int verb_vacuum(int argc, char **argv, void *userdata) {
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *mounted_dir = NULL;
         _cleanup_(context_freep) Context* context = NULL;
         int r;
 
         assert(argc <= 1);
 
-        r = process_image(/* ro= */ false, &mounted_dir, &loop_device, &decrypted_image);
+        r = process_image(/* ro= */ false, &mounted_dir, &loop_device);
         if (r < 0)
                 return r;
 
@@ -972,7 +965,6 @@ static int verb_vacuum(int argc, char **argv, void *userdata) {
 
 static int verb_update(int argc, char **argv, void *userdata) {
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *mounted_dir = NULL;
         _cleanup_(context_freep) Context* context = NULL;
         _cleanup_free_ char *booted_version = NULL;
@@ -993,7 +985,7 @@ static int verb_update(int argc, char **argv, void *userdata) {
                         return log_error_errno(SYNTHETIC_ERRNO(ENODATA), "/etc/os-release lacks IMAGE_VERSION field.");
         }
 
-        r = process_image(/* ro= */ false, &mounted_dir, &loop_device, &decrypted_image);
+        r = process_image(/* ro= */ false, &mounted_dir, &loop_device);
         if (r < 0)
                 return r;
 
@@ -1096,7 +1088,6 @@ static int component_name_valid(const char *c) {
 
 static int verb_components(int argc, char **argv, void *userdata) {
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *mounted_dir = NULL;
         _cleanup_(set_freep) Set *names = NULL;
         _cleanup_free_ char **z = NULL; /* We use simple free() rather than strv_free() here, since set_free() will free the strings for us */
@@ -1106,7 +1097,7 @@ static int verb_components(int argc, char **argv, void *userdata) {
 
         assert(argc <= 1);
 
-        r = process_image(/* ro= */ false, &mounted_dir, &loop_device, &decrypted_image);
+        r = process_image(/* ro= */ false, &mounted_dir, &loop_device);
         if (r < 0)
                 return r;
 

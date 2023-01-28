@@ -19,12 +19,13 @@
 
 #include "acl-util.h"
 #include "alloc-util.h"
+#include "build.h"
 #include "bus-error.h"
 #include "bus-util.h"
 #include "catalog.h"
 #include "chase-symlinks.h"
 #include "chattr-util.h"
-#include "def.h"
+#include "constants.h"
 #include "dissect-image.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -45,6 +46,7 @@
 #include "log.h"
 #include "logs-show.h"
 #include "memory-util.h"
+#include "missing_sched.h"
 #include "mkdir.h"
 #include "mount-util.h"
 #include "mountpoint-util.h"
@@ -127,7 +129,7 @@ static const char *arg_namespace = NULL;
 static uint64_t arg_vacuum_size = 0;
 static uint64_t arg_vacuum_n_files = 0;
 static usec_t arg_vacuum_time = 0;
-static char **arg_output_fields = NULL;
+static Set *arg_output_fields = NULL;
 static const char *arg_pattern = NULL;
 static pcre2_code *arg_compiled_pattern = NULL;
 static PatternCompileCase arg_case = PATTERN_COMPILE_CASE_AUTO;
@@ -140,7 +142,7 @@ STATIC_DESTRUCTOR_REGISTER(arg_system_units, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_user_units, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_root, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image, freep);
-STATIC_DESTRUCTOR_REGISTER(arg_output_fields, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_output_fields, set_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_compiled_pattern, pattern_freep);
 
 static enum {
@@ -1024,13 +1026,10 @@ static int parse_argv(int argc, char *argv[]) {
                         if (!v)
                                 return log_oom();
 
-                        if (!arg_output_fields)
-                                arg_output_fields = TAKE_PTR(v);
-                        else {
-                                r = strv_extend_strv(&arg_output_fields, v, true);
-                                if (r < 0)
-                                        return log_oom();
-                        }
+                        r = set_put_strdupv(&arg_output_fields, v);
+                        if (r < 0)
+                                return log_oom();
+
                         break;
                 }
 
@@ -1118,11 +1117,11 @@ static int add_matches(sd_journal *j, char **args) {
                                 if (executable_is_script(p, &interpreter) > 0) {
                                         _cleanup_free_ char *comm = NULL;
 
-                                        comm = strndup(basename(p), 15);
-                                        if (!comm)
-                                                return log_oom();
+                                        r = path_extract_filename(p, &comm);
+                                        if (r < 0)
+                                                return log_error_errno(r, "Failed to extract filename of '%s': %m", p);
 
-                                        t = strjoin("_COMM=", comm);
+                                        t = strjoin("_COMM=", strshorten(comm, TASK_COMM_LEN-1));
                                         if (!t)
                                                 return log_oom();
 
@@ -1460,7 +1459,7 @@ static int add_boot(sd_journal *j) {
         r = get_boots(j, NULL, &boot_id, arg_boot_offset);
         assert(r <= 1);
         if (r <= 0) {
-                const char *reason = (r == 0) ? "No such boot ID in journal" : strerror_safe(r);
+                const char *reason = (r == 0) ? "No such boot ID in journal" : STRERROR(r);
 
                 if (sd_id128_is_null(arg_boot_id))
                         log_error("Data from the specified boot (%+i) is not available: %s",
@@ -1511,7 +1510,6 @@ static int get_possible_units(
                 Set **units) {
 
         _cleanup_set_free_free_ Set *found = NULL;
-        const char *field;
         int r;
 
         found = set_new(&string_hash_ops);
@@ -1803,7 +1801,7 @@ static int setup_keys(void) {
         _cleanup_(unlink_and_freep) char *k = NULL;
         _cleanup_free_ char *p = NULL;
         uint8_t *mpk, *seed, *state;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         sd_id128_t machine, boot;
         struct stat st;
         uint64_t n;
@@ -1960,7 +1958,7 @@ static int setup_keys(void) {
 #endif
 }
 
-static int verify(sd_journal *j) {
+static int verify(sd_journal *j, bool verbose) {
         int r = 0;
         JournalFile *f;
 
@@ -1977,7 +1975,7 @@ static int verify(sd_journal *j) {
                         log_notice("Journal file %s has sealing enabled but verification key has not been passed using --verify-key=.", f->path);
 #endif
 
-                k = journal_file_verify(f, arg_verify_key, &first, &validated, &last, true);
+                k = journal_file_verify(f, arg_verify_key, &first, &validated, &last, verbose);
                 if (k == -EINVAL)
                         /* If the key was invalid give up right-away. */
                         return k;
@@ -1985,19 +1983,22 @@ static int verify(sd_journal *j) {
                         r = log_warning_errno(k, "FAIL: %s (%m)", f->path);
                 else {
                         char a[FORMAT_TIMESTAMP_MAX], b[FORMAT_TIMESTAMP_MAX];
-                        log_info("PASS: %s", f->path);
+                        log_full(verbose ? LOG_INFO : LOG_DEBUG, "PASS: %s", f->path);
 
                         if (arg_verify_key && JOURNAL_HEADER_SEALED(f->header)) {
                                 if (validated > 0) {
-                                        log_info("=> Validated from %s to %s, final %s entries not sealed.",
+                                        log_full(verbose ? LOG_INFO : LOG_DEBUG,
+                                                 "=> Validated from %s to %s, final %s entries not sealed.",
                                                  format_timestamp_maybe_utc(a, sizeof(a), first),
                                                  format_timestamp_maybe_utc(b, sizeof(b), validated),
                                                  FORMAT_TIMESPAN(last > validated ? last - validated : 0, 0));
                                 } else if (last > 0)
-                                        log_info("=> No sealing yet, %s of entries not sealed.",
+                                        log_full(verbose ? LOG_INFO : LOG_DEBUG,
+                                                 "=> No sealing yet, %s of entries not sealed.",
                                                  FORMAT_TIMESPAN(last - first, 0));
                                 else
-                                        log_info("=> No sealing yet, no entries in file.");
+                                        log_full(verbose ? LOG_INFO : LOG_DEBUG,
+                                                 "=> No sealing yet, no entries in file.");
                         }
                 }
         }
@@ -2092,13 +2093,13 @@ static int wait_for_change(sd_journal *j, int poll_fd) {
 
 int main(int argc, char *argv[]) {
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
-        _cleanup_(decrypted_image_unrefp) DecryptedImage *decrypted_image = NULL;
         _cleanup_(umount_and_rmdir_and_freep) char *unlink_dir = NULL;
         bool previous_boot_id_valid = false, first_line = true, ellipsized = false, need_seek = false;
         bool use_cursor = false, after_cursor = false;
         _cleanup_(sd_journal_closep) sd_journal *j = NULL;
-        sd_id128_t previous_boot_id = {};  /* Unnecessary initialization to appease gcc */
-        int n_shown = 0, r, poll_fd = -1;
+        sd_id128_t previous_boot_id = SD_ID128_NULL, previous_boot_id_output = SD_ID128_NULL;
+        dual_timestamp previous_ts_output = DUAL_TIMESTAMP_NULL;
+        int n_shown = 0, r, poll_fd = -EBADF;
 
         setlocale(LC_ALL, "");
         log_setup();
@@ -2122,8 +2123,7 @@ int main(int argc, char *argv[]) {
                                 DISSECT_IMAGE_RELAX_VAR_CHECK |
                                 (arg_action == ACTION_UPDATE_CATALOG ? DISSECT_IMAGE_FSCK|DISSECT_IMAGE_GROWFS : DISSECT_IMAGE_READ_ONLY),
                                 &unlink_dir,
-                                &loop_device,
-                                &decrypted_image);
+                                &loop_device);
                 if (r < 0)
                         return r;
 
@@ -2298,7 +2298,7 @@ int main(int argc, char *argv[]) {
                 goto finish;
 
         case ACTION_VERIFY:
-                r = verify(j);
+                r = verify(j, !arg_quiet);
                 goto finish;
 
         case ACTION_DISK_USAGE: {
@@ -2672,7 +2672,8 @@ int main(int argc, char *argv[]) {
                                 arg_no_hostname * OUTPUT_NO_HOSTNAME;
 
                         r = show_journal_entry(stdout, j, arg_output, 0, flags,
-                                               arg_output_fields, highlight, &ellipsized);
+                                               arg_output_fields, highlight, &ellipsized,
+                                               &previous_ts_output, &previous_boot_id_output);
                         need_seek = true;
                         if (r == -EADDRNOTAVAIL)
                                 break;

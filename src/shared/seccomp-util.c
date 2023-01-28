@@ -18,6 +18,7 @@
 #include "env-util.h"
 #include "errno-list.h"
 #include "macro.h"
+#include "namespace-util.h"
 #include "nsflags.h"
 #include "nulstr-util.h"
 #include "process-util.h"
@@ -355,6 +356,7 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "pause\0"
                 "prlimit64\0"
                 "restart_syscall\0"
+                "riscv_flush_icache\0"
                 "rseq\0"
                 "rt_sigreturn\0"
                 "sched_getaffinity\0"
@@ -446,9 +448,7 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "pidfd_getfd\0"
                 "ptrace\0"
                 "rtas\0"
-#if defined __s390__ || defined __s390x__
                 "s390_runtime_instr\0"
-#endif
                 "sys_debug_setcontext\0"
         },
         [SYSCALL_FILTER_SET_FILE_SYSTEM] = {
@@ -772,10 +772,8 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "pciconfig_iobase\0"
                 "pciconfig_read\0"
                 "pciconfig_write\0"
-#if defined __s390__ || defined __s390x__
                 "s390_pci_mmio_read\0"
                 "s390_pci_mmio_write\0"
-#endif
         },
         [SYSCALL_FILTER_SET_REBOOT] = {
                 .name = "@reboot",
@@ -1041,7 +1039,6 @@ static int add_syscall_filter_set(
                 bool log_missing,
                 char ***added) {
 
-        const char *sys;
         int r;
 
         /* Any syscalls that are handled are added to the *added strv. It needs to be initialized. */
@@ -1171,7 +1168,6 @@ int seccomp_parse_syscall_filter(
 
         if (name[0] == '@') {
                 const SyscallFilterSet *set;
-                const char *i;
 
                 set = syscall_filter_set_find(name);
                 if (!set) {
@@ -1289,16 +1285,16 @@ int seccomp_restrict_namespaces(unsigned long retain) {
                         continue;
                 }
 
-                for (unsigned i = 0; namespace_flag_map[i].name; i++) {
+                for (unsigned i = 0; namespace_info[i].proc_name; i++) {
                         unsigned long f;
 
-                        f = namespace_flag_map[i].flag;
+                        f = namespace_info[i].clone_flag;
                         if (FLAGS_SET(retain, f)) {
-                                log_debug("Permitting %s.", namespace_flag_map[i].name);
+                                log_debug("Permitting %s.", namespace_info[i].proc_name);
                                 continue;
                         }
 
-                        log_debug("Blocking %s.", namespace_flag_map[i].name);
+                        log_debug("Blocking %s.", namespace_info[i].proc_name);
 
                         r = seccomp_rule_add_exact(
                                         seccomp,
@@ -1911,7 +1907,6 @@ int parse_syscall_archs(char **l, Set **ret_archs) {
 }
 
 int seccomp_filter_set_add(Hashmap *filter, bool add, const SyscallFilterSet *set) {
-        const char *i;
         int r;
 
         assert(set);
@@ -2310,7 +2305,6 @@ int seccomp_suppress_sync(void) {
 
         SECCOMP_FOREACH_LOCAL_ARCH(arch) {
                 _cleanup_(seccomp_releasep) scmp_filter_ctx seccomp = NULL;
-                const char *c;
 
                 r = seccomp_init_for_arch(&seccomp, arch, SCMP_ACT_ALLOW);
                 if (r < 0)

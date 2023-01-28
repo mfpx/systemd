@@ -43,6 +43,7 @@
       <command>systemd-analyze</command>
       <arg choice="opt" rep="repeat">OPTIONS</arg>
       <arg choice="plain">dump</arg>
+      <arg choice="opt" rep="repeat"><replaceable>PATTERN</replaceable></arg>
     </cmdsynopsis>
 
     <cmdsynopsis>
@@ -156,10 +157,10 @@
       <title><command>systemd-analyze time</command></title>
 
       <para>This command prints the time spent in the kernel before userspace has been reached, the time
-      spent in the initial RAM disk (initrd) before normal system userspace has been reached, and the time
-      normal system userspace took to initialize. Note that these measurements simply measure the time passed
-      up to the point where all system services have been spawned, but not necessarily until they fully
-      finished initialization or the disk is idle.</para>
+      spent in the initrd before normal system userspace has been reached, and the time normal system
+      userspace took to initialize. Note that these measurements simply measure the time passed up to the
+      point where all system services have been spawned, but not necessarily until they fully finished
+      initialization or the disk is idle.</para>
 
       <example>
         <title><command>Show how long the boot took</command></title>
@@ -243,10 +244,12 @@ multi-user.target @47.820s
     </refsect2>
 
     <refsect2>
-      <title><command>systemd-analyze dump</command></title>
+      <title><command>systemd-analyze dump [<replaceable>pattern</replaceable>…]</command></title>
 
-      <para>This command outputs a (usually very long) human-readable serialization of the complete server
-      state. Its format is subject to change without notice and should not be parsed by applications.</para>
+      <para>Without any parameter, this command outputs a (usually very long) human-readable serialization of
+      the complete service manager state. Optional glob pattern may be specified, causing the output to be
+      limited to units whose names match one of the patterns. The output format is subject to change without
+      notice and should not be parsed by applications.</para>
 
       <example>
         <title>Show the internal state of user manager</title>
@@ -271,8 +274,8 @@ Timestamp units-load-finish: Thu 2019-03-14 23:28:07 CET
     <refsect2>
       <title><command>systemd-analyze plot</command></title>
 
-      <para>This command prints an SVG graphic detailing which system services have been started at what
-      time, highlighting the time they spent on initialization.</para>
+      <para>This command prints either an SVG graphic, detailing which system services have been started at what
+      time, highlighting the time they spent on initialization, or the raw time data in JSON or table format.</para>
 
       <example>
         <title><command>Plot a bootchart</command></title>
@@ -281,6 +284,13 @@ Timestamp units-load-finish: Thu 2019-03-14 23:28:07 CET
 $ eog bootup.svg&amp;
 </programlisting>
       </example>
+
+      <para>Note that this plot is based on the most recent per-unit timing data of loaded units. This means
+      that if a unit gets started, then stopped and then started again the information shown will cover the
+      most recent start cycle, not the first one. Thus it's recommended to consult this information only
+      shortly after boot, so that this distinction doesn't matter. Moreover, units that are not referenced by
+      any other unit through a dependency might be unloaded by the service manager once they terminate (and
+      did not fail). Such units will not show up in the plot.</para>
     </refsect2>
 
     <refsect2>
@@ -739,7 +749,7 @@ $ systemd-analyze verify /tmp/source:alias.service
     <refsect2>
       <title><command>systemd-analyze inspect-elf <replaceable>FILE</replaceable>...</command></title>
 
-      <para>This command will load the specified file(s), and if they are ELF objects (executables,
+      <para>This command will load the specified files, and if they are ELF objects (executables,
       libraries, core files, etc.) it will parse the embedded packaging metadata, if any, and print
       it in a table or json format. See the <ulink url="https://systemd.io/COREDUMP_PACKAGE_METADATA/">
       Packaging Metadata</ulink> documentation for more information.</para>
@@ -899,7 +909,7 @@ $ systemd-analyze verify /tmp/source:alias.service
         <term><option>--offline=<replaceable>BOOL</replaceable></option></term>
 
         <listitem><para>With <command>security</command>, perform an offline security review
-        of the specified unit file(s), i.e. does not have to rely on PID 1 to acquire security
+        of the specified unit files, i.e. does not have to rely on PID 1 to acquire security
         information for the files like the <command>security</command> verb when used by itself does.
         This means that <option>--offline=</option> can be used with <option>--root=</option> and
         <option>--image=</option> as well. If a unit's overall exposure level is above that set by
@@ -911,7 +921,7 @@ $ systemd-analyze verify /tmp/source:alias.service
         <term><option>--profile=<replaceable>PATH</replaceable></option></term>
 
         <listitem><para>With <command>security</command> <option>--offline=</option>, takes into
-        consideration the specified portable profile when assessing the unit(s) settings.
+        consideration the specified portable profile when assessing unit settings.
         The profile can be passed by name, in which case the well-known system locations will
         be searched, or it can be the full path to a specific drop-in file.</para></listitem>
       </varlistentry>
@@ -920,7 +930,7 @@ $ systemd-analyze verify /tmp/source:alias.service
         <term><option>--threshold=<replaceable>NUMBER</replaceable></option></term>
 
         <listitem><para>With <command>security</command>, allow the user to set a custom value
-        to compare the overall exposure level with, for the specified unit file(s). If a unit's
+        to compare the overall exposure level with, for the specified unit files. If a unit's
         overall exposure level, is greater than that set by the user, <command>security</command>
         will return an error. <option>--threshold=</option> can be used with <option>--offline=</option>
         as well and its default value is 100.</para></listitem>
@@ -1201,7 +1211,17 @@ $ systemd-analyze verify /tmp/source:alias.service
         corresponds to a higher security threat. The JSON version of the table is printed to standard
         output. The <replaceable>MODE</replaceable> passed to the option can be one of three:
         <option>off</option> which is the default, <option>pretty</option> and <option>short</option>
-        which respectively output a prettified or shorted JSON version of the security table.</para></listitem>
+        which respectively output a prettified or shorted JSON version of the security table.
+
+        With the <command>plot</command> command, generate a JSON formatted output of the raw time data.
+        The format is a JSON array with objects containing the following fields: <varname>name</varname>
+        which is the unit name, <varname>activated</varname> which is the time after startup the
+        service was activated, <varname>activating</varname> which is how long after startup the service
+        was initially started, <varname>time</varname> which is how long the service took to activate
+        from when it was initially started, <varname>deactivated</varname> which is the time after startup
+        that the service was deactivated, <varname>deactivating</varname> which is the time after startup
+        that the service was initially told to deactivate.
+        </para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1230,6 +1250,21 @@ $ systemd-analyze verify /tmp/source:alias.service
         <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry>. All
         units files present in the directory containing the specified unit will be used in preference to the
         other paths.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--table</option></term>
+
+        <listitem><para>When used with the <command>plot</command> command, the raw time data is output in a table.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--no-legend</option></term>
+
+        <listitem><para>When used with the <command>plot</command> command in combination with either
+        <option>--table</option> or <option>--json=</option>, no legends or hints are included in the output.
+        </para></listitem>
       </varlistentry>
 
       <xi:include href="user-system-options.xml" xpointer="host" />

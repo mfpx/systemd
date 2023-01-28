@@ -151,7 +151,7 @@ int sd_ipv4acd_new(sd_ipv4acd **ret) {
                 .n_ref = 1,
                 .state = IPV4ACD_STATE_INIT,
                 .ifindex = -1,
-                .fd = -1,
+                .fd = -EBADF,
         };
 
         *ret = TAKE_PTR(acd);
@@ -583,7 +583,7 @@ int sd_ipv4acd_start(sd_ipv4acd *acd, bool reset_conflicts) {
         if (r < 0)
                 return r;
 
-        CLOSE_AND_REPLACE(acd->fd, r);
+        close_and_replace(acd->fd, r);
 
         if (reset_conflicts)
                 acd->n_conflict = 0;

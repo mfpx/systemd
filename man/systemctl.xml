@@ -159,7 +159,7 @@ kobject-uevent 1 systemd-udevd-kernel.socket systemd-udevd.service
             Produces output similar to
             <programlisting>
 NEXT                         LEFT          LAST                         PASSED     UNIT                         ACTIVATES
-n/a                          n/a           Thu 2017-02-23 13:40:29 EST  3 days ago ureadahead-stop.timer        ureadahead-stop.service
+-                            -             Thu 2017-02-23 13:40:29 EST  3 days ago ureadahead-stop.timer        ureadahead-stop.service
 Sun 2017-02-26 18:55:42 EST  1min 14s left Thu 2017-02-23 13:54:44 EST  3 days ago systemd-tmpfiles-clean.timer systemd-tmpfiles-clean.service
 Sun 2017-02-26 20:37:16 EST  1h 42min left Sun 2017-02-26 11:56:36 EST  6h ago     apt-daily.timer              apt-daily.service
 Sun 2017-02-26 20:57:49 EST  2h 3min left  Sun 2017-02-26 11:56:36 EST  6h ago     snapd.refresh.timer          snapd.refresh.service
@@ -354,6 +354,10 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
             dependencies. If no units are specified,
             <filename>default.target</filename> is implied.</para>
 
+            <para>The units that are shown are additionally filtered by <option>--type=</option> and
+            <option>--state=</option> if those options are specified. Note that we won't be able to
+            use a tree structure in this case, so <option>--plain</option> is implied.</para>
+
             <para>By default, only target units are recursively
             expanded. When <option>--all</option> is passed, all other
             units are recursively expanded as well.</para>
@@ -487,7 +491,7 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
             the new target, possibly including the graphical environment or terminal you are currently using.
             </para>
 
-            <para>Note that this is allowed only on units where
+            <para>Note that this operation is allowed only on units where
             <option>AllowIsolate=</option> is enabled. See
             <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry>
             for details.</para>
@@ -771,6 +775,9 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
             account.
             </para>
 
+            <para>When using this operation on units without install information, a warning about it is shown.
+            <option>--no-warn</option> can be used to suppress the warning.</para>
+
             <para>Enabling units should not be confused with starting (activating) units, as done by the
             <command>start</command> command. Enabling and starting units is orthogonal: units may be enabled without
             being started and started without being enabled. Enabling simply hooks the unit into various suggested
@@ -814,8 +821,8 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
             executed. This output may be suppressed by passing <option>--quiet</option>.
             </para>
 
-            <para>This command honors <option>--system</option>, <option>--user</option>, <option>--runtime</option>
-            and <option>--global</option> in a similar way as <command>enable</command>.</para>
+            <para>This command honors <option>--system</option>, <option>--user</option>, <option>--runtime</option>,
+            <option>--global</option> and <option>--no-warn</option> in a similar way as <command>enable</command>.</para>
           </listitem>
         </varlistentry>
 
@@ -951,6 +958,11 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
                     <entry>The unit file is invalid or another error occurred. Note that <command>is-enabled</command> will not actually return this state, but print an error message instead. However the unit file listing printed by <command>list-unit-files</command> might show it.</entry>
                     <entry>&gt; 0</entry>
                   </row>
+                  <row>
+                    <entry><literal>not-found</literal></entry>
+                    <entry>The unit file doesn't exist.</entry>
+                    <entry>4</entry>
+                  </row>
                 </tbody>
               </tgroup>
             </table>
@@ -986,7 +998,7 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
           <term><command>link <replaceable>PATH</replaceable>…</command></term>
 
           <listitem>
-            <para>Link a unit file that is not in the unit file search paths into the unit file search path. This
+            <para>Link a unit file that is not in the unit file search path into the unit file search path. This
             command expects an absolute path to a unit file. The effect of this may be undone with
             <command>disable</command>. The effect of this command is that a unit file is made available for commands
             such as <command>start</command>, even though it is not installed directly in the unit search path. The
@@ -1052,6 +1064,9 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
             the editor (see the "Environment" section below) is invoked on
             temporary files which will be written to the real location if the
             editor exits successfully.</para>
+
+            <para>If <option>--drop-in=</option> is specified, the given drop-in file name
+            will be used instead of the default <filename>override.conf</filename>.</para>
 
             <para>If <option>--full</option> is specified, this will copy the
             original units instead of creating drop-in files.</para>
@@ -1527,15 +1542,16 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
           <term><command>switch-root</command> <replaceable>ROOT</replaceable> <optional><replaceable>INIT</replaceable></optional></term>
 
           <listitem>
-            <para>Switches to a different root directory and executes a new system manager process below it. This is
-            intended for usage in initial RAM disks ("initrd"), and will transition from the initrd's system manager
-            process (a.k.a. "init" process) to the main system manager process which is loaded from the actual host
-            volume. This call takes two arguments: the directory that is to become the new root directory, and the path
-            to the new system manager binary below it to execute as PID 1. If the latter is omitted or the empty
-            string, a systemd binary will automatically be searched for and used as init. If the system manager path is
-            omitted, equal to the empty string or identical to the path to the systemd binary, the state of the
-            initrd's system manager process is passed to the main system manager, which allows later introspection of
-            the state of the services involved in the initrd boot phase.</para>
+            <para>Switches to a different root directory and executes a new system manager process below it.
+            This is intended for use in the initrd, and will transition from the initrd's system manager
+            process (a.k.a. "init" process) to the main system manager process which is loaded from the
+            actual host root files system. This call takes two arguments: the directory that is to become the
+            new root directory, and the path to the new system manager binary below it to execute as PID 1.
+            If the latter is omitted or the empty string, a systemd binary will automatically be searched for
+            and used as init. If the system manager path is omitted, equal to the empty string or identical
+            to the path to the systemd binary, the state of the initrd's system manager process is passed to
+            the main system manager, which allows later introspection of the state of the services involved
+            in the initrd boot phase.</para>
           </listitem>
         </varlistentry>
 
@@ -1645,8 +1661,8 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
         <listitem>
           <para>The argument is a comma-separated list of unit types such as <option>service</option> and
           <option>socket</option>. When units are listed with <command>list-units</command>,
-          <command>show</command>, or <command>status</command>, only units of the specified types will be
-          shown. By default, units of all types are shown.</para>
+          <command>list-dependencies</command>, <command>show</command>, or <command>status</command>,
+          only units of the specified types will be shown. By default, units of all types are shown.</para>
 
           <para>As a special case, if one of the arguments is <option>help</option>, a list of allowed values
           will be printed and the program will exit.</para>
@@ -1658,9 +1674,9 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
 
         <listitem>
           <para>The argument is a comma-separated list of unit LOAD, SUB, or ACTIVE states. When listing
-          units with <command>list-units</command>, <command>show</command>, or <command>status</command>,
-          show only those in the specified states. Use <option>--state=failed</option> or
-          <option>--failed</option> to show only failed units.</para>
+          units with <command>list-units</command>, <command>list-dependencies</command>, <command>show</command>
+          or <command>status</command>, show only those in the specified states. Use <option>--state=failed</option>
+          or <option>--failed</option> to show only failed units.</para>
 
           <para>As a special case, if one of the arguments is <option>help</option>, a list of allowed values
           will be printed and the program will exit.</para>
@@ -1997,6 +2013,25 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
       </varlistentry>
 
       <varlistentry>
+        <term><option>--no-warn</option></term>
+
+        <listitem>
+          <para>Don't generate the warnings shown by default in the following cases:
+          <itemizedlist>
+            <listitem>
+              <para>when <command>systemctl</command> is invoked without procfs mounted on
+              <filename>/proc/</filename>,</para>
+            </listitem>
+            <listitem>
+              <para>when using <command>enable</command> or <command>disable</command> on units without
+              install information (i.e. don't have or have an empty [Install] section).</para>
+            </listitem>
+          </itemizedlist>
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><option>--no-block</option></term>
 
         <listitem>
@@ -2201,6 +2236,19 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
       </varlistentry>
 
       <varlistentry>
+        <term><option>--image=<replaceable>image</replaceable></option></term>
+
+        <listitem><para>Takes a path to a disk image file or block device node. If specified, all operations
+        are applied to file system in the indicated disk image. This option is similar to
+        <option>--root=</option>, but operates on file systems stored in disk images or block devices. The
+        disk image should either contain just a file system or a set of file systems within a GPT partition
+        table, following the <ulink url="https://uapi-group.org/specifications/specs/discoverable_partitions_specification">Discoverable Partitions
+        Specification</ulink>. For further information on supported disk images, see
+        <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry>'s
+        switch of the same name.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><option>--runtime</option></term>
 
         <listitem>
@@ -2372,7 +2420,7 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
         <listitem><para>Only allowed with <command>reload-or-restart</command>. Enqueues restart jobs for all
         units that have the <literal>needs-restart</literal> mark, and reload jobs for units that have the
         <literal>needs-reload</literal> mark. When a unit marked for reload does not support reload, restart
-        will be queued. Those properties can be set using <command>set-property Marks</command>.</para>
+        will be queued. Those properties can be set using <command>set-property Markers=…</command>.</para>
 
         <para>Unless <option>--no-block</option> is used, <command>systemctl</command> will wait for the
         queued jobs to finish.</para></listitem>
@@ -2382,6 +2430,15 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
         <term><option>--read-only</option></term>
 
         <listitem><para>When used with <command>bind</command>, creates a read-only bind mount.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--drop-in=</option></term>
+
+        <listitem>
+          <para>When used with <command>edit</command>, use the given drop-in file name instead of
+          <filename>override.conf</filename>.</para>
+        </listitem>
       </varlistentry>
 
       <xi:include href="user-system-options.xml" xpointer="host" />

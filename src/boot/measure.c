@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include "alloc-util.h"
+#include "build.h"
 #include "efi-loader.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -31,11 +32,15 @@ static char *arg_public_key = NULL;
 static JsonFormatFlags arg_json_format_flags = JSON_FORMAT_PRETTY_AUTO|JSON_FORMAT_COLOR_AUTO|JSON_FORMAT_OFF;
 static PagerFlags arg_pager_flags = 0;
 static bool arg_current = false;
+static char **arg_phase = NULL;
+static char *arg_append = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(arg_banks, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_tpm2_device, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_private_key, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_public_key, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_phase, strv_freep);
+STATIC_DESTRUCTOR_REGISTER(arg_append, freep);
 
 static inline void free_sections(char*(*sections)[_UNIFIED_SECTION_MAX]) {
         for (UnifiedSection c = 0; c < _UNIFIED_SECTION_MAX; c++)
@@ -53,7 +58,7 @@ static int help(int argc, char *argv[], void *userdata) {
                 return log_oom();
 
         printf("%1$s  [OPTIONS...] COMMAND ...\n"
-               "\n%5$sPre-calculate and sign PCR hash for a unified kernel image.%6$s\n"
+               "\n%5$sPre-calculate and sign PCR hash for a unified kernel image (UKI).%6$s\n"
                "\n%3$sCommands:%4$s\n"
                "  status                 Show current PCR values\n"
                "  calculate              Calculate expected PCR values\n"
@@ -62,29 +67,48 @@ static int help(int argc, char *argv[], void *userdata) {
                "  -h --help              Show this help\n"
                "     --version           Print version\n"
                "     --no-pager          Do not pipe output into a pager\n"
-               "     --linux=PATH        Path Linux kernel ELF image\n"
-               "     --osrel=PATH        Path to os-release file\n"
-               "     --cmdline=PATH      Path to file with kernel command line\n"
-               "     --initrd=PATH       Path to initrd image\n"
-               "     --splash=PATH       Path to splash bitmap\n"
-               "     --dtb=PATH          Path to Devicetree file\n"
-               "     --pcrpkey=PATH      Path to public key for PCR signatures in DER format\n"
                "  -c --current           Use current PCR values\n"
-               "     --bank=DIGEST       Select TPM bank (SHA1, SHA256)\n"
+               "     --phase=PHASE       Specify a boot phase to sign for\n"
+               "     --bank=DIGEST       Select TPM bank (SHA1, SHA256, SHA384, SHA512)\n"
                "     --tpm2-device=PATH  Use specified TPM2 device\n"
                "     --private-key=KEY   Private key (PEM) to sign with\n"
                "     --public-key=KEY    Public key (PEM) to validate against\n"
                "     --json=MODE         Output as JSON\n"
                "  -j                     Same as --json=pretty on tty, --json=short otherwise\n"
+               "     --append=PATH       Load specified JSON signature, and append new signature to it\n"
+               "\n%3$sUKI PE Section Options:%4$s                                         %3$sUKI PE Section%4$s\n"
+               "     --linux=PATH        Path to Linux kernel image file        %7$s .linux\n"
+               "     --osrel=PATH        Path to os-release file                %7$s .osrel\n"
+               "     --cmdline=PATH      Path to file with kernel command line  %7$s .cmdline\n"
+               "     --initrd=PATH       Path to initrd image file              %7$s .initrd\n"
+               "     --splash=PATH       Path to splash bitmap file             %7$s .splash\n"
+               "     --dtb=PATH          Path to Devicetree file                %7$s .dtb\n"
+               "     --pcrpkey=PATH      Path to public key for PCR signatures  %7$s .pcrpkey\n"
                "\nSee the %2$s for details.\n",
                program_invocation_short_name,
                link,
                ansi_underline(),
                ansi_normal(),
                ansi_highlight(),
-               ansi_normal());
+               ansi_normal(),
+               special_glyph(SPECIAL_GLYPH_ARROW_RIGHT));
 
         return 0;
+}
+
+static char *normalize_phase(const char *s) {
+        _cleanup_strv_free_ char **l = NULL;
+
+        /* Let's normalize phase expressions. We split the series of colon-separated words up, then remove
+         * all empty ones, and glue them back together again. In other words we remove duplicate ":", as well
+         * as leading and trailing ones. */
+
+        l = strv_split(s, ":"); /* Split series of words */
+        if (!l)
+                return NULL;
+
+        /* Remove all empty words and glue things back together */
+        return strv_join(strv_remove(l, ""), ":");
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -106,6 +130,8 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_PUBLIC_KEY,
                 ARG_TPM2_DEVICE,
                 ARG_JSON,
+                ARG_PHASE,
+                ARG_APPEND,
         };
 
         static const struct option options[] = {
@@ -125,6 +151,8 @@ static int parse_argv(int argc, char *argv[]) {
                 { "private-key", required_argument, NULL, ARG_PRIVATE_KEY },
                 { "public-key",  required_argument, NULL, ARG_PUBLIC_KEY  },
                 { "json",        required_argument, NULL, ARG_JSON        },
+                { "phase",       required_argument, NULL, ARG_PHASE       },
+                { "append",      required_argument, NULL, ARG_APPEND      },
                 {}
         };
 
@@ -217,6 +245,27 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
+                case ARG_PHASE: {
+                        char *n;
+
+                        n = normalize_phase(optarg);
+                        if (!n)
+                                return log_oom();
+
+                        r = strv_consume(&arg_phase, TAKE_PTR(n));
+                        if (r < 0)
+                                return r;
+
+                        break;
+                }
+
+                case ARG_APPEND:
+                        r = parse_path_argument(optarg, /* suppress_root= */ false, &arg_append);
+                        if (r < 0)
+                                return r;
+
+                        break;
+
                 case '?':
                         return -EINVAL;
 
@@ -239,14 +288,37 @@ static int parse_argv(int argc, char *argv[]) {
                         if (arg_sections[us])
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "The --current switch cannot be used in combination with --linux= and related switches.");
 
+        if (strv_isempty(arg_phase)) {
+                /* If no phases are specifically selected, pick everything from the beginning of the initrd
+                 * to the beginning of shutdown. */
+                if (strv_extend_strv(&arg_phase,
+                                     STRV_MAKE("enter-initrd",
+                                               "enter-initrd:leave-initrd",
+                                               "enter-initrd:leave-initrd:sysinit",
+                                               "enter-initrd:leave-initrd:sysinit:ready"),
+                                     /* filter_duplicates= */ false) < 0)
+                        return log_oom();
+        } else {
+                strv_sort(arg_phase);
+                strv_uniq(arg_phase);
+        }
+
+        _cleanup_free_ char *j = NULL;
+        j = strv_join(arg_phase, ", ");
+        if (!j)
+                return log_oom();
+
+        log_debug("Measuring boot phases: %s", j);
         return 1;
 }
 
+/* The PCR 11 state for one specific bank */
 typedef struct PcrState {
         char *bank;
         const EVP_MD *md;
         void *value;
         size_t value_size;
+        void *saved_value; /* A copy of the original value we calculated, used by pcr_states_save()/pcr_states_restore() to come later back to */
 } PcrState;
 
 static void pcr_state_free_all(PcrState **pcr_state) {
@@ -258,6 +330,7 @@ static void pcr_state_free_all(PcrState **pcr_state) {
         for (size_t i = 0; (*pcr_state)[i].value; i++) {
                 free((*pcr_state)[i].bank);
                 free((*pcr_state)[i].value);
+                free((*pcr_state)[i].saved_value);
         }
 
         *pcr_state = mfree(*pcr_state);
@@ -311,12 +384,14 @@ static int pcr_state_extend(PcrState *pcr_state, const void *data, size_t sz) {
 
 #define BUFFER_SIZE (16U * 1024U)
 
-static int measure_pcr(PcrState *pcr_states, size_t n) {
+static int measure_kernel(PcrState *pcr_states, size_t n) {
         _cleanup_free_ void *buffer = NULL;
         int r;
 
         assert(n > 0);
         assert(pcr_states);
+
+        /* Virtually measures the components of a unified kernel image into PCR 11 */
 
         if (arg_current) {
                 /* Shortcut things, if we should just use the current PCR value */
@@ -352,7 +427,7 @@ static int measure_pcr(PcrState *pcr_states, size_t n) {
 
         for (UnifiedSection c = 0; c < _UNIFIED_SECTION_MAX; c++) {
                 _cleanup_(evp_md_ctx_free_all) EVP_MD_CTX **mdctx = NULL;
-                _cleanup_close_ int fd = -1;
+                _cleanup_close_ int fd = -EBADF;
                 uint64_t m = 0;
 
                 if (!arg_sections[c])
@@ -415,13 +490,61 @@ static int measure_pcr(PcrState *pcr_states, size_t n) {
                         if (r < 0)
                                 return r;
 
-                        /* Retrieve hash of data an measure it*/
+                        /* Retrieve hash of data and measure it */
                         if (EVP_DigestFinal_ex(mdctx[i], data_hash, &data_hash_size) != 1)
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to finalize hash context.");
 
                         assert(data_hash_size == (unsigned) pcr_states[i].value_size);
 
                         r = pcr_state_extend(pcr_states + i, data_hash, data_hash_size);
+                        if (r < 0)
+                                return r;
+                }
+        }
+
+        return 0;
+}
+
+static int measure_phase(PcrState *pcr_states, size_t n, const char *phase) {
+        _cleanup_strv_free_ char **l = NULL;
+        int r;
+
+        assert(pcr_states);
+        assert(n > 0);
+
+        /* Measure a phase string into PCR 11. This splits up the "phase" expression at colons, and then
+         * virtually extends each specified word into PCR 11, to model how during boot we measure a series of
+         * words into PCR 11, one for each phase. */
+
+        l = strv_split(phase, ":");
+        if (!l)
+                return log_oom();
+
+        STRV_FOREACH(word, l) {
+                size_t wl;
+
+                if (isempty(*word))
+                        continue;
+
+                wl = strlen(*word);
+
+                for (size_t i = 0; i < n; i++) { /* For each bank */
+                        _cleanup_free_ void *b = NULL;
+                        int bsz;
+
+                        bsz = EVP_MD_size(pcr_states[i].md);
+                        assert(bsz > 0);
+
+                        b = malloc(bsz);
+                        if (!b)
+                                return log_oom();
+
+                        /* First hash the word itself */
+                        if (EVP_Digest(*word, wl, b, NULL, pcr_states[i].md, NULL) != 1)
+                                return log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE), "Failed to hash word '%s'.", *word);
+
+                        /* And then extend the PCR with the resulting hash */
+                        r = pcr_state_extend(pcr_states + i, b, bsz);
                         if (r < 0)
                                 return r;
                 }
@@ -471,6 +594,39 @@ static int pcr_states_allocate(PcrState **ret) {
         return (int) n;
 }
 
+static int pcr_states_save(PcrState *pcr_states, size_t n) {
+        assert(pcr_states);
+        assert(n > 0);
+
+        for (size_t i = 0; i < n; i++) {
+                _cleanup_free_ void *saved = NULL;
+
+                if (!pcr_states[i].value)
+                        continue;
+
+                saved = memdup(pcr_states[i].value, pcr_states[i].value_size);
+                if (!saved)
+                        return log_oom();
+
+                free_and_replace(pcr_states[i].saved_value, saved);
+        }
+
+        return 0;
+}
+
+static void pcr_states_restore(PcrState *pcr_states, size_t n) {
+        assert(pcr_states);
+        assert(n > 0);
+
+        for (size_t i = 0; i < n; i++) {
+
+                assert(pcr_states[i].value);
+                assert(pcr_states[i].saved_value);
+
+                memcpy(pcr_states[i].value, pcr_states[i].saved_value, pcr_states[i].value_size);
+        }
+}
+
 static int verb_calculate(int argc, char *argv[], void *userdata) {
         _cleanup_(json_variant_unrefp) JsonVariant *w = NULL;
         _cleanup_(pcr_state_free_all) PcrState *pcr_states = NULL;
@@ -479,6 +635,11 @@ static int verb_calculate(int argc, char *argv[], void *userdata) {
 
         if (!arg_sections[UNIFIED_SECTION_LINUX] && !arg_current)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Either --linux= or --current must be specified, refusing.");
+        if (arg_append)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "The --append= switch is only supported for 'sign', not 'calculate'.");
+
+        assert(!strv_isempty(arg_banks));
+        assert(!strv_isempty(arg_phase));
 
         r = pcr_states_allocate(&pcr_states);
         if (r < 0)
@@ -486,38 +647,68 @@ static int verb_calculate(int argc, char *argv[], void *userdata) {
 
         n = (size_t) r;
 
-        r = measure_pcr(pcr_states, n);
+        r = measure_kernel(pcr_states, n);
         if (r < 0)
                 return r;
 
-        for (size_t i = 0; i < n; i++) {
-                if (arg_json_format_flags & JSON_FORMAT_OFF) {
-                        _cleanup_free_ char *hd = NULL;
+        /* Save the current state, so that we later can restore to it. This way we can measure the PCR values
+         * for multiple different boot phases without heaving to start from zero each time */
+        r = pcr_states_save(pcr_states, n);
+        if (r < 0)
+                return r;
 
-                        hd = hexmem(pcr_states[i].value, pcr_states[i].value_size);
-                        if (!hd)
-                                return log_oom();
+        STRV_FOREACH(phase, arg_phase) {
 
-                        printf("%" PRIu32 ":%s=%s\n", TPM_PCR_INDEX_KERNEL_IMAGE, pcr_states[i].bank, hd);
-                } else {
-                        _cleanup_(json_variant_unrefp) JsonVariant *bv = NULL;
+                r = measure_phase(pcr_states, n, *phase);
+                if (r < 0)
+                        return r;
 
-                        r = json_build(&bv,
-                                       JSON_BUILD_ARRAY(
-                                                       JSON_BUILD_OBJECT(
-                                                                       JSON_BUILD_PAIR("pcr", JSON_BUILD_INTEGER(TPM_PCR_INDEX_KERNEL_IMAGE)),
-                                                                       JSON_BUILD_PAIR("hash", JSON_BUILD_HEX(pcr_states[i].value, pcr_states[i].value_size))
-                                                       )
-                                       )
-                        );
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to build JSON object: %m");
+                for (size_t i = 0; i < n; i++) {
+                        if (arg_json_format_flags & JSON_FORMAT_OFF) {
+                                _cleanup_free_ char *hd = NULL;
 
-                        r = json_variant_set_field(&w, pcr_states[i].bank, bv);
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to add bank info to object: %m");
+                                if (i == 0) {
+                                        fflush(stdout);
+                                        fprintf(stderr, "%s# PCR[%" PRIu32 "] Phase <%s>%s\n",
+                                                ansi_grey(),
+                                                TPM_PCR_INDEX_KERNEL_IMAGE,
+                                                isempty(*phase) ? ":" : *phase,
+                                                ansi_normal());
+                                        fflush(stderr);
+                                }
 
+                                hd = hexmem(pcr_states[i].value, pcr_states[i].value_size);
+                                if (!hd)
+                                        return log_oom();
+
+                                printf("%" PRIu32 ":%s=%s\n", TPM_PCR_INDEX_KERNEL_IMAGE, pcr_states[i].bank, hd);
+                        } else {
+                                _cleanup_(json_variant_unrefp) JsonVariant *bv = NULL, *array = NULL;
+
+                                array = json_variant_ref(json_variant_by_key(w, pcr_states[i].bank));
+
+                                r = json_build(&bv,
+                                               JSON_BUILD_OBJECT(
+                                                               JSON_BUILD_PAIR_CONDITION(!isempty(*phase), "phase", JSON_BUILD_STRING(*phase)),
+                                                               JSON_BUILD_PAIR("pcr", JSON_BUILD_INTEGER(TPM_PCR_INDEX_KERNEL_IMAGE)),
+                                                               JSON_BUILD_PAIR("hash", JSON_BUILD_HEX(pcr_states[i].value, pcr_states[i].value_size))
+                                               )
+                                );
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to build JSON object: %m");
+
+                                r = json_variant_append_array(&array, bv);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to append JSON object to array: %m");
+
+                                r = json_variant_set_field(&w, pcr_states[i].bank, array);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to add bank info to object: %m");
+                        }
                 }
+
+                /* Return to the original kernel measurement for the next phase calculation */
+                pcr_states_restore(pcr_states, n);
         }
 
         if (!FLAGS_SET(arg_json_format_flags, JSON_FORMAT_OFF)) {
@@ -531,28 +722,12 @@ static int verb_calculate(int argc, char *argv[], void *userdata) {
         return 0;
 }
 
-static TPM2_ALG_ID convert_evp_md_name_to_tpm2_alg(const EVP_MD *md) {
-        const char *mdname;
-
-        mdname = EVP_MD_name(md);
-        if (strcaseeq(mdname, "sha1"))
-                return TPM2_ALG_SHA1;
-        if (strcaseeq(mdname, "sha256"))
-                return TPM2_ALG_SHA256;
-        if (strcaseeq(mdname, "sha384"))
-                return TPM2_ALG_SHA384;
-        if (strcaseeq(mdname, "sha512"))
-                return TPM2_ALG_SHA512;
-
-        return TPM2_ALG_ERROR;
-}
-
 static int verb_sign(int argc, char *argv[], void *userdata) {
         _cleanup_(json_variant_unrefp) JsonVariant *v = NULL;
         _cleanup_(pcr_state_free_all) PcrState *pcr_states = NULL;
         _cleanup_(EVP_PKEY_freep) EVP_PKEY *privkey = NULL, *pubkey = NULL;
         _cleanup_(tpm2_context_destroy) struct tpm2_context c = {};
-        _cleanup_fclose_ FILE *privkeyf = NULL , *pubkeyf = NULL;
+        _cleanup_fclose_ FILE *privkeyf = NULL;
         ESYS_TR session_handle = ESYS_TR_NONE;
         TSS2_RC rc;
         size_t n;
@@ -563,8 +738,18 @@ static int verb_sign(int argc, char *argv[], void *userdata) {
 
         if (!arg_private_key)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "No private key specified, use --private-key=.");
-        if (!arg_public_key)
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "No public key specified, use --public-key=.");
+
+        assert(!strv_isempty(arg_banks));
+        assert(!strv_isempty(arg_phase));
+
+        if (arg_append) {
+                r = json_parse_file(NULL, arg_append, 0, &v, NULL, NULL);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse '%s': %m", arg_append);
+
+                if (!json_variant_is_object(v))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "File '%s' is not a valid JSON object, refusing.", arg_append);
+        }
 
         /* When signing we only support JSON output */
         arg_json_format_flags &= ~JSON_FORMAT_OFF;
@@ -573,17 +758,40 @@ static int verb_sign(int argc, char *argv[], void *userdata) {
         if (!privkeyf)
                 return log_error_errno(errno, "Failed to open private key file '%s': %m", arg_private_key);
 
-        pubkeyf = fopen(arg_public_key, "re");
-        if (!pubkeyf)
-                return log_error_errno(errno, "Failed to open public key file '%s': %m", arg_public_key);
-
         privkey = PEM_read_PrivateKey(privkeyf, NULL, NULL, NULL);
         if (!privkey)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to parse private key '%s'.", arg_private_key);
 
-        pubkey = PEM_read_PUBKEY(pubkeyf, NULL, NULL, NULL);
-        if (!pubkey)
-                return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to parse public key '%s'.", arg_public_key);
+        if (arg_public_key) {
+                _cleanup_fclose_ FILE *pubkeyf = NULL;
+
+                pubkeyf = fopen(arg_public_key, "re");
+                if (!pubkeyf)
+                        return log_error_errno(errno, "Failed to open public key file '%s': %m", arg_public_key);
+
+                pubkey = PEM_read_PUBKEY(pubkeyf, NULL, NULL, NULL);
+                if (!pubkey)
+                        return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to parse public key '%s'.", arg_public_key);
+        } else {
+                _cleanup_free_ char *data = NULL;
+                _cleanup_fclose_ FILE *tf = NULL;
+                size_t sz;
+
+                /* No public key was specified, let's derive it automatically, if we can */
+
+                tf = open_memstream_unlocked(&data, &sz);
+                if (!tf)
+                        return log_oom();
+
+                if (i2d_PUBKEY_fp(tf, privkey) != 1)
+                        return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to extract public key from private key file '%s'.", arg_private_key);
+
+                fflush(tf);
+                rewind(tf);
+
+                if (!d2i_PUBKEY_fp(tf, &pubkey))
+                        return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to parse extracted public key of private key file '%s'.", arg_private_key);
+        }
 
         r = pcr_states_allocate(&pcr_states);
         if (r < 0)
@@ -591,7 +799,11 @@ static int verb_sign(int argc, char *argv[], void *userdata) {
 
         n = (size_t) r;
 
-        r = measure_pcr(pcr_states, n);
+        r = measure_kernel(pcr_states, n);
+        if (r < 0)
+                return r;
+
+        r = pcr_states_save(pcr_states, n);
         if (r < 0)
                 return r;
 
@@ -603,151 +815,166 @@ static int verb_sign(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        for (size_t i = 0; i < n; i++) {
-                static const TPMT_SYM_DEF symmetric = {
-                        .algorithm = TPM2_ALG_AES,
-                        .keyBits.aes = 128,
-                        .mode.aes = TPM2_ALG_CFB,
-                };
-                PcrState *p = pcr_states + i;
+        STRV_FOREACH(phase, arg_phase) {
 
-                rc = sym_Esys_StartAuthSession(
-                                c.esys_context,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                NULL,
-                                TPM2_SE_TRIAL,
-                                &symmetric,
-                                TPM2_ALG_SHA256,
-                                &session_handle);
-                if (rc != TSS2_RC_SUCCESS) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                            "Failed to open session in TPM: %s", sym_Tss2_RC_Decode(rc));
-                        goto finish;
-                }
-
-                /* Generate a single hash value from the PCRs included in our policy. Given that that's
-                 * exactly one, the calculation is trivial. */
-                TPM2B_DIGEST intermediate_digest = {
-                        .size = SHA256_DIGEST_SIZE,
-                };
-                assert(sizeof(intermediate_digest.buffer) >= SHA256_DIGEST_SIZE);
-                sha256_direct(p->value, p->value_size, intermediate_digest.buffer);
-
-                TPM2_ALG_ID tpmalg = convert_evp_md_name_to_tpm2_alg(p->md);
-                if (tpmalg == TPM2_ALG_ERROR) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "Unsupported PCR bank");
-                        goto finish;
-                }
-
-                TPML_PCR_SELECTION pcr_selection;
-                tpm2_pcr_mask_to_selection(1 << TPM_PCR_INDEX_KERNEL_IMAGE, tpmalg, &pcr_selection);
-
-                rc = sym_Esys_PolicyPCR(
-                                c.esys_context,
-                                session_handle,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                &intermediate_digest,
-                                &pcr_selection);
-                if (rc != TSS2_RC_SUCCESS) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                            "Failed to push PCR policy into TPM: %s", sym_Tss2_RC_Decode(rc));
-                        goto finish;
-                }
-
-                _cleanup_(Esys_Freep) TPM2B_DIGEST *pcr_policy_digest = NULL;
-                rc = sym_Esys_PolicyGetDigest(
-                                c.esys_context,
-                                session_handle,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                ESYS_TR_NONE,
-                                &pcr_policy_digest);
-                if (rc != TSS2_RC_SUCCESS) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                            "Failed to get policy digest from TPM: %s", sym_Tss2_RC_Decode(rc));
-                        goto finish;
-                }
-
-                session_handle = tpm2_flush_context_verbose(c.esys_context, session_handle);
-
-                _cleanup_(EVP_MD_CTX_freep) EVP_MD_CTX* mdctx = NULL;
-                mdctx = EVP_MD_CTX_new();
-                if (!mdctx) {
-                        r = log_oom();
-                        goto finish;
-                }
-
-                if (EVP_DigestSignInit(mdctx, NULL, p->md, NULL, privkey) != 1) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                            "Failed to initialize signature context.");
-                        goto finish;
-                }
-
-                if (EVP_DigestSignUpdate(mdctx, pcr_policy_digest->buffer, pcr_policy_digest->size) != 1) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                            "Failed to sign data.");
-                        goto finish;
-                }
-
-                size_t ss;
-                if (EVP_DigestSignFinal(mdctx, NULL, &ss) != 1) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                            "Failed to finalize signature");
-                        goto finish;
-                }
-
-                _cleanup_free_ void *sig = malloc(ss);
-                if (!ss) {
-                        r = log_oom();
-                        goto finish;
-                }
-
-                if (EVP_DigestSignFinal(mdctx, sig, &ss) != 1) {
-                        r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
-                                            "Failed to acquire signature data");
-                        goto finish;
-                }
-
-                _cleanup_free_ void *pubkey_fp = NULL;
-                size_t pubkey_fp_size = 0;
-                r = pubkey_fingerprint(pubkey, EVP_sha256(), &pubkey_fp, &pubkey_fp_size);
+                r = measure_phase(pcr_states, n, *phase);
                 if (r < 0)
-                        goto finish;
+                        return r;
 
-                _cleanup_(json_variant_unrefp) JsonVariant *bv = NULL, *a = NULL;
+                for (size_t i = 0; i < n; i++) {
+                        static const TPMT_SYM_DEF symmetric = {
+                                .algorithm = TPM2_ALG_AES,
+                                .keyBits.aes = 128,
+                                .mode.aes = TPM2_ALG_CFB,
+                        };
+                        PcrState *p = pcr_states + i;
 
-                r = tpm2_make_pcr_json_array(UINT64_C(1) << TPM_PCR_INDEX_KERNEL_IMAGE, &a);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to build JSON PCR mask array: %m");
-                        goto finish;
+                        rc = sym_Esys_StartAuthSession(
+                                        c.esys_context,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        NULL,
+                                        TPM2_SE_TRIAL,
+                                        &symmetric,
+                                        TPM2_ALG_SHA256,
+                                        &session_handle);
+                        if (rc != TSS2_RC_SUCCESS) {
+                                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                                    "Failed to open session in TPM: %s", sym_Tss2_RC_Decode(rc));
+                                goto finish;
+                        }
+
+                        /* Generate a single hash value from the PCRs included in our policy. Given that that's
+                         * exactly one, the calculation is trivial. */
+                        TPM2B_DIGEST intermediate_digest = {
+                                .size = SHA256_DIGEST_SIZE,
+                        };
+                        assert(sizeof(intermediate_digest.buffer) >= SHA256_DIGEST_SIZE);
+                        sha256_direct(p->value, p->value_size, intermediate_digest.buffer);
+
+                        int tpmalg = tpm2_pcr_bank_from_string(EVP_MD_name(p->md));
+                        if (tpmalg < 0) {
+                                log_error_errno(tpmalg, "Unsupported PCR bank");
+                                goto finish;
+                        }
+
+                        TPML_PCR_SELECTION pcr_selection;
+                        tpm2_pcr_mask_to_selection(1 << TPM_PCR_INDEX_KERNEL_IMAGE, tpmalg, &pcr_selection);
+
+                        rc = sym_Esys_PolicyPCR(
+                                        c.esys_context,
+                                        session_handle,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        &intermediate_digest,
+                                        &pcr_selection);
+                        if (rc != TSS2_RC_SUCCESS) {
+                                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                                    "Failed to push PCR policy into TPM: %s", sym_Tss2_RC_Decode(rc));
+                                goto finish;
+                        }
+
+                        _cleanup_(Esys_Freep) TPM2B_DIGEST *pcr_policy_digest = NULL;
+                        rc = sym_Esys_PolicyGetDigest(
+                                        c.esys_context,
+                                        session_handle,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        ESYS_TR_NONE,
+                                        &pcr_policy_digest);
+                        if (rc != TSS2_RC_SUCCESS) {
+                                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                                    "Failed to get policy digest from TPM: %s", sym_Tss2_RC_Decode(rc));
+                                goto finish;
+                        }
+
+                        session_handle = tpm2_flush_context_verbose(c.esys_context, session_handle);
+
+                        _cleanup_(EVP_MD_CTX_freep) EVP_MD_CTX* mdctx = NULL;
+                        mdctx = EVP_MD_CTX_new();
+                        if (!mdctx) {
+                                r = log_oom();
+                                goto finish;
+                        }
+
+                        if (EVP_DigestSignInit(mdctx, NULL, p->md, NULL, privkey) != 1) {
+                                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                                    "Failed to initialize signature context.");
+                                goto finish;
+                        }
+
+                        if (EVP_DigestSignUpdate(mdctx, pcr_policy_digest->buffer, pcr_policy_digest->size) != 1) {
+                                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                                    "Failed to sign data.");
+                                goto finish;
+                        }
+
+                        size_t ss;
+                        if (EVP_DigestSignFinal(mdctx, NULL, &ss) != 1) {
+                                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                                    "Failed to finalize signature");
+                                goto finish;
+                        }
+
+                        _cleanup_free_ void *sig = malloc(ss);
+                        if (!sig) {
+                                r = log_oom();
+                                goto finish;
+                        }
+
+                        if (EVP_DigestSignFinal(mdctx, sig, &ss) != 1) {
+                                r = log_error_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
+                                                    "Failed to acquire signature data");
+                                goto finish;
+                        }
+
+                        _cleanup_free_ void *pubkey_fp = NULL;
+                        size_t pubkey_fp_size = 0;
+                        r = pubkey_fingerprint(pubkey, EVP_sha256(), &pubkey_fp, &pubkey_fp_size);
+                        if (r < 0)
+                                goto finish;
+
+                        _cleanup_(json_variant_unrefp) JsonVariant *a = NULL;
+                        r = tpm2_make_pcr_json_array(UINT64_C(1) << TPM_PCR_INDEX_KERNEL_IMAGE, &a);
+                        if (r < 0) {
+                                log_error_errno(r, "Failed to build JSON PCR mask array: %m");
+                                goto finish;
+                        }
+
+                        _cleanup_(json_variant_unrefp) JsonVariant *bv = NULL;
+                        r = json_build(&bv, JSON_BUILD_OBJECT(
+                                                       JSON_BUILD_PAIR("pcrs", JSON_BUILD_VARIANT(a)),                                             /* PCR mask */
+                                                       JSON_BUILD_PAIR("pkfp", JSON_BUILD_HEX(pubkey_fp, pubkey_fp_size)),                         /* SHA256 fingerprint of public key (DER) used for the signature */
+                                                       JSON_BUILD_PAIR("pol", JSON_BUILD_HEX(pcr_policy_digest->buffer, pcr_policy_digest->size)), /* TPM2 policy hash that is signed */
+                                                       JSON_BUILD_PAIR("sig", JSON_BUILD_BASE64(sig, ss))));                                       /* signature data */
+                        if (r < 0) {
+                                log_error_errno(r, "Failed to build JSON object: %m");
+                                goto finish;
+                        }
+
+                        _cleanup_(json_variant_unrefp) JsonVariant *av = NULL;
+                        av = json_variant_ref(json_variant_by_key(v, p->bank));
+
+                        r = json_variant_append_array_nodup(&av, bv);
+                        if (r < 0) {
+                                log_error_errno(r, "Failed to append JSON object: %m");
+                                goto finish;
+                        }
+
+                        r = json_variant_set_field(&v, p->bank, av);
+                        if (r < 0) {
+                                log_error_errno(r, "Failed to add JSON field: %m");
+                                goto finish;
+                        }
                 }
 
-                r = json_build(&bv, JSON_BUILD_ARRAY(
-                                               JSON_BUILD_OBJECT(
-                                                               JSON_BUILD_PAIR("pcrs", JSON_BUILD_VARIANT(a)),                                                   /* PCR mask */
-                                                               JSON_BUILD_PAIR("pkfp", JSON_BUILD_HEX(pubkey_fp, pubkey_fp_size)),                               /* SHA256 fingerprint of public key (DER) used for the signature */
-                                                               JSON_BUILD_PAIR("pol", JSON_BUILD_HEX(pcr_policy_digest->buffer, pcr_policy_digest->size)),       /* TPM2 policy hash that is signed */
-                                                               JSON_BUILD_PAIR("sig", JSON_BUILD_BASE64(sig, ss)))));                                            /* signature data */
-                if (r < 0) {
-                        log_error_errno(r, "Failed to build JSON object: %m");
-                        goto finish;
-                }
-
-                r = json_variant_set_field(&v, p->bank, bv);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to add JSON field: %m");
-                        goto finish;
-                }
+                /* Return to the original kernel measurement for the next phase calculation */
+                pcr_states_restore(pcr_states, n);
         }
-
-        if (!v)
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Unable to find a single working PCR bank.");
 
         if (arg_json_format_flags & (JSON_FORMAT_PRETTY|JSON_FORMAT_PRETTY_AUTO))
                 pager_open(arg_pager_flags);
@@ -798,15 +1025,15 @@ static int validate_stub(void) {
                 log_warning("Warning: current kernel image does not support measuring itself, the command line or initrd system extension images.\n"
                             "The PCR measurements seen are unlikely to be valid.");
 
-        r = compare_reported_pcr_nr(TPM_PCR_INDEX_KERNEL_IMAGE, EFI_LOADER_VARIABLE("StubPcrKernelImage"), "kernel image");
+        r = compare_reported_pcr_nr(TPM_PCR_INDEX_KERNEL_IMAGE, EFI_LOADER_VARIABLE(StubPcrKernelImage), "kernel image");
         if (r < 0)
                 return r;
 
-        r = compare_reported_pcr_nr(TPM_PCR_INDEX_KERNEL_PARAMETERS, EFI_LOADER_VARIABLE("StubPcrKernelParameters"), "kernel parameters");
+        r = compare_reported_pcr_nr(TPM_PCR_INDEX_KERNEL_PARAMETERS, EFI_LOADER_VARIABLE(StubPcrKernelParameters), "kernel parameters");
         if (r < 0)
                 return r;
 
-        r = compare_reported_pcr_nr(TPM_PCR_INDEX_INITRD_SYSEXTS, EFI_LOADER_VARIABLE("StubPcrInitRDSysExts"), "initrd system extension images");
+        r = compare_reported_pcr_nr(TPM_PCR_INDEX_INITRD_SYSEXTS, EFI_LOADER_VARIABLE(StubPcrInitRDSysExts), "initrd system extension images");
         if (r < 0)
                 return r;
 

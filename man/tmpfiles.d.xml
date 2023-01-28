@@ -88,8 +88,9 @@ A+    /path-or-glob/to/append/acls/recursively -    -    -     -           POSIX
     <filename>/sys/</filename> or <filename>/proc/</filename>, as well as some other directories below
     <filename>/var/</filename>).</para>
 
-    <para><command>systemd-tmpfiles</command> uses this configuration to create volatile files and
-    directories during boot and to do periodic cleanup afterwards. See
+    <para><citerefentry><refentrytitle>systemd-tmpfiles</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+    uses this configuration to create volatile files and directories during boot and to do periodic cleanup
+    afterwards. See
     <citerefentry><refentrytitle>systemd-tmpfiles</refentrytitle><manvolnum>5</manvolnum></citerefentry> for
     the description of <filename>systemd-tmpfiles-setup.service</filename>,
     <filename>systemd-tmpfiles-clean.service</filename>, and associated units.</para>
@@ -418,8 +419,8 @@ L     /tmp/foobar -    -    -     -   /dev/null</programlisting>
           place of normal path names.</para>
 
           <para>The format of the argument field is <varname>[+-=][aAcCdDeijPsStTu]</varname>. The prefix
-          <varname>+</varname> (the default one) causes the attribute(s) to be added; <varname>-</varname>
-          causes the attribute(s) to be removed; <varname>=</varname> causes the attributes to be set exactly
+          <varname>+</varname> (the default one) causes the attributes to be added; <varname>-</varname>
+          causes the attributes to be removed; <varname>=</varname> causes the attributes to be set exactly
           as the following letters. The letters <literal>aAcCdDeijPsStTu</literal> select the new attributes
           for the files, see <citerefentry project='man-pages'><refentrytitle>chattr</refentrytitle>
           <manvolnum>1</manvolnum></citerefentry> for further information.
@@ -531,27 +532,24 @@ w- /proc/sys/vm/swappiness - - - - 10</programlisting></para>
     <refsect2>
       <title>Mode</title>
 
-      <para>The file access mode to use when creating this file or
-      directory. If omitted or when set to <literal>-</literal>, the
-      default is used: 0755 for directories, 0644 for all other file
-      objects.  For <varname>z</varname>, <varname>Z</varname> lines,
-      if omitted or when set to <literal>-</literal>, the file access
-      mode will not be modified. This parameter is ignored for
-      <varname>x</varname>, <varname>r</varname>,
-      <varname>R</varname>, <varname>L</varname>, <varname>t</varname>,
-      and <varname>a</varname> lines.</para>
+      <para>The file access mode to use when creating this file or directory. If omitted or when set to
+      <literal>-</literal>, the default is used: 0755 for directories, 0644 for all other file objects.  For
+      <varname>z</varname>, <varname>Z</varname> lines, if omitted or when set to <literal>-</literal>, the
+      file access mode will not be modified. This parameter is ignored for <varname>x</varname>,
+      <varname>r</varname>, <varname>R</varname>, <varname>L</varname>, <varname>t</varname>, and
+      <varname>a</varname> lines.</para>
 
-      <para>Optionally, if prefixed with <literal>~</literal>, the
-      access mode is masked based on the already set access bits for
-      existing file or directories: if the existing file has all
-      executable bits unset, all executable bits are removed from the
-      new access mode, too. Similarly, if all read bits are removed
-      from the old access mode, they will be removed from the new
-      access mode too, and if all write bits are removed, they will be
-      removed from the new access mode too. In addition, the
-      sticky/SUID/SGID bit is removed unless applied to a
-      directory. This functionality is particularly useful in
-      conjunction with <varname>Z</varname>.</para>
+      <para>Optionally, if prefixed with <literal>~</literal>, the access mode is masked based on the already
+      set access bits for existing file or directories: if the existing file has all executable bits unset,
+      all executable bits are removed from the new access mode, too. Similarly, if all read bits are removed
+      from the old access mode, they will be removed from the new access mode too, and if all write bits are
+      removed, they will be removed from the new access mode too. In addition, the sticky/SUID/SGID bit is
+      removed unless applied to a directory. This functionality is particularly useful in conjunction with
+      <varname>Z</varname>.</para>
+
+      <para>Optionally, if prefixed with <literal>:</literal>, the configured access mode is only used when
+      creating new inodes. If the inode the line refers to already exists, its access mode is left in place
+      unmodified.</para>
     </refsect2>
 
     <refsect2>
@@ -571,6 +569,10 @@ w- /proc/sys/vm/swappiness - - - - 10</programlisting></para>
       url="https://systemd.io/UIDS-GIDS/#notes-on-resolvability-of-user-and-group-names">Notes on
       Resolvability of User and Group Names</ulink> for more information on requirements on system user/group
       definitions.</para>
+
+      <para>Optionally, if prefixed with <literal>:</literal>, the configured user/group information is only
+      used when creating new inodes. If the inode the line refers to already exists, its user/group is left
+      in place unmodified.</para>
     </refsect2>
 
     <refsect2>

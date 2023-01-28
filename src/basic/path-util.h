@@ -103,7 +103,8 @@ static inline int find_executable(const char *name, char **ret_filename) {
 
 bool paths_check_timestamp(const char* const* paths, usec_t *paths_ts_usec, bool update);
 
-int fsck_exists(const char *fstype);
+int fsck_exists(void);
+int fsck_exists_for_fstype(const char *fstype);
 
 /* Iterates through the path prefixes of the specified path, going up
  * the tree, to root. Also returns "" (and not "/"!) for the root
@@ -129,6 +130,7 @@ int fsck_exists(const char *fstype);
 
 /* Similar to path_join(), but only works for two components, and only the first one may be NULL and returns
  * an alloca() buffer, or possibly a const pointer into the path parameter. */
+/* DEPRECATED: use path_join() instead */
 #define prefix_roota(root, path)                                        \
         ({                                                              \
                 const char* _path = (path), *_root = (root), *_ret;     \
@@ -168,7 +170,7 @@ static inline bool path_is_safe(const char *p) {
 }
 bool path_is_normalized(const char *p) _pure_;
 
-char *file_in_same_dir(const char *path, const char *filename);
+int file_in_same_dir(const char *path, const char *filename, char **ret);
 
 bool hidden_or_backup_file(const char *filename) _pure_;
 

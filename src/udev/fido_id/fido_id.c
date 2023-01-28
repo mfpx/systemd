@@ -28,7 +28,7 @@
 static int run(int argc, char **argv) {
         _cleanup_(sd_device_unrefp) struct sd_device *device = NULL;
         _cleanup_free_ char *desc_path = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
 
         struct sd_device *hid_device;
         const char *sys_path;
@@ -67,7 +67,7 @@ static int run(int argc, char **argv) {
         if (!desc_path)
                 return log_oom();
 
-        fd = open(desc_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        fd = open(desc_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY);
         if (fd < 0)
                 return log_device_error_errno(hid_device, errno,
                                               "Failed to open report descriptor at '%s': %m", desc_path);

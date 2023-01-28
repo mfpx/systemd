@@ -12,7 +12,7 @@
 
 #include "alloc-util.h"
 #include "cgroup-util.h"
-#include "def.h"
+#include "constants.h"
 #include "dirent-util.h"
 #include "extract-word.h"
 #include "fd-util.h"
@@ -1238,7 +1238,7 @@ static const char *skip_session(const char *p) {
                  * here. */
 
                 if (!session_id_valid(buf))
-                        return false;
+                        return NULL;
 
                 p += n;
                 p += strspn(p, "/");

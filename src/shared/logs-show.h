@@ -11,7 +11,6 @@
 #include "macro.h"
 #include "output-mode.h"
 #include "time-util.h"
-#include "util.h"
 
 int show_journal_entry(
                 FILE *f,
@@ -19,9 +18,11 @@ int show_journal_entry(
                 OutputMode mode,
                 unsigned n_columns,
                 OutputFlags flags,
-                char **output_fields,
+                Set *output_fields,
                 const size_t highlight[2],
-                bool *ellipsized);
+                bool *ellipsized,
+                dual_timestamp *previous_ts,
+                sd_id128_t *previous_boot_id);
 int show_journal(
                 FILE *f,
                 sd_journal *j,

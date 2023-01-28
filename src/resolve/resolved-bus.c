@@ -515,9 +515,6 @@ static int bus_method_resolve_hostname(sd_bus_message *message, void *userdata, 
 
         q->bus_request = sd_bus_message_ref(message);
         q->request_family = family;
-        q->request_name = strdup(hostname);
-        if (!q->request_name)
-                return log_oom();
         q->complete = bus_method_resolve_hostname_complete;
 
         r = dns_query_bus_track(q, message);
@@ -838,9 +835,6 @@ static int bus_method_resolve_record(sd_bus_message *message, void *userdata, sd
 
         q->bus_request = sd_bus_message_ref(message);
         q->complete = bus_method_resolve_record_complete;
-        q->request_name = strdup(name);
-        if (!q->request_name)
-                return log_oom();
 
         r = dns_query_bus_track(q, message);
         if (r < 0)
@@ -1198,9 +1192,6 @@ static int resolve_service_hostname(DnsQuery *q, DnsResourceRecord *rr, int ifin
                 return r;
 
         aux->request_family = q->request_family;
-        aux->request_name = strdup(rr->srv.name);
-        if (!aux->request_name)
-                return log_oom();
         aux->complete = resolve_service_hostname_complete;
 
         r = dns_query_make_auxiliary(aux, q);
@@ -1380,7 +1371,11 @@ static int bus_method_resolve_service(sd_bus_message *message, void *userdata, s
         return 1;
 }
 
-int bus_dns_server_append(sd_bus_message *reply, DnsServer *s, bool with_ifindex, bool extended) {
+int bus_dns_server_append(
+                sd_bus_message *reply,
+                DnsServer *s,
+                bool with_ifindex, /* include "ifindex" field */
+                bool extended) {   /* also include port number and server name */
         int r;
 
         assert(reply);
@@ -1399,7 +1394,11 @@ int bus_dns_server_append(sd_bus_message *reply, DnsServer *s, bool with_ifindex
                 }
         }
 
-        r = sd_bus_message_open_container(reply, 'r', with_ifindex ? (extended ? "iiayqs" : "iiay") : (extended ? "iayqs" : "iay"));
+        r = sd_bus_message_open_container(
+                        reply,
+                        'r',
+                        with_ifindex ? (extended ? "iiayqs" : "iiay") :
+                                       (extended ? "iayqs" : "iay"));
         if (r < 0)
                 return r;
 
@@ -2105,7 +2104,6 @@ static const sd_bus_vtable resolve_vtable[] = {
         SD_BUS_PROPERTY("DNSSECNegativeTrustAnchors", "as", bus_property_get_ntas, 0, 0),
         SD_BUS_PROPERTY("DNSStubListener", "s", bus_property_get_dns_stub_listener_mode, offsetof(Manager, dns_stub_listener_mode), 0),
         SD_BUS_PROPERTY("ResolvConfMode", "s", bus_property_get_resolv_conf_mode, 0, 0),
-        SD_BUS_PROPERTY("Monitor", "b", bus_property_get_bool, offsetof(Manager, enable_varlink_notifications), SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
 
         SD_BUS_METHOD_WITH_ARGS("ResolveHostname",
                                 SD_BUS_ARGS("i", ifindex, "s", name, "i", family, "t", flags),

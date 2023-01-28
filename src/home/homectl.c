@@ -5,6 +5,7 @@
 #include "sd-bus.h"
 
 #include "ask-password-api.h"
+#include "build.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
 #include "bus-locator.h"
@@ -1943,7 +1944,7 @@ static int with_home(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         _cleanup_(user_record_unrefp) UserRecord *secret = NULL;
-        _cleanup_close_ int acquired_fd = -1;
+        _cleanup_close_ int acquired_fd = -EBADF;
         _cleanup_strv_free_ char **cmdline  = NULL;
         const char *home;
         int r, ret;
@@ -2291,6 +2292,8 @@ static int help(int argc, char *argv[], void *userdata) {
                "                               Memory cost for PBKDF in bytes\n"
                "     --luks-pbkdf-parallel-threads=NUMBER\n"
                "                               Number of parallel threads for PKBDF\n"
+               "     --luks-sector-size=BYTES\n"
+               "                               Sector size for LUKS encryption in bytes\n"
                "     --luks-extra-mount-options=OPTIONS\n"
                "                               LUKS extra mount options\n"
                "     --auto-resize-mode=MODE   Automatically grow/shrink home on login/logout\n"
@@ -2369,9 +2372,11 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_IO_WEIGHT,
                 ARG_LUKS_PBKDF_TYPE,
                 ARG_LUKS_PBKDF_HASH_ALGORITHM,
+                ARG_LUKS_PBKDF_FORCE_ITERATIONS,
                 ARG_LUKS_PBKDF_TIME_COST,
                 ARG_LUKS_PBKDF_MEMORY_COST,
                 ARG_LUKS_PBKDF_PARALLEL_THREADS,
+                ARG_LUKS_SECTOR_SIZE,
                 ARG_RATE_LIMIT_INTERVAL,
                 ARG_RATE_LIMIT_BURST,
                 ARG_STOP_DELAY,
@@ -2449,9 +2454,11 @@ static int parse_argv(int argc, char *argv[]) {
                 { "luks-volume-key-size",        required_argument, NULL, ARG_LUKS_VOLUME_KEY_SIZE        },
                 { "luks-pbkdf-type",             required_argument, NULL, ARG_LUKS_PBKDF_TYPE             },
                 { "luks-pbkdf-hash-algorithm",   required_argument, NULL, ARG_LUKS_PBKDF_HASH_ALGORITHM   },
+                { "luks-pbkdf-force-iterations", required_argument, NULL, ARG_LUKS_PBKDF_FORCE_ITERATIONS },
                 { "luks-pbkdf-time-cost",        required_argument, NULL, ARG_LUKS_PBKDF_TIME_COST        },
                 { "luks-pbkdf-memory-cost",      required_argument, NULL, ARG_LUKS_PBKDF_MEMORY_COST      },
                 { "luks-pbkdf-parallel-threads", required_argument, NULL, ARG_LUKS_PBKDF_PARALLEL_THREADS },
+                { "luks-sector-size",            required_argument, NULL, ARG_LUKS_SECTOR_SIZE            },
                 { "nosuid",                      required_argument, NULL, ARG_NOSUID                      },
                 { "nodev",                       required_argument, NULL, ARG_NODEV                       },
                 { "noexec",                      required_argument, NULL, ARG_NOEXEC                      },
@@ -3068,10 +3075,12 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_LUKS_VOLUME_KEY_SIZE:
+                case ARG_LUKS_PBKDF_FORCE_ITERATIONS:
                 case ARG_LUKS_PBKDF_PARALLEL_THREADS:
                 case ARG_RATE_LIMIT_BURST: {
                         const char *field =
                                        c == ARG_LUKS_VOLUME_KEY_SIZE ? "luksVolumeKeySize" :
+                                c == ARG_LUKS_PBKDF_FORCE_ITERATIONS ? "luksPbkdfForceIterations" :
                                 c == ARG_LUKS_PBKDF_PARALLEL_THREADS ? "luksPbkdfParallelThreads" :
                                            c == ARG_RATE_LIMIT_BURST ? "rateLimitBurst" : NULL;
                         unsigned n;
@@ -3091,6 +3100,28 @@ static int parse_argv(int argc, char *argv[]) {
                         r = json_variant_set_field_unsigned(&arg_identity_extra, field, n);
                         if (r < 0)
                                 return log_error_errno(r, "Failed to set %s field: %m", field);
+
+                        break;
+                }
+
+                case ARG_LUKS_SECTOR_SIZE: {
+                        uint64_t ss;
+
+                        if (isempty(optarg)) {
+                                r = drop_from_identity("luksSectorSize");
+                                if (r < 0)
+                                        return r;
+
+                                break;
+                        }
+
+                        r = parse_sector_size(optarg, &ss);
+                        if (r < 0)
+                                return r;
+
+                        r = json_variant_set_field_unsigned(&arg_identity_extra, "luksSectorSize", ss);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to set sector size field: %m");
 
                         break;
                 }

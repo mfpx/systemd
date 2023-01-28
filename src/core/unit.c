@@ -22,6 +22,7 @@
 #include "dbus-unit.h"
 #include "dbus.h"
 #include "dropin.h"
+#include "env-util.h"
 #include "escape.h"
 #include "execute.h"
 #include "fd-util.h"
@@ -114,20 +115,20 @@ Unit* unit_new(Manager *m, size_t size) {
         u->cgroup_invalidated_mask |= CGROUP_MASK_BPF_FIREWALL;
         u->failure_action_exit_status = u->success_action_exit_status = -1;
 
-        u->ip_accounting_ingress_map_fd = -1;
-        u->ip_accounting_egress_map_fd = -1;
+        u->ip_accounting_ingress_map_fd = -EBADF;
+        u->ip_accounting_egress_map_fd = -EBADF;
         for (CGroupIOAccountingMetric i = 0; i < _CGROUP_IO_ACCOUNTING_METRIC_MAX; i++)
                 u->io_accounting_last[i] = UINT64_MAX;
 
-        u->ipv4_allow_map_fd = -1;
-        u->ipv6_allow_map_fd = -1;
-        u->ipv4_deny_map_fd = -1;
-        u->ipv6_deny_map_fd = -1;
+        u->ipv4_allow_map_fd = -EBADF;
+        u->ipv6_allow_map_fd = -EBADF;
+        u->ipv4_deny_map_fd = -EBADF;
+        u->ipv6_deny_map_fd = -EBADF;
 
         u->last_section_private = -1;
 
         u->start_ratelimit = (RateLimit) { m->default_start_limit_interval, m->default_start_limit_burst };
-        u->auto_start_stop_ratelimit = (RateLimit) { 10 * USEC_PER_SEC, 16 };
+        u->auto_start_stop_ratelimit = (const RateLimit) { 10 * USEC_PER_SEC, 16 };
 
         return u;
 }
@@ -686,7 +687,7 @@ Unit* unit_free(Unit *u) {
         u->match_bus_slot = sd_bus_slot_unref(u->match_bus_slot);
         u->bus_track = sd_bus_track_unref(u->bus_track);
         u->deserialized_refs = strv_free(u->deserialized_refs);
-        u->pending_freezer_message = sd_bus_message_unref(u->pending_freezer_message);
+        u->pending_freezer_invocation = sd_bus_message_unref(u->pending_freezer_invocation);
 
         unit_free_requires_mounts_for(u);
 
@@ -719,7 +720,6 @@ Unit* unit_free(Unit *u) {
 
         if (u->on_console)
                 manager_unref_console(u->manager);
-
 
         fdset_free(u->initial_socket_bind_link_fds);
 #if BPF_FRAMEWORK
@@ -937,29 +937,17 @@ static int unit_reserve_dependencies(Unit *u, Unit *other) {
         return 0;
 }
 
-static void unit_maybe_warn_about_dependency(
-                Unit *u,
-                const char *other_id,
-                UnitDependency dependency) {
-
-        assert(u);
-
+static bool unit_should_warn_about_dependency(UnitDependency dependency) {
         /* Only warn about some unit types */
-        if (!IN_SET(dependency,
-                    UNIT_CONFLICTS,
-                    UNIT_CONFLICTED_BY,
-                    UNIT_BEFORE,
-                    UNIT_AFTER,
-                    UNIT_ON_SUCCESS,
-                    UNIT_ON_FAILURE,
-                    UNIT_TRIGGERS,
-                    UNIT_TRIGGERED_BY))
-                return;
-
-        if (streq_ptr(u->id, other_id))
-                log_unit_warning(u, "Dependency %s=%s dropped", unit_dependency_to_string(dependency), u->id);
-        else
-                log_unit_warning(u, "Dependency %s=%s dropped, merged into %s", unit_dependency_to_string(dependency), strna(other_id), u->id);
+        return IN_SET(dependency,
+                      UNIT_CONFLICTS,
+                      UNIT_CONFLICTED_BY,
+                      UNIT_BEFORE,
+                      UNIT_AFTER,
+                      UNIT_ON_SUCCESS,
+                      UNIT_ON_FAILURE,
+                      UNIT_TRIGGERS,
+                      UNIT_TRIGGERED_BY);
 }
 
 static int unit_per_dependency_type_hashmap_update(
@@ -1044,11 +1032,10 @@ static int unit_add_dependency_hashmap(
         return unit_per_dependency_type_hashmap_update(per_type, other, origin_mask, destination_mask);
 }
 
-static void unit_merge_dependencies(
-                Unit *u,
-                Unit *other) {
-
-        int r;
+static void unit_merge_dependencies(Unit *u, Unit *other) {
+        Hashmap *deps;
+        void *dt; /* Actually of type UnitDependency, except that we don't bother casting it here,
+                   * since the hashmaps all want it as void pointer. */
 
         assert(u);
         assert(other);
@@ -1056,17 +1043,28 @@ static void unit_merge_dependencies(
         if (u == other)
                 return;
 
+        /* First, remove dependency to other. */
+        HASHMAP_FOREACH_KEY(deps, dt, u->dependencies) {
+                if (hashmap_remove(deps, other) && unit_should_warn_about_dependency(UNIT_DEPENDENCY_FROM_PTR(dt)))
+                        log_unit_warning(u, "Dependency %s=%s is dropped, as %s is merged into %s.",
+                                         unit_dependency_to_string(UNIT_DEPENDENCY_FROM_PTR(dt)),
+                                         other->id, other->id, u->id);
+
+                if (hashmap_isempty(deps))
+                        hashmap_free(hashmap_remove(u->dependencies, dt));
+        }
+
         for (;;) {
                 _cleanup_(hashmap_freep) Hashmap *other_deps = NULL;
                 UnitDependencyInfo di_back;
                 Unit *back;
-                void *dt; /* Actually of type UnitDependency, except that we don't bother casting it here,
-                           * since the hashmaps all want it as void pointer. */
 
                 /* Let's focus on one dependency type at a time, that 'other' has defined. */
                 other_deps = hashmap_steal_first_key_and_value(other->dependencies, &dt);
                 if (!other_deps)
                         break; /* done! */
+
+                deps = hashmap_get(u->dependencies, dt);
 
                 /* Now iterate through all dependencies of this dependency type, of 'other'. We refer to the
                  * referenced units as 'back'. */
@@ -1077,7 +1075,12 @@ static void unit_merge_dependencies(
                         if (back == u) {
                                 /* This is a dependency pointing back to the unit we want to merge with?
                                  * Suppress it (but warn) */
-                                unit_maybe_warn_about_dependency(u, other->id, UNIT_DEPENDENCY_FROM_PTR(dt));
+                                if (unit_should_warn_about_dependency(UNIT_DEPENDENCY_FROM_PTR(dt)))
+                                        log_unit_warning(u, "Dependency %s=%s in %s is dropped, as %s is merged into %s.",
+                                                         unit_dependency_to_string(UNIT_DEPENDENCY_FROM_PTR(dt)),
+                                                         u->id, other->id, other->id, u->id);
+
+                                hashmap_remove(other_deps, back);
                                 continue;
                         }
 
@@ -1096,41 +1099,21 @@ static void unit_merge_dependencies(
                                                           di_move.origin_mask,
                                                           di_move.destination_mask) >= 0);
                         }
-                }
-
-                /* Now all references towards 'other' of the current type 'dt' are corrected to point to
-                 * 'u'. Lets's now move the deps of type 'dt' from 'other' to 'u'. First, let's try to move
-                 * them per type wholesale. */
-                r = hashmap_put(u->dependencies, dt, other_deps);
-                if (r == -EEXIST) {
-                        Hashmap *deps;
 
                         /* The target unit already has dependencies of this type, let's then merge this individually. */
-
-                        assert_se(deps = hashmap_get(u->dependencies, dt));
-
-                        for (;;) {
-                                UnitDependencyInfo di_move;
-
-                                /* Get first dep */
-                                di_move.data = hashmap_steal_first_key_and_value(other_deps, (void**) &back);
-                                if (!di_move.data)
-                                        break; /* done */
-                                if (back == u) {
-                                        /* Would point back to us, ignore */
-                                        unit_maybe_warn_about_dependency(u, other->id, UNIT_DEPENDENCY_FROM_PTR(dt));
-                                        continue;
-                                }
-
-                                assert_se(unit_per_dependency_type_hashmap_update(deps, back, di_move.origin_mask, di_move.destination_mask) >= 0);
-                        }
-                } else {
-                        assert_se(r >= 0);
-                        TAKE_PTR(other_deps);
-
-                        if (hashmap_remove(other_deps, u))
-                                unit_maybe_warn_about_dependency(u, other->id, UNIT_DEPENDENCY_FROM_PTR(dt));
+                        if (deps)
+                                assert_se(unit_per_dependency_type_hashmap_update(
+                                                          deps,
+                                                          back,
+                                                          di_back.origin_mask,
+                                                          di_back.destination_mask) >= 0);
                 }
+
+                /* Now all references towards 'other' of the current type 'dt' are corrected to point to 'u'.
+                 * Lets's now move the deps of type 'dt' from 'other' to 'u'. If the unit does not have
+                 * dependencies of this type, let's move them per type wholesale. */
+                if (!deps)
+                        assert_se(hashmap_put(u->dependencies, dt, TAKE_PTR(other_deps)) >= 0);
         }
 
         other->dependencies = hashmap_free(other->dependencies);
@@ -1176,17 +1159,17 @@ int unit_merge(Unit *u, Unit *other) {
         if (r < 0)
                 return r;
 
-        /* Merge names */
-        r = unit_merge_names(u, other);
-        if (r < 0)
-                return r;
-
         /* Redirect all references */
         while (other->refs_by_target)
                 unit_ref_set(other->refs_by_target, other->refs_by_target->source, u);
 
         /* Merge dependencies */
         unit_merge_dependencies(u, other);
+
+        /* Merge names. It is better to do that after merging deps, otherwise the log message contains n/a. */
+        r = unit_merge_names(u, other);
+        if (r < 0)
+                return r;
 
         other->load_state = UNIT_MERGED;
         other->merged_into = u;
@@ -3066,7 +3049,6 @@ int unit_add_dependency(
                 [UNIT_IN_SLICE]               = UNIT_SLICE_OF,
                 [UNIT_SLICE_OF]               = UNIT_IN_SLICE,
         };
-        Unit *original_u = u, *original_other = other;
         UnitDependencyAtom a;
         int r;
 
@@ -3085,7 +3067,9 @@ int unit_add_dependency(
 
         /* We won't allow dependencies on ourselves. We will not consider them an error however. */
         if (u == other) {
-                unit_maybe_warn_about_dependency(original_u, original_other->id, d);
+                if (unit_should_warn_about_dependency(d))
+                        log_unit_warning(u, "Dependency %s=%s is dropped.",
+                                         unit_dependency_to_string(d), u->id);
                 return 0;
         }
 
@@ -3992,14 +3976,26 @@ UnitFileState unit_get_unit_file_state(Unit *u) {
 }
 
 int unit_get_unit_file_preset(Unit *u) {
+        int r;
+
         assert(u);
 
-        if (u->unit_file_preset < 0 && u->fragment_path)
+        if (u->unit_file_preset < 0 && u->fragment_path) {
+                _cleanup_free_ char *bn = NULL;
+
+                r = path_extract_filename(u->fragment_path, &bn);
+                if (r < 0)
+                        return (u->unit_file_preset = r);
+
+                if (r == O_DIRECTORY)
+                        return (u->unit_file_preset = -EISDIR);
+
                 u->unit_file_preset = unit_file_query_preset(
                                 u->manager->unit_file_scope,
                                 NULL,
-                                basename(u->fragment_path),
+                                bn,
                                 NULL);
+        }
 
         return u->unit_file_preset;
 }
@@ -4131,6 +4127,9 @@ int unit_patch_contexts(Unit *u) {
                         ec->no_new_privileges = true;
                         ec->restrict_suid_sgid = true;
                 }
+
+                for (ExecDirectoryType dt = 0; dt < _EXEC_DIRECTORY_TYPE_MAX; dt++)
+                        exec_directory_sort(ec->directories + dt);
         }
 
         cc = unit_get_cgroup_context(u);
@@ -4140,34 +4139,36 @@ int unit_patch_contexts(Unit *u) {
                     cc->device_policy == CGROUP_DEVICE_POLICY_AUTO)
                         cc->device_policy = CGROUP_DEVICE_POLICY_CLOSED;
 
-                if ((ec->root_image || ec->mount_images) &&
-                    (cc->device_policy != CGROUP_DEVICE_POLICY_AUTO || cc->device_allow)) {
+                /* Only add these if needed, as they imply that everything else is blocked. */
+                if (cc->device_policy != CGROUP_DEVICE_POLICY_AUTO || cc->device_allow) {
+                        if (ec->root_image || ec->mount_images) {
 
-                        /* When RootImage= or MountImages= is specified, the following devices are touched. */
-                        FOREACH_STRING(p, "/dev/loop-control", "/dev/mapper/control") {
-                                r = cgroup_add_device_allow(cc, p, "rw");
+                                /* When RootImage= or MountImages= is specified, the following devices are touched. */
+                                FOREACH_STRING(p, "/dev/loop-control", "/dev/mapper/control") {
+                                        r = cgroup_add_device_allow(cc, p, "rw");
+                                        if (r < 0)
+                                                return r;
+                                }
+                                FOREACH_STRING(p, "block-loop", "block-blkext", "block-device-mapper") {
+                                        r = cgroup_add_device_allow(cc, p, "rwm");
+                                        if (r < 0)
+                                                return r;
+                                }
+
+                                /* Make sure "block-loop" can be resolved, i.e. make sure "loop" shows up in /proc/devices.
+                                * Same for mapper and verity. */
+                                FOREACH_STRING(p, "modprobe@loop.service", "modprobe@dm_mod.service", "modprobe@dm_verity.service") {
+                                        r = unit_add_two_dependencies_by_name(u, UNIT_AFTER, UNIT_WANTS, p, true, UNIT_DEPENDENCY_FILE);
+                                        if (r < 0)
+                                                return r;
+                                }
+                        }
+
+                        if (ec->protect_clock) {
+                                r = cgroup_add_device_allow(cc, "char-rtc", "r");
                                 if (r < 0)
                                         return r;
                         }
-                        FOREACH_STRING(p, "block-loop", "block-blkext", "block-device-mapper") {
-                                r = cgroup_add_device_allow(cc, p, "rwm");
-                                if (r < 0)
-                                        return r;
-                        }
-
-                        /* Make sure "block-loop" can be resolved, i.e. make sure "loop" shows up in /proc/devices.
-                         * Same for mapper and verity. */
-                        FOREACH_STRING(p, "modprobe@loop.service", "modprobe@dm_mod.service", "modprobe@dm_verity.service") {
-                                r = unit_add_two_dependencies_by_name(u, UNIT_AFTER, UNIT_WANTS, p, true, UNIT_DEPENDENCY_FILE);
-                                if (r < 0)
-                                        return r;
-                        }
-                }
-
-                if (ec->protect_clock) {
-                        r = cgroup_add_device_allow(cc, "char-rtc", "r");
-                        if (r < 0)
-                                return r;
                 }
         }
 
@@ -4463,7 +4464,7 @@ int unit_make_transient(Unit *u) {
         /* Let's open the file we'll write the transient settings into. This file is kept open as long as we are
          * creating the transient, and is closed in unit_load(), as soon as we start loading the file. */
 
-        RUN_WITH_UMASK(0022) {
+        WITH_UMASK(0022) {
                 f = fopen(path, "we");
                 if (!f)
                         return -errno;
@@ -4510,26 +4511,30 @@ static int log_kill(pid_t pid, int sig, void *userdata) {
         return 1;
 }
 
-static int operation_to_signal(const KillContext *c, KillOperation k, bool *noteworthy) {
+static int operation_to_signal(
+                const KillContext *c,
+                KillOperation k,
+                bool *ret_noteworthy) {
+
         assert(c);
 
         switch (k) {
 
         case KILL_TERMINATE:
         case KILL_TERMINATE_AND_LOG:
-                *noteworthy = false;
+                *ret_noteworthy = false;
                 return c->kill_signal;
 
         case KILL_RESTART:
-                *noteworthy = false;
+                *ret_noteworthy = false;
                 return restart_kill_signal(c);
 
         case KILL_KILL:
-                *noteworthy = true;
+                *ret_noteworthy = true;
                 return c->final_kill_signal;
 
         case KILL_WATCHDOG:
-                *noteworthy = true;
+                *ret_noteworthy = true;
                 return c->watchdog_signal;
 
         default:
@@ -4776,9 +4781,26 @@ int unit_setup_dynamic_creds(Unit *u) {
 }
 
 bool unit_type_supported(UnitType t) {
+        static int8_t cache[_UNIT_TYPE_MAX] = {}; /* -1: disabled, 1: enabled: 0: don't know */
+        int r;
+
         if (_unlikely_(t < 0))
                 return false;
         if (_unlikely_(t >= _UNIT_TYPE_MAX))
+                return false;
+
+        if (cache[t] == 0) {
+                char *e;
+
+                e = strjoina("SYSTEMD_SUPPORT_", unit_type_to_string(t));
+
+                r = getenv_bool(ascii_strupper(e));
+                if (r < 0 && r != -ENXIO)
+                        log_debug_errno(r, "Failed to parse $%s, ignoring: %m", e);
+
+                cache[t] = r == 0 ? -1 : 1;
+        }
+        if (cache[t] < 0)
                 return false;
 
         if (!unit_vtable[t]->supported)
@@ -4841,18 +4863,20 @@ int unit_fail_if_noncanonical(Unit *u, const char* where) {
 bool unit_is_pristine(Unit *u) {
         assert(u);
 
-        /* Check if the unit already exists or is already around,
-         * in a number of different ways. Note that to cater for unit
-         * types such as slice, we are generally fine with units that
-         * are marked UNIT_LOADED even though nothing was actually
-         * loaded, as those unit types don't require a file on disk. */
+        /* Check if the unit already exists or is already around, in a number of different ways. Note that to
+         * cater for unit types such as slice, we are generally fine with units that are marked UNIT_LOADED
+         * even though nothing was actually loaded, as those unit types don't require a file on disk.
+         *
+         * Note that we don't check for drop-ins here, because we allow drop-ins for transient units
+         * identically to non-transient units, both unit-specific and hierarchical. E.g. for a-b-c.service:
+         * service.d/….conf, a-.service.d/….conf, a-b-.service.d/….conf, a-b-c.service.d/….conf.
+         */
 
-        return !(!IN_SET(u->load_state, UNIT_NOT_FOUND, UNIT_LOADED) ||
-                 u->fragment_path ||
-                 u->source_path ||
-                 !strv_isempty(u->dropin_paths) ||
-                 u->job ||
-                 u->merged_into);
+        return IN_SET(u->load_state, UNIT_NOT_FOUND, UNIT_LOADED) &&
+               !u->fragment_path &&
+               !u->source_path &&
+               !u->job &&
+               !u->merged_into;
 }
 
 pid_t unit_control_pid(Unit *u) {
@@ -5266,7 +5290,7 @@ static int unit_export_log_level_max(Unit *u, const ExecContext *c) {
 }
 
 static int unit_export_log_extra_fields(Unit *u, const ExecContext *c) {
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         struct iovec *iovec;
         const char *p;
         char *pattern;
@@ -5741,6 +5765,7 @@ void unit_destroy_runtime_data(Unit *u, const ExecContext *context) {
                 exec_context_destroy_runtime_directory(context, u->manager->prefix[EXEC_DIRECTORY_RUNTIME]);
 
         exec_context_destroy_credentials(context, u->manager->prefix[EXEC_DIRECTORY_RUNTIME], u->id);
+        exec_context_destroy_mount_ns_dir(u);
 }
 
 int unit_clean(Unit *u, ExecCleanMask mask) {
@@ -5769,7 +5794,7 @@ int unit_clean(Unit *u, ExecCleanMask mask) {
                 return -EBUSY;
 
         state = unit_active_state(u);
-        if (!IN_SET(state, UNIT_INACTIVE))
+        if (state != UNIT_INACTIVE)
                 return -EBUSY;
 
         return UNIT_VTABLE(u)->clean(u, mask);
@@ -5804,7 +5829,7 @@ void unit_frozen(Unit *u) {
 
         u->freezer_state = FREEZER_FROZEN;
 
-        bus_unit_send_pending_freezer_message(u);
+        bus_unit_send_pending_freezer_message(u, false);
 }
 
 void unit_thawed(Unit *u) {
@@ -5812,7 +5837,7 @@ void unit_thawed(Unit *u) {
 
         u->freezer_state = FREEZER_RUNNING;
 
-        bus_unit_send_pending_freezer_message(u);
+        bus_unit_send_pending_freezer_message(u, false);
 }
 
 static int unit_freezer_action(Unit *u, FreezerAction action) {
@@ -5837,7 +5862,8 @@ static int unit_freezer_action(Unit *u, FreezerAction action) {
         if (s != UNIT_ACTIVE)
                 return -EHOSTDOWN;
 
-        if (IN_SET(u->freezer_state, FREEZER_FREEZING, FREEZER_THAWING))
+        if ((IN_SET(u->freezer_state, FREEZER_FREEZING, FREEZER_THAWING) && action == FREEZER_FREEZE) ||
+            (u->freezer_state == FREEZER_THAWING && action == FREEZER_THAW))
                 return -EALREADY;
 
         r = method(u);

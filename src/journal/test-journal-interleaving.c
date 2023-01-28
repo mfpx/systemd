@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "sd-id128.h"
 #include "sd-journal.h"
 
 #include "alloc-util.h"
@@ -14,7 +15,6 @@
 #include "parse-util.h"
 #include "rm-rf.h"
 #include "tests.h"
-#include "util.h"
 
 /* This program tests skipping around in a multi-file journal. */
 
@@ -30,7 +30,7 @@ _noreturn_ static void log_assert_errno(const char *text, int error, const char 
         do {                                                            \
                 int _r_ = (expr);                                       \
                 if (_unlikely_(_r_ < 0))                                \
-                        log_assert_errno(#expr, -_r_, PROJECT_FILE, __LINE__, __PRETTY_FUNCTION__); \
+                        log_assert_errno(#expr, -_r_, PROJECT_FILE, __LINE__, __func__); \
         } while (false)
 
 static ManagedJournalFile *test_open(const char *name) {
@@ -158,7 +158,6 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_head(j));
-        assert_ret(sd_journal_previous(j) == 0);
         assert_ret(sd_journal_next(j));
         test_check_numbers_down(j, 4);
         sd_journal_close(j);
@@ -167,7 +166,6 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_tail(j));
-        assert_ret(sd_journal_next(j) == 0);
         assert_ret(sd_journal_previous(j));
         test_check_numbers_up(j, 4);
         sd_journal_close(j);
@@ -176,7 +174,6 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_tail(j));
-        assert_ret(sd_journal_next(j) == 0);
         assert_ret(r = sd_journal_previous_skip(j, 4));
         assert_se(r == 4);
         test_check_numbers_down(j, 4);
@@ -186,7 +183,6 @@ static void test_skip_one(void (*setup)(void)) {
          */
         assert_ret(sd_journal_open_directory(&j, t, 0));
         assert_ret(sd_journal_seek_head(j));
-        assert_ret(sd_journal_previous(j) == 0);
         assert_ret(r = sd_journal_next_skip(j, 4));
         assert_se(r == 4);
         test_check_numbers_up(j, 4);
@@ -210,7 +206,7 @@ TEST(skip) {
         test_skip_one(setup_interleaved);
 }
 
-TEST(sequence_numbers) {
+static void test_sequence_numbers_one(void) {
         _cleanup_(mmap_cache_unrefp) MMapCache *m = NULL;
         char t[] = "/var/tmp/journal-seq-XXXXXX";
         ManagedJournalFile *one, *two;
@@ -267,22 +263,26 @@ TEST(sequence_numbers) {
 
         test_close(one);
 
-        /* restart server */
-        seqnum = 0;
+        /* If the machine-id is not initialized, the header file verification
+         * (which happens when re-opening a journal file) will fail. */
+        if (sd_id128_get_machine(NULL) >= 0) {
+                /* restart server */
+                seqnum = 0;
 
-        assert_se(managed_journal_file_open(-1, "two.journal", O_RDWR, JOURNAL_COMPRESS, 0,
-                                            UINT64_MAX, NULL, m, NULL, NULL, &two) == 0);
+                assert_se(managed_journal_file_open(-1, "two.journal", O_RDWR, JOURNAL_COMPRESS, 0,
+                                                    UINT64_MAX, NULL, m, NULL, NULL, &two) == 0);
 
-        assert_se(sd_id128_equal(two->file->header->seqnum_id, seqnum_id));
+                assert_se(sd_id128_equal(two->file->header->seqnum_id, seqnum_id));
 
-        append_number(two, 7, &seqnum);
-        printf("seqnum=%"PRIu64"\n", seqnum);
-        assert_se(seqnum == 5);
+                append_number(two, 7, &seqnum);
+                printf("seqnum=%"PRIu64"\n", seqnum);
+                assert_se(seqnum == 5);
 
-        /* So..., here we have the same seqnum in two files with the
-         * same seqnum_id. */
+                /* So..., here we have the same seqnum in two files with the
+                 * same seqnum_id. */
 
-        test_close(two);
+                test_close(two);
+        }
 
         log_info("Done...");
 
@@ -293,6 +293,14 @@ TEST(sequence_numbers) {
 
                 assert_se(rm_rf(t, REMOVE_ROOT|REMOVE_PHYSICAL) >= 0);
         }
+}
+
+TEST(sequence_numbers) {
+        assert_se(setenv("SYSTEMD_JOURNAL_COMPACT", "0", 1) >= 0);
+        test_sequence_numbers_one();
+
+        assert_se(setenv("SYSTEMD_JOURNAL_COMPACT", "1", 1) >= 0);
+        test_sequence_numbers_one();
 }
 
 static int intro(void) {

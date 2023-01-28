@@ -38,6 +38,17 @@
              devlink;                                   \
              devlink = sd_device_get_devlink_next(device))
 
+#define _FOREACH_DEVICE_CHILD(device, child, suffix_ptr)                \
+        for (child = sd_device_get_child_first(device, suffix_ptr);     \
+             child;                                                     \
+             child = sd_device_get_child_next(device, suffix_ptr))
+
+#define FOREACH_DEVICE_CHILD(device, child)                             \
+        _FOREACH_DEVICE_CHILD(device, child, NULL)
+
+#define FOREACH_DEVICE_CHILD_WITH_SUFFIX(device, child, suffix)         \
+        _FOREACH_DEVICE_CHILD(device, child, &suffix)
+
 #define FOREACH_DEVICE(enumerator, device)                               \
         for (device = sd_device_enumerator_get_device_first(enumerator); \
              device;                                                     \
@@ -88,3 +99,5 @@ static inline int devname_from_stat_rdev(const struct stat *st, char **ret) {
         return devname_from_devnum(st->st_mode, st->st_rdev, ret);
 }
 int device_open_from_devnum(mode_t mode, dev_t devnum, int flags, char **ret);
+
+char** device_make_log_fields(sd_device *device);

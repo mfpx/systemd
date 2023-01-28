@@ -273,7 +273,7 @@ int dns_transaction_new(
                 return -ENOMEM;
 
         *t = (DnsTransaction) {
-                .dns_udp_fd = -1,
+                .dns_udp_fd = -EBADF,
                 .answer_source = _DNS_TRANSACTION_SOURCE_INVALID,
                 .answer_dnssec_result = _DNSSEC_RESULT_INVALID,
                 .answer_nsec_ttl = UINT32_MAX,
@@ -669,7 +669,7 @@ static uint16_t dns_transaction_port(DnsTransaction *t) {
 static int dns_transaction_emit_tcp(DnsTransaction *t) {
         usec_t stream_timeout_usec = DNS_STREAM_DEFAULT_TIMEOUT_USEC;
         _cleanup_(dns_stream_unrefp) DnsStream *s = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         union sockaddr_union sa;
         DnsStreamType type;
         int r;
@@ -753,7 +753,7 @@ static int dns_transaction_emit_tcp(DnsTransaction *t) {
                 if (r < 0)
                         return r;
 
-                fd = -1;
+                fd = -EBADF;
 
 #if ENABLE_DNS_OVER_TLS
                 if (t->scope->protocol == DNS_PROTOCOL_DNS &&
@@ -817,6 +817,7 @@ static void dns_transaction_cache_answer(DnsTransaction *t) {
 
         dns_cache_put(&t->scope->cache,
                       t->scope->manager->enable_cache,
+                      t->scope->protocol,
                       dns_transaction_key(t),
                       t->answer_rcode,
                       t->answer,
@@ -3331,10 +3332,19 @@ static int dnssec_validate_records(
                         }
                 }
 
+                /* https://datatracker.ietf.org/doc/html/rfc6840#section-5.2 */
+                if (result == DNSSEC_UNSUPPORTED_ALGORITHM) {
+                        r = dns_answer_move_by_key(validated, &t->answer, rr->key, 0, NULL);
+                        if (r < 0)
+                                return r;
+
+                        manager_dnssec_verdict(t->scope->manager, DNSSEC_INSECURE, rr->key);
+                        return 1;
+                }
+
                 if (IN_SET(result,
                            DNSSEC_MISSING_KEY,
-                           DNSSEC_SIGNATURE_EXPIRED,
-                           DNSSEC_UNSUPPORTED_ALGORITHM)) {
+                           DNSSEC_SIGNATURE_EXPIRED)) {
 
                         r = dns_transaction_dnskey_authenticated(t, rr);
                         if (r < 0 && r != -ENXIO)

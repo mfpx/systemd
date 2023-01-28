@@ -10,7 +10,7 @@
 #include "bus-get-properties.h"
 #include "bus-log-control-api.h"
 #include "bus-polkit.h"
-#include "def.h"
+#include "constants.h"
 #include "env-util.h"
 #include "fd-util.h"
 #include "float.h"
@@ -32,7 +32,6 @@
 #include "strv.h"
 #include "syslog-util.h"
 #include "user-util.h"
-#include "util.h"
 #include "web-util.h"
 
 typedef struct Transfer Transfer;
@@ -95,6 +94,9 @@ struct Manager {
         int notify_fd;
 
         sd_event_source *notify_event_source;
+
+        bool use_btrfs_subvol;
+        bool use_btrfs_quota;
 };
 
 #define TRANSFERS_MAX 64
@@ -155,9 +157,9 @@ static int transfer_new(Manager *m, Transfer **ret) {
 
         *t = (Transfer) {
                 .type = _TRANSFER_TYPE_INVALID,
-                .log_fd = -1,
-                .stdin_fd = -1,
-                .stdout_fd = -1,
+                .log_fd = -EBADF,
+                .stdin_fd = -EBADF,
+                .stdout_fd = -EBADF,
                 .verify = _IMPORT_VERIFY_INVALID,
                 .progress_percent= UINT_MAX,
         };
@@ -354,7 +356,7 @@ static int transfer_on_log(sd_event_source *s, int fd, uint32_t revents, void *u
 }
 
 static int transfer_start(Transfer *t) {
-        _cleanup_close_pair_ int pipefd[2] = { -1, -1 };
+        _cleanup_close_pair_ int pipefd[2] = PIPE_EBADF;
         int r;
 
         assert(t);
@@ -629,9 +631,14 @@ static int manager_new(Manager **ret) {
 
         assert(ret);
 
-        m = new0(Manager, 1);
+        m = new(Manager, 1);
         if (!m)
                 return -ENOMEM;
+
+        *m = (Manager) {
+                .use_btrfs_subvol = true,
+                .use_btrfs_quota = true,
+        };
 
         r = sd_event_default(&m->event);
         if (r < 0)
@@ -720,7 +727,7 @@ static int method_import_tar_or_raw(sd_bus_message *msg, void *userdata, sd_bus_
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS,
                                          "Local name %s is invalid", local);
 
-        r = setup_machine_directory(error);
+        r = setup_machine_directory(error, m->use_btrfs_subvol, m->use_btrfs_quota);
         if (r < 0)
                 return r;
 
@@ -789,7 +796,7 @@ static int method_import_fs(sd_bus_message *msg, void *userdata, sd_bus_error *e
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS,
                                          "Local name %s is invalid", local);
 
-        r = setup_machine_directory(error);
+        r = setup_machine_directory(error, m->use_btrfs_subvol, m->use_btrfs_quota);
         if (r < 0)
                 return r;
 
@@ -940,7 +947,7 @@ static int method_pull_tar_or_raw(sd_bus_message *msg, void *userdata, sd_bus_er
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS,
                                          "Unknown verification mode %s", verify);
 
-        r = setup_machine_directory(error);
+        r = setup_machine_directory(error, m->use_btrfs_subvol, m->use_btrfs_quota);
         if (r < 0)
                 return r;
 
@@ -1352,6 +1359,28 @@ static int manager_run(Manager *m) {
                         m);
 }
 
+static void manager_parse_env(Manager *m) {
+        int r;
+
+        assert(m);
+
+        /* Same as src/import/{import,pull}.c:
+         * Let's make these relatively low-level settings also controllable via env vars. User can then set
+         * them for systemd-importd.service if they like to tweak behaviour */
+
+        r = getenv_bool("SYSTEMD_IMPORT_BTRFS_SUBVOL");
+        if (r >= 0)
+                m->use_btrfs_subvol = r;
+        else if (r != -ENXIO)
+                log_warning_errno(r, "Failed to parse $SYSTEMD_IMPORT_BTRFS_SUBVOL: %m");
+
+        r = getenv_bool("SYSTEMD_IMPORT_BTRFS_QUOTA");
+        if (r >= 0)
+                m->use_btrfs_quota = r;
+        else if (r != -ENXIO)
+                log_warning_errno(r, "Failed to parse $SYSTEMD_IMPORT_BTRFS_QUOTA: %m");
+}
+
 static int run(int argc, char *argv[]) {
         _cleanup_(manager_unrefp) Manager *m = NULL;
         int r;
@@ -1373,6 +1402,8 @@ static int run(int argc, char *argv[]) {
         r = manager_new(&m);
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate manager object: %m");
+
+        manager_parse_env(m);
 
         r = manager_add_bus_objects(m);
         if (r < 0)

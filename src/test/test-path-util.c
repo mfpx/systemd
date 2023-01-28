@@ -16,7 +16,6 @@
 #include "strv.h"
 #include "tests.h"
 #include "tmpfile-util.h"
-#include "util.h"
 
 TEST(print_paths) {
         log_info("DEFAULT_PATH=%s", DEFAULT_PATH);
@@ -196,7 +195,7 @@ TEST(path_equal_root) {
 TEST(find_executable_full) {
         char *p;
         char* test_file_name;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         char fn[] = "/tmp/test-XXXXXX";
 
         assert_se(find_executable_full("sh", NULL, NULL, true, &p, NULL) == 0);
@@ -279,7 +278,7 @@ TEST(find_executable) {
 
 static void test_find_executable_exec_one(const char *path) {
         _cleanup_free_ char *t = NULL;
-        _cleanup_close_ int fd = -1;
+        _cleanup_close_ int fd = -EBADF;
         pid_t pid;
         int r;
 
@@ -445,10 +444,10 @@ TEST(fsck_exists) {
         assert_se(unsetenv("PATH") == 0);
 
         /* fsck.minix is provided by util-linux and will probably exist. */
-        assert_se(fsck_exists("minix") == 1);
+        assert_se(fsck_exists_for_fstype("minix") == 1);
 
-        assert_se(fsck_exists("AbCdE") == 0);
-        assert_se(fsck_exists("/../bin/") == 0);
+        assert_se(fsck_exists_for_fstype("AbCdE") == 0);
+        assert_se(fsck_exists_for_fstype("/../bin/") == 0);
 }
 
 static void test_path_make_relative_one(const char *from, const char *to, const char *expected) {
@@ -601,23 +600,19 @@ TEST(prefix_root) {
 TEST(file_in_same_dir) {
         char *t;
 
-        t = file_in_same_dir("/", "a");
+        assert_se(file_in_same_dir("/", "a", &t) == -EADDRNOTAVAIL);
+
+        assert_se(file_in_same_dir("/", "/a", &t) >= 0);
         assert_se(streq(t, "/a"));
         free(t);
 
-        t = file_in_same_dir("/", "/a");
-        assert_se(streq(t, "/a"));
+        assert_se(file_in_same_dir("", "a", &t) == -EINVAL);
+
+        assert_se(file_in_same_dir("a/", "x", &t) >= 0);
+        assert_se(streq(t, "x"));
         free(t);
 
-        t = file_in_same_dir("", "a");
-        assert_se(streq(t, "a"));
-        free(t);
-
-        t = file_in_same_dir("a/", "a");
-        assert_se(streq(t, "a/a"));
-        free(t);
-
-        t = file_in_same_dir("bar/foo", "bar");
+        assert_se(file_in_same_dir("bar/foo", "bar", &t) >= 0);
         assert_se(streq(t, "bar/bar"));
         free(t);
 }
@@ -806,10 +801,10 @@ static void test_path_extract_filename_one(const char *input, const char *output
         int r;
 
         r = path_extract_filename(input, &k);
-        log_info_errno(r, "%s → %s/%m [expected: %s/%s]",
-                       strnull(input),
-                       strnull(k), /* strerror(r) is printed via %m, to avoid that the two strerror()'s overwrite each other's buffers */
-                       strnull(output), ret < 0 ? strerror_safe(ret) : "-");
+        log_info("%s → %s/%s [expected: %s/%s]",
+                 strnull(input),
+                 strnull(k), r < 0 ? STRERROR(r) : "-",
+                 strnull(output), ret < 0 ? STRERROR(ret) : "-");
         assert_se(streq_ptr(k, output));
         assert_se(r == ret);
 }
@@ -850,10 +845,10 @@ static void test_path_extract_directory_one(const char *input, const char *outpu
         int r;
 
         r = path_extract_directory(input, &k);
-        log_info_errno(r, "%s → %s/%m [expected: %s/%s]",
-                       strnull(input),
-                       strnull(k), /* we output strerror_safe(r) via %m here, since otherwise the error buffer might be overwritten twice */
-                       strnull(output), strerror_safe(ret));
+        log_info("%s → %s/%s [expected: %s/%s]",
+                 strnull(input),
+                 strnull(k), r < 0 ? STRERROR(r) : "-",
+                 strnull(output), STRERROR(ret));
         assert_se(streq_ptr(k, output));
         assert_se(r == ret);
 

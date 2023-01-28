@@ -36,12 +36,9 @@ static void log_syntax_callback(const char *unit, int level, void *userdata) {
 }
 
 int verify_prepare_filename(const char *filename, char **ret) {
-        int r;
-        const char *name;
-        _cleanup_free_ char *abspath = NULL;
-        _cleanup_free_ char *dir = NULL;
-        _cleanup_free_ char *with_instance = NULL;
+        _cleanup_free_ char *abspath = NULL, *name = NULL, *dir = NULL, *with_instance = NULL;
         char *c;
+        int r;
 
         assert(filename);
         assert(ret);
@@ -50,7 +47,10 @@ int verify_prepare_filename(const char *filename, char **ret) {
         if (r < 0)
                 return r;
 
-        name = basename(abspath);
+        r = path_extract_filename(abspath, &name);
+        if (r < 0)
+                return r;
+
         if (!unit_name_is_valid(name, UNIT_NAME_ANY))
                 return -EINVAL;
 
@@ -214,7 +214,7 @@ static int verify_documentation(Unit *u, bool check_man) {
 }
 
 static int verify_unit(Unit *u, bool check_man, const char *root) {
-        _cleanup_(sd_bus_error_free) sd_bus_error err = SD_BUS_ERROR_NULL;
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r, k;
 
         assert(u);
@@ -223,9 +223,9 @@ static int verify_unit(Unit *u, bool check_man, const char *root) {
                 unit_dump(u, stdout, "\t");
 
         log_unit_debug(u, "Creating %s/start job", u->id);
-        r = manager_add_job(u->manager, JOB_START, u, JOB_REPLACE, NULL, &err, NULL);
+        r = manager_add_job(u->manager, JOB_START, u, JOB_REPLACE, NULL, &error, NULL);
         if (r < 0)
-                log_unit_error_errno(u, r, "Failed to create %s/start: %s", u->id, bus_error_message(&err, r));
+                log_unit_error_errno(u, r, "Failed to create %s/start: %s", u->id, bus_error_message(&error, r));
 
         k = verify_socket(u);
         if (k < 0 && r == 0)

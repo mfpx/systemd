@@ -534,17 +534,13 @@ static int route_convert(Manager *manager, const Route *route, ConvertedRoutes *
         return 1;
 }
 
-void link_mark_routes(Link *link, NetworkConfigSource source, const struct in6_addr *router) {
+void link_mark_routes(Link *link, NetworkConfigSource source) {
         Route *route;
 
         assert(link);
 
         SET_FOREACH(route, link->routes) {
                 if (route->source != source)
-                        continue;
-
-                if (source == NETWORK_CONFIG_SOURCE_NDISC &&
-                    router && !in6_addr_equal(router, &route->provider.in6))
                         continue;
 
                 route_mark(route);
@@ -782,6 +778,21 @@ int route_remove(Route *route) {
         link_ref(link);
 
         route_enter_removing(route);
+        return 0;
+}
+
+int route_remove_and_drop(Route *route) {
+        if (!route)
+                return 0;
+
+        route_cancel_request(route, NULL);
+
+        if (route_exists(route))
+                return route_remove(route);
+
+        if (route->state == 0)
+                route_free(route);
+
         return 0;
 }
 
@@ -1386,6 +1397,8 @@ static int route_process_request(Request *req, Link *link, Route *route) {
                         }
                 else
                         route_cancel_requesting(route);
+
+                return 1;
         }
 
         r = route_configure(route, sec, link, req);
@@ -1413,7 +1426,7 @@ int link_request_route(
                 route_netlink_handler_t netlink_handler,
                 Request **ret) {
 
-        Route *existing;
+        Route *existing = NULL;
         int r;
 
         assert(link);
@@ -1422,7 +1435,17 @@ int link_request_route(
         assert(route->source != NETWORK_CONFIG_SOURCE_FOREIGN);
         assert(!route_needs_convert(route));
 
-        if (route_get(link->manager, link, route, &existing) < 0) {
+        (void) route_get(link->manager, link, route, &existing);
+
+        if (route->lifetime_usec == 0) {
+                if (consume_object)
+                        route_free(route);
+
+                /* The requested route is outdated. Let's remove it. */
+                return route_remove_and_drop(existing);
+        }
+
+        if (!existing) {
                 _cleanup_(route_freep) Route *tmp = NULL;
 
                 if (consume_object)
@@ -2332,7 +2355,7 @@ int config_parse_route_table(
         r = manager_get_route_table_from_string(network->manager, rvalue, &n->table);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Could not parse route table number \"%s\", ignoring assignment: %m", rvalue);
+                           "Could not parse route table \"%s\", ignoring assignment: %m", rvalue);
                 return 0;
         }
 
